@@ -322,6 +322,43 @@ header .separator {
   background: linear-gradient(135deg, #4ade80, #2dd4bf);
 }
 
+/* FUNCTIONPEEKABOO CARD */
+.course-card.functionpeekaboo:hover {
+  border-color: #f9731640;
+}
+
+.course-card.functionpeekaboo::before {
+  background: linear-gradient(135deg, #f97316, #ef4444);
+}
+
+.course-card.functionpeekaboo:hover::before {
+  opacity: 1;
+}
+
+.course-card.functionpeekaboo .card-banner {
+  background: linear-gradient(135deg, #f9731615, #ef444415);
+  border-bottom: 1px solid #f9731620;
+}
+
+.course-card.functionpeekaboo .card-banner .icon-wrap {
+  background: linear-gradient(135deg, #f97316, #ef4444);
+}
+
+.course-card.functionpeekaboo .card-title {
+  background: linear-gradient(135deg, #f97316, #ef4444);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.course-card.functionpeekaboo .module-item .num {
+  background: #f9731620;
+  color: #f97316;
+}
+
+.course-card.functionpeekaboo .launch-btn {
+  background: linear-gradient(135deg, #f97316, #ef4444);
+}
+
 /* DRAUGR CARD */
 .course-card.draugr:hover {
   border-color: #a855f740;
@@ -549,11 +586,11 @@ footer {
 
 <div class="stats-bar">
   <div class="stat">
-    <div class="num">5</div>
+    <div class="num">6</div>
     <div class="label">Courses</div>
   </div>
   <div class="stat">
-    <div class="num">43</div>
+    <div class="num">51</div>
     <div class="label">Modules</div>
   </div>
   <div class="stat">
@@ -757,6 +794,58 @@ footer {
         <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Encryption &amp; Obfuscation</li>
         <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> The Hooka Go Library</li>
         <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> CLI Generator &amp; Full Chain</li>
+      </ul>
+    </div>
+
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          8 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  <!-- FUNCTIONPEEKABOO CARD -->
+  <a href="Project/FunctionPeekaboo/FunctionPeekaboo_index.html" class="course-card functionpeekaboo">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M20 12c-1.5 0-3-2-4-2s-2.5 2-4 2-3-2-4-2-2.5 2-4 2"/><path d="M20 12c-1.5 0-3 2-4 2s-2.5-2-4-2-3 2-4 2-2.5-2-4-2"/></svg>
+      </div>
+      <div>
+        <div class="card-title">FunctionPeekaboo</div>
+        <div class="card-subtitle">LLVM Self-Masking Functions</div>
+      </div>
+    </div>
+
+    <div class="card-body">
+      <p class="card-desc">
+        Compiler-level per-function self-masking via LLVM backend modifications. XOR encryption keeps ~98% of code masked
+        even at sleep&nbsp;0, defeating memory scanners while maintaining CET compatibility.
+      </p>
+
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C++ / LLVM</span>
+      </div>
+
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Memory Scanning &amp; Sleep</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> LLVM Compiler Architecture</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> PE Internals &amp; Sections</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Registration &amp; X86RetModPass</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Prologue &amp; Epilogue Stubs</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> The Handler &amp; XOR Engine</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Init &amp; Runtime Flow</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Detection, CET &amp; Nighthawk</li>
       </ul>
     </div>
 
