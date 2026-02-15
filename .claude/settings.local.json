@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "WebFetch(domain:racoten.github.io)",
+      "Bash(curl:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nOverhaul shared CSS/JS for professional course module styling\n\nComplete rewrite of course.css with proper dark theme, fixed sidebar\nnav, background grid/glow effects, polished cards, tables, code blocks,\nquiz UI, flow diagrams, responsive breakpoints, fade-in animations, and\nprint styles. Updated course.js with scroll-reveal, click-outside nav\nclose, and null-safety checks.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)"
     ]
   }
 }
