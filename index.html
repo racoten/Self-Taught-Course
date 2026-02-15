@@ -56,6 +56,7 @@ body {
 
 .bg-glow.g1 { background: #00d4ff; top: -200px; left: -100px; }
 .bg-glow.g2 { background: #c084fc; bottom: -200px; right: -100px; }
+.bg-glow.g3 { background: #22d3ee; bottom: -100px; left: 40%; opacity: .04; }
 
 /* HEADER */
 header {
@@ -133,7 +134,7 @@ header .separator {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   gap: 30px;
   max-width: 1100px;
   margin: 40px auto;
@@ -245,6 +246,43 @@ header .separator {
 
 .course-card.stardust .launch-btn {
   background: linear-gradient(135deg, #c084fc, #38bdf8);
+}
+
+/* LAYEREDSYSCALL CARD */
+.course-card.layeredsyscall:hover {
+  border-color: #22d3ee40;
+}
+
+.course-card.layeredsyscall::before {
+  background: linear-gradient(135deg, #22d3ee, #f97316);
+}
+
+.course-card.layeredsyscall:hover::before {
+  opacity: 1;
+}
+
+.course-card.layeredsyscall .card-banner {
+  background: linear-gradient(135deg, #22d3ee15, #f9731615);
+  border-bottom: 1px solid #22d3ee20;
+}
+
+.course-card.layeredsyscall .card-banner .icon-wrap {
+  background: linear-gradient(135deg, #22d3ee, #f97316);
+}
+
+.course-card.layeredsyscall .card-title {
+  background: linear-gradient(135deg, #22d3ee, #f97316);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.course-card.layeredsyscall .module-item .num {
+  background: #22d3ee20;
+  color: #22d3ee;
+}
+
+.course-card.layeredsyscall .launch-btn {
+  background: linear-gradient(135deg, #22d3ee, #f97316);
 }
 
 /* CARD BANNER */
@@ -427,6 +465,7 @@ footer {
 <div class="bg-grid"></div>
 <div class="bg-glow g1"></div>
 <div class="bg-glow g2"></div>
+<div class="bg-glow g3"></div>
 
 <header>
   <h1>Self-Taught Course</h1>
@@ -436,11 +475,11 @@ footer {
 
 <div class="stats-bar">
   <div class="stat">
-    <div class="num">2</div>
+    <div class="num">3</div>
     <div class="label">Courses</div>
   </div>
   <div class="stat">
-    <div class="num">19</div>
+    <div class="num">27</div>
     <div class="label">Modules</div>
   </div>
   <div class="stat">
@@ -548,6 +587,58 @@ footer {
         <div class="meta-item">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
           10 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  <!-- LAYEREDSYSCALL CARD -->
+  <a href="Project/LayeredSyscall/LayeredSyscall_index.html" class="course-card layeredsyscall">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+      </div>
+      <div>
+        <div class="card-title">LayeredSyscall</div>
+        <div class="card-subtitle">VEH Syscall Evasion Masterclass</div>
+      </div>
+    </div>
+
+    <div class="card-body">
+      <p class="card-desc">
+        Generate legitimate call stack frames with indirect syscalls by abusing Vectored Exception Handling.
+        Hardware breakpoints, CPU trap flags, and context manipulation to bypass user-land EDR hooks.
+      </p>
+
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C++ / x64</span>
+      </div>
+
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> EDR Hooks &amp; Detection</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Syscall Internals &amp; SSN</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> Exception Handling &amp; VEH</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Hardware Breakpoints</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Dual-Handler Architecture</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> Call Stack Construction</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Argument Marshalling</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Detection</li>
+      </ul>
+    </div>
+
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          8 Modules
         </div>
         <div class="meta-item">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>

@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: Windows Exception Handling &amp; VEH - LayeredSyscall Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F6E1;&#xFE0F;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#22d3ee;--accent2:#f97316;--gradient:linear-gradient(135deg,#22d3ee,#f97316)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>LayeredSyscall Course</h2>
+<span>VEH Syscall Evasion</span>
+</div>
+<a class="home-link" href="../LayeredSyscall_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. EDR Hooks &amp; Detection</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Syscall Internals &amp; SSN</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module3.html"><span>3. Exception Handling &amp; VEH</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Hardware Breakpoints</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Dual-Handler Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Call Stack Construction</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module7.html"><span>7. Argument Marshalling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: Windows Exception Handling &amp; VEH</h1>
+<p class="subtitle">The mechanism that lets LayeredSyscall intercept and redirect CPU execution.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>LayeredSyscall's entire architecture is built on <strong>Vectored Exception Handling (VEH)</strong>. This module explains how Windows dispatches exceptions, the difference between SEH and VEH, the structures your handler receives, and how modifying the <code>CONTEXT</code> record lets you redirect execution to arbitrary code.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Structured Exception Handling (SEH)</h2>
+
+<p><strong>SEH</strong> is the traditional Windows exception handling mechanism. It is <strong>frame-based</strong> and <strong>per-function</strong>, meaning handlers are tied to specific stack frames and function scopes.</p>
+
+<div class="card">
+<h4>SEH Characteristics</h4>
+<table>
+<tr><th>Property</th><th>Detail</th></tr>
+<tr><td>Scope</td><td>Per-function (tied to the <code>__try</code>/<code>__except</code> block)</td></tr>
+<tr><td>Registration</td><td>Compiler-generated; uses stack-based exception frames (<code>EXCEPTION_REGISTRATION_RECORD</code>)</td></tr>
+<tr><td>Syntax</td><td><code>__try { ... } __except(filter) { ... }</code> in MSVC</td></tr>
+<tr><td>Dispatch order</td><td>Innermost (most recent) to outermost frame</td></tr>
+<tr><td>Unwinding</td><td>Supports stack unwinding via <code>__finally</code> blocks</td></tr>
+</table>
+</div>
+
+<pre><code><span class="lang-tag">C</span>// SEH example - handler is scoped to this function
+__try {
+    // Code that might fault
+    int *p = NULL;
+    int x = *p;  // ACCESS_VIOLATION
+}
+__except (EXCEPTION_EXECUTE_HANDLER) {
+    // Only catches exceptions from within this __try block
+    printf("Caught exception in this function\n");
+}</code></pre>
+
+<p>SEH handlers are registered on the stack and automatically cleaned up when the function returns. They only handle exceptions that occur within their <code>__try</code> scope. This makes SEH <strong>unsuitable for LayeredSyscall</strong>, which needs to intercept exceptions that occur deep inside ntdll &mdash; far from any <code>__try</code> block in its own code.</p>
+
+<!-- ============================================================ -->
+<h2>2. Vectored Exception Handling (VEH)</h2>
+
+<p><strong>VEH</strong> is a process-wide exception handling mechanism introduced in Windows XP. Unlike SEH, VEH handlers are <strong>not tied to any stack frame</strong>. They are stored in an internal linked list and are invoked for <em>every</em> exception in the process, regardless of where it occurs.</p>
+
+<div class="card green">
+<h4>VEH Characteristics</h4>
+<table>
+<tr><th>Property</th><th>Detail</th></tr>
+<tr><td>Scope</td><td><strong>Process-wide</strong> &mdash; catches exceptions from ANY thread, ANY function</td></tr>
+<tr><td>Registration</td><td><code>AddVectoredExceptionHandler(Order, HandlerFunc)</code></td></tr>
+<tr><td>Storage</td><td>Internal linked list (not on the stack)</td></tr>
+<tr><td>Dispatch priority</td><td><strong>Called BEFORE SEH handlers</strong></td></tr>
+<tr><td>Removal</td><td><code>RemoveVectoredExceptionHandler(Handle)</code></td></tr>
+</table>
+</div>
+
+<pre><code><span class="lang-tag">C++</span>// VEH handler - process-wide, catches everything
+LONG WINAPI MyVehHandler(PEXCEPTION_POINTERS ExceptionInfo) {
+    if (ExceptionInfo-&gt;ExceptionRecord-&gt;ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+        // Handle the exception...
+        return EXCEPTION_CONTINUE_EXECUTION;  // Resume execution
+    }
+    return EXCEPTION_CONTINUE_SEARCH;  // Not ours, pass to next handler
+}
+
+// Registration - CALL_FIRST (1) means this handler goes to the front of the list
+PVOID hVeh = AddVectoredExceptionHandler(1, MyVehHandler);</code></pre>
+
+<p>The <code>Order</code> parameter controls placement in the handler chain:</p>
+<table>
+<tr><th>Value</th><th>Constant</th><th>Meaning</th></tr>
+<tr><td>1</td><td><code>CALL_FIRST</code></td><td>Insert at the <strong>front</strong> of the handler list (called first)</td></tr>
+<tr><td>0</td><td><code>CALL_LAST</code></td><td>Insert at the <strong>end</strong> of the handler list (called last)</td></tr>
+</table>
+
+<p>LayeredSyscall registers its handlers with <code>CALL_FIRST</code> to ensure they execute before any other exception handlers in the process.</p>
+
+<!-- ============================================================ -->
+<h2>3. Exception Dispatch Flow</h2>
+
+<p>When a CPU exception occurs (access violation, breakpoint, single-step, etc.), Windows follows a well-defined dispatch sequence:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);text-align:center;margin-bottom:15px;">Windows Exception Dispatch Order</h4>
+<div class="flow">
+<div class="box">Exception occurs<br><small>(CPU trap/fault)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Kernel dispatches<br><small>to user mode</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">KiUserException-<br>Dispatcher</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">VEH handlers<br><small>(first to last)</small></div>
+</div>
+<div class="flow" style="margin-top:10px;">
+<div class="box">SEH handlers<br><small>(innermost to outermost)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Unhandled-<br>ExceptionFilter</div>
+<div class="arrow">&rarr;</div>
+<div class="box r">Process terminates<br><small>(if still unhandled)</small></div>
+</div>
+</div>
+
+<div class="card">
+<h4>Dispatch Details</h4>
+<ol style="padding-left:20px;line-height:2;">
+<li>CPU exception occurs (e.g., access violation at address 0x0)</li>
+<li>Kernel saves the full CPU state into a <code>CONTEXT</code> structure</li>
+<li>Kernel dispatches to user-mode <code>ntdll!KiUserExceptionDispatcher</code></li>
+<li><strong>VEH handlers</strong> are called in order (front-to-back in the linked list)</li>
+<li>If no VEH handler returns <code>EXCEPTION_CONTINUE_EXECUTION</code>, <strong>SEH handlers</strong> are tried (innermost frame to outermost)</li>
+<li>If still unhandled, <code>UnhandledExceptionFilter</code> is called (this is where WER/crash dialogs appear)</li>
+<li>If the filter doesn't handle it, the process is terminated</li>
+</ol>
+</div>
+
+<p>The critical insight for LayeredSyscall: <strong>VEH handlers run before everything else</strong>. This means LayeredSyscall's handler gets first crack at every exception in the process, including hardware breakpoint traps fired inside ntdll.</p>
+
+<!-- ============================================================ -->
+<h2>4. The EXCEPTION_POINTERS Structure</h2>
+
+<p>Every VEH handler receives a pointer to <code>EXCEPTION_POINTERS</code>, which bundles two critical pieces of information:</p>
+
+<pre><code><span class="lang-tag">C++</span>typedef struct _EXCEPTION_POINTERS {
+    PEXCEPTION_RECORD ExceptionRecord;  // What happened
+    PCONTEXT          ContextRecord;     // CPU state when it happened
+} EXCEPTION_POINTERS, *PEXCEPTION_POINTERS;</code></pre>
+
+<h3>ExceptionRecord &mdash; What Happened</h3>
+
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>ExceptionCode</code></td><td><code>DWORD</code></td><td>The exception type (e.g., <code>0xC0000005</code> = ACCESS_VIOLATION)</td></tr>
+<tr><td><code>ExceptionFlags</code></td><td><code>DWORD</code></td><td>0 = continuable, 1 = non-continuable</td></tr>
+<tr><td><code>ExceptionAddress</code></td><td><code>PVOID</code></td><td>Address of the instruction that caused the exception</td></tr>
+<tr><td><code>NumberParameters</code></td><td><code>DWORD</code></td><td>Number of parameters in the <code>ExceptionInformation</code> array</td></tr>
+<tr><td><code>ExceptionInformation</code></td><td><code>ULONG_PTR[]</code></td><td>Extra info (for ACCESS_VIOLATION: [0]=read/write, [1]=target address)</td></tr>
+</table>
+
+<h3>ContextRecord &mdash; Full CPU State</h3>
+
+<p>The <code>CONTEXT</code> structure contains the <strong>complete register state</strong> of the CPU at the time of the exception. This is the key to LayeredSyscall's power:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Key fields in CONTEXT (x64) relevant to LayeredSyscall
+typedef struct _CONTEXT {
+    // Control registers
+    DWORD64 Rip;        // Instruction pointer (where to resume)
+    DWORD64 Rsp;        // Stack pointer
+    DWORD   EFlags;     // CPU flags (includes Trap Flag at bit 8)
+
+    // Integer registers (function arguments in x64 calling convention)
+    DWORD64 Rcx;        // 1st argument
+    DWORD64 Rdx;        // 2nd argument
+    DWORD64 R8;         // 3rd argument
+    DWORD64 R9;         // 4th argument
+    DWORD64 Rax;        // Return value / SSN for syscall
+    DWORD64 R10;        // Saved 1st arg (after mov r10, rcx)
+
+    // Additional integer registers
+    DWORD64 Rbx, Rbp, Rsi, Rdi;
+    DWORD64 R11, R12, R13, R14, R15;
+
+    // Debug registers (hardware breakpoints!)
+    DWORD64 Dr0;        // Breakpoint address 0
+    DWORD64 Dr1;        // Breakpoint address 1
+    DWORD64 Dr2;        // Breakpoint address 2
+    DWORD64 Dr3;        // Breakpoint address 3
+    DWORD64 Dr6;        // Debug status
+    DWORD64 Dr7;        // Debug control (enable/disable)
+    // ... floating point, SSE, etc.
+} CONTEXT;</code></pre>
+
+<div class="card warn">
+<h4>The Key Insight: Modifying ContextRecord Changes Execution</h4>
+<p>When a VEH handler returns <code>EXCEPTION_CONTINUE_EXECUTION</code>, Windows resumes execution using the values in the <code>CONTEXT</code> structure. If you <strong>modify</strong> the context before returning, execution resumes at the new values. This means you can:</p>
+<ul style="margin-top:8px;padding-left:20px;">
+<li>Change <strong>RIP</strong> to redirect execution to a different address</li>
+<li>Change <strong>RAX</strong> to swap the syscall number</li>
+<li>Change <strong>RCX, RDX, R8, R9</strong> to change function arguments</li>
+<li>Change <strong>RSP</strong> to switch stacks</li>
+<li>Set <strong>Dr0&ndash;Dr3</strong> and <strong>Dr7</strong> to install hardware breakpoints</li>
+<li>Set the <strong>Trap Flag</strong> (EFlags bit 8) to enable single-stepping</li>
+</ul>
+<p style="margin-top:8px;">This is the fundamental mechanism LayeredSyscall uses. It installs VEH handlers that intercept hardware breakpoint exceptions and modify the CPU context to hijack syscall execution.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Handler Return Values</h2>
+
+<p>A VEH handler must return one of two values, which tells the exception dispatcher what to do next:</p>
+
+<div class="card">
+<h4>EXCEPTION_CONTINUE_EXECUTION (-1)</h4>
+<p>Resume execution at the address specified by <code>ContextRecord-&gt;Rip</code>. If you modified any registers in the context, those modifications take effect. The exception is considered <strong>handled</strong>.</p>
+<p style="color:var(--accent);margin-top:8px;"><strong>LayeredSyscall uses this</strong> to resume execution after swapping SSN, arguments, and setting/clearing hardware breakpoints.</p>
+</div>
+
+<div class="card">
+<h4>EXCEPTION_CONTINUE_SEARCH (0)</h4>
+<p>This handler does not handle the exception. Pass it to the <strong>next handler</strong> in the chain (next VEH handler, then SEH handlers). If no handler handles it, the process crashes.</p>
+<p style="color:var(--dim);margin-top:8px;">LayeredSyscall returns this when the exception is not one it recognizes (not the right exception code or address).</p>
+</div>
+
+<pre><code><span class="lang-tag">C++</span>LONG WINAPI ExampleHandler(PEXCEPTION_POINTERS ExceptionInfo) {
+    DWORD code = ExceptionInfo-&gt;ExceptionRecord-&gt;ExceptionCode;
+
+    if (code == EXCEPTION_SINGLE_STEP) {
+        // This is our hardware breakpoint!
+        // Modify context...
+        ExceptionInfo-&gt;ContextRecord-&gt;Rax = newSsn;
+        return EXCEPTION_CONTINUE_EXECUTION;  // Resume with our changes
+    }
+
+    // Not our exception, let someone else handle it
+    return EXCEPTION_CONTINUE_SEARCH;
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>6. Triggering Exceptions Intentionally</h2>
+
+<p>LayeredSyscall doesn't wait for exceptions to happen naturally. It <strong>deliberately triggers</strong> an <code>EXCEPTION_ACCESS_VIOLATION</code> (code <code>0xC0000005</code>) to enter its VEH handler on demand:</p>
+
+<pre><code><span class="lang-tag">C++</span>// From LayeredSyscall's code - intentional null pointer dereference
+#define TRIGGER_ACCESS_VIOLOATION_EXCEPTION  int *a = 0; int b = *a;
+
+// Usage in a wrapped API function:
+NTSTATUS LayeredNtAllocateVirtualMemory(...) {
+    // Set up arguments in global state
+    SetupSyscallArgs(SSN_NtAllocateVirtualMemory, args...);
+
+    // Deliberately crash to enter VEH handler
+    TRIGGER_ACCESS_VIOLOATION_EXCEPTION
+
+    // Execution never reaches here normally -
+    // the VEH handler redirects RIP
+}</code></pre>
+
+<p>When the null dereference occurs:</p>
+<ol style="padding-left:20px;line-height:2;">
+<li>CPU raises an access violation exception</li>
+<li>Windows dispatches it to VEH handlers</li>
+<li>LayeredSyscall's <code>AddHwBp</code> handler catches it</li>
+<li>Handler reads the desired syscall info from global state</li>
+<li>Handler sets hardware breakpoints on the target syscall stub</li>
+<li>Handler advances RIP past the faulting instruction to avoid re-triggering</li>
+<li>Handler calls a legitimate API (e.g., <code>WriteFile</code>) that will eventually hit the breakpoint</li>
+</ol>
+
+<div class="card">
+<h4>Advancing RIP Past the Fault</h4>
+<p>The faulting instruction (<code>mov eax, [0x0]</code>) is typically 2&ndash;3 bytes. The handler must advance <code>ContextRecord-&gt;Rip</code> past it, otherwise execution would resume at the same faulting instruction and trigger an infinite loop:</p>
+<pre><code><span class="lang-tag">C++</span>// Skip past the faulting instruction
+ExceptionInfo-&gt;ContextRecord-&gt;Rip += INSTRUCTION_SIZE;
+return EXCEPTION_CONTINUE_EXECUTION;</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. LayeredSyscall's VEH Setup</h2>
+
+<p>LayeredSyscall registers <strong>two</strong> VEH handlers during initialization, each with a different role:</p>
+
+<pre><code><span class="lang-tag">C++</span>// From InitializeHooks() in LayeredSyscall
+PVOID h1 = AddVectoredExceptionHandler(CALL_FIRST, AddHwBp);
+PVOID h2 = AddVectoredExceptionHandler(CALL_FIRST, HandlerHwBp);</code></pre>
+
+<div class="card">
+<h4>Handler Roles</h4>
+<table>
+<tr><th>Handler</th><th>Priority</th><th>Handles</th><th>Purpose</th></tr>
+<tr><td><code>AddHwBp</code></td><td>CALL_FIRST</td><td><code>EXCEPTION_ACCESS_VIOLATION</code><br>(0xC0000005)</td><td>Triggered by the intentional null deref. Sets up hardware breakpoints on the target syscall stub and calls the legitimate API.</td></tr>
+<tr><td><code>HandlerHwBp</code></td><td>CALL_FIRST</td><td><code>EXCEPTION_SINGLE_STEP</code><br>(0x80000004)</td><td>Triggered by hardware breakpoints. Swaps SSN, marshals arguments, manages the single-step chain for call stack construction.</td></tr>
+</table>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);text-align:center;margin-bottom:15px;">Dual-Handler Flow (Preview)</h4>
+<div class="flow">
+<div class="box">Trigger null deref<br><small>ACCESS_VIOLATION</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">AddHwBp handler<br><small>Sets Dr0/Dr1, calls API</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Legitimate API runs<br><small>kernel32 &rarr; ntdll</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">HW breakpoint fires<br><small>SINGLE_STEP</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">HandlerHwBp<br><small>Swaps SSN + args</small></div>
+</div>
+</div>
+
+<p>This dual-handler architecture is explored in detail in <a href="module5.html" style="color:var(--accent)">Module 5</a>. For now, the key takeaway is that VEH provides the mechanism for intercepting CPU exceptions process-wide and modifying the execution context &mdash; which is the foundation of everything LayeredSyscall does.</p>
+
+<div class="card warn">
+<h4>Registration Order Matters</h4>
+<p>Both handlers are registered with <code>CALL_FIRST</code>. Since <code>AddVectoredExceptionHandler(CALL_FIRST, ...)</code> inserts at the <strong>front</strong> of the list, <code>HandlerHwBp</code> (registered second) actually ends up <strong>before</strong> <code>AddHwBp</code> in the list. This is important because both handlers check the exception code to determine if the exception is theirs &mdash; <code>HandlerHwBp</code> checks for <code>EXCEPTION_SINGLE_STEP</code> and <code>AddHwBp</code> checks for <code>EXCEPTION_ACCESS_VIOLATION</code>, so they don't interfere with each other.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>Common Exception Codes Reference</h2>
+
+<table>
+<tr><th>Code</th><th>Hex</th><th>Name</th><th>LayeredSyscall Use</th></tr>
+<tr><td>ACCESS_VIOLATION</td><td><code>0xC0000005</code></td><td>Read/write to invalid address</td><td>Intentional trigger to enter AddHwBp handler</td></tr>
+<tr><td>SINGLE_STEP</td><td><code>0x80000004</code></td><td>Hardware breakpoint or trap flag</td><td>Fired by Dr0/Dr1 breakpoints and trap flag single-stepping</td></tr>
+<tr><td>BREAKPOINT</td><td><code>0x80000003</code></td><td>INT3 software breakpoint</td><td>Not used by LayeredSyscall (detectable)</td></tr>
+<tr><td>ILLEGAL_INSTRUCTION</td><td><code>0xC000001D</code></td><td>Invalid opcode</td><td>Not used</td></tr>
+<tr><td>GUARD_PAGE</td><td><code>0x80000001</code></td><td>Access to a guard page</td><td>Not used (sometimes used by other VEH syscall tools)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz3">
+<h4>Module 3 Quiz: Exception Handling</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>Q1: What is the key difference between VEH and SEH?</p>
+<label data-opt="0"><input type="radio" name="q3_0"> VEH can only handle access violations, SEH handles all exceptions</label>
+<label data-opt="1"><input type="radio" name="q3_0"> SEH is process-wide, VEH is per-function</label>
+<label data-opt="2"><input type="radio" name="q3_0"> VEH is process-wide and called before SEH; SEH is frame-based and per-function</label>
+<label data-opt="3"><input type="radio" name="q3_0"> VEH only works on x64, SEH works on both x86 and x64</label>
+<div class="explain">VEH handlers are registered process-wide and stored in a global linked list. They are called BEFORE any SEH handlers when an exception occurs. SEH handlers are frame-based, tied to specific <code>__try/__except</code> blocks, and only handle exceptions within their scope.</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>Q2: What happens when a VEH handler modifies <code>ContextRecord-&gt;Rip</code> and returns <code>EXCEPTION_CONTINUE_EXECUTION</code>?</p>
+<label data-opt="0"><input type="radio" name="q3_1"> The exception is forwarded to the next handler with the modified context</label>
+<label data-opt="1"><input type="radio" name="q3_1"> Execution resumes at the new RIP address with all context modifications applied</label>
+<label data-opt="2"><input type="radio" name="q3_1"> The process terminates because RIP was tampered with</label>
+<label data-opt="3"><input type="radio" name="q3_1"> Windows ignores the modification and resumes at the original faulting address</label>
+<div class="explain">When a handler returns <code>EXCEPTION_CONTINUE_EXECUTION</code>, Windows restores the CPU registers from the CONTEXT structure. If the handler modified RIP (or any other register), those changes take effect. Execution resumes at whatever address RIP now points to. This is the mechanism LayeredSyscall uses to redirect control flow.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>Q3: Why does LayeredSyscall register its handlers with <code>CALL_FIRST</code> (1)?</p>
+<label data-opt="0"><input type="radio" name="q3_2"> To ensure they are called before any other VEH or SEH handlers in the process</label>
+<label data-opt="1"><input type="radio" name="q3_2"> Because CALL_LAST handlers cannot modify the CONTEXT structure</label>
+<label data-opt="2"><input type="radio" name="q3_2"> To prevent the exception from being logged by Windows</label>
+<label data-opt="3"><input type="radio" name="q3_2"> CALL_FIRST is required for handling EXCEPTION_SINGLE_STEP</label>
+<div class="explain"><code>CALL_FIRST</code> inserts the handler at the front of the VEH linked list. This ensures LayeredSyscall's handlers get to process exceptions before any other handlers (including EDR-registered VEH handlers or debugger hooks). If another handler processed the exception first, it could interfere with LayeredSyscall's breakpoint mechanism.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz3')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Prev: Syscall Internals &amp; SSN</a>
+<a class="primary" href="module4.html">Next: Hardware Breakpoints &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

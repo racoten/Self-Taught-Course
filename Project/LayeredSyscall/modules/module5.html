@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: Dual-Handler Architecture - LayeredSyscall Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#22d3ee;--accent2:#f97316;--gradient:linear-gradient(135deg,#22d3ee,#f97316)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>LayeredSyscall Course</h2>
+<span>VEH Syscall Evasion</span>
+</div>
+<a class="home-link" href="../LayeredSyscall_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. EDR Hooks &amp; Detection</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Syscall Internals &amp; SSN</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Exception Handling &amp; VEH</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Hardware Breakpoints</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module5.html"><span>5. Dual-Handler Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Call Stack Construction</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module7.html"><span>7. Argument Marshalling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 5: The Dual-Handler Architecture</h1>
+<p class="subtitle">Two VEH handlers orchestrate a four-phase syscall redirect &mdash; one sets the trap, the other springs it.</p>
+
+<div class="card highlight">
+<h4>The Big Picture</h4>
+<p>LayeredSyscall does not use a single exception handler. Instead, it registers <strong>two</strong> Vectored Exception Handlers that fire on completely different exception types and manage distinct responsibilities. Handler 1 (<code>AddHwBp</code>) reacts to <strong>ACCESS_VIOLATION</strong> and installs hardware breakpoints. Handler 2 (<code>HandlerHwBp</code>) reacts to <strong>SINGLE_STEP</strong> and orchestrates the entire multi-phase execution flow. This separation of concerns is what makes the technique both elegant and robust.</p>
+</div>
+
+<!-- ==================== SECTION 1 ==================== -->
+<h2>Architecture Overview</h2>
+<p>The two handlers cooperate across four distinct phases of execution. Each phase is triggered by a different CPU exception, creating a chain of events that transforms a simple function call into a fully stack-spoofed syscall.</p>
+
+<div class="card">
+<h4>Handler Roles</h4>
+<table>
+<tr><th>Handler</th><th>Exception Type</th><th>Purpose</th></tr>
+<tr><td><strong>AddHwBp</strong> (Handler 1)</td><td><code>EXCEPTION_ACCESS_VIOLATION</code></td><td>Installs hardware breakpoints on the syscall and ret instructions inside the target Nt* function</td></tr>
+<tr><td><strong>HandlerHwBp</strong> (Handler 2)</td><td><code>EXCEPTION_SINGLE_STEP</code></td><td>Manages the three-phase execution flow: context save, trap-flag tracing, context swap, and clean return</td></tr>
+</table>
+</div>
+
+<h3>Execution Flow Diagram</h3>
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">End-to-End Handler Flow</h4>
+<div class="flow">
+<div class="box">Wrapper<br><small>wrpNtXxx()</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">NULL deref<br><small>ACCESS_VIOLATION</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">AddHwBp<br><small>Install Dr0/Dr1</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Resume<br><small>Call Nt*</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">Syscall BP<br><small>SINGLE_STEP</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">HandlerHwBp<br><small>Save &amp; Redirect</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Trace<br><small>Trap Flag</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Execute<br><small>Real Syscall</small></div>
+</div>
+</div>
+
+<p>Each colored box represents a phase transition. The <span style="color:var(--red)">red boxes</span> are CPU exceptions that transfer control to a VEH handler. The <span style="color:var(--green)">green box</span> is the final syscall with a genuine call stack.</p>
+
+<!-- ==================== SECTION 2 ==================== -->
+<h2>The Wrapper Function Pattern</h2>
+<p>Every syscall that LayeredSyscall wraps follows the exact same four-step pattern. The wrapper is the entry point into the entire system. Here is a representative example for <code>NtAllocateVirtualMemory</code>:</p>
+
+<pre><code><span class="lang-tag">C++</span>NTSTATUS wrpNtAllocateVirtualMemory(
+    HANDLE   ProcessHandle,
+    PVOID*   BaseAddress,
+    ULONG_PTR ZeroBits,
+    PSIZE_T  RegionSize,
+    ULONG    AllocationType,
+    ULONG    Protect)
+{
+    // Step 1: Resolve the real ntdll function address
+    auto addr = GetProcAddress(
+        GetModuleHandleA("ntdll.dll"),
+        "NtAllocateVirtualMemory"
+    );
+
+    // Step 2: Resolve the System Service Number
+    int ssn = GetSsnByName("NtAllocateVirtualMemory");
+
+    // Step 3: Install hardware breakpoints via VEH
+    // TRUE = ExtendedArgs (function has &gt;4 arguments)
+    SetHwBp((ULONG_PTR)addr, TRUE, ssn);
+
+    // Step 4: Call the REAL function (hits the breakpoint)
+    return ((NtAllocateVirtualMemory_t)addr)(
+        ProcessHandle, BaseAddress, ZeroBits,
+        RegionSize, AllocationType, Protect
+    );
+}</code></pre>
+
+<div class="card">
+<h4>The Four Steps Explained</h4>
+<table>
+<tr><th>Step</th><th>Action</th><th>Why</th></tr>
+<tr><td><strong>1. Resolve Address</strong></td><td><code>GetProcAddress</code> for the Nt* function</td><td>We need the real address in ntdll to set breakpoints on the correct instructions</td></tr>
+<tr><td><strong>2. Get SSN</strong></td><td><code>GetSsnByName</code> via Exception Directory</td><td>We must know the System Service Number to place it in RAX before the syscall instruction</td></tr>
+<tr><td><strong>3. Install BPs</strong></td><td><code>SetHwBp</code> triggers the VEH chain</td><td>Hardware breakpoints are set on the <code>syscall</code> and <code>ret</code> instructions inside the Nt* stub</td></tr>
+<tr><td><strong>4. Call Real Function</strong></td><td>Call through the resolved pointer</td><td>The real call enters ntdll (EDR hook may inspect it), but execution is intercepted at the syscall instruction</td></tr>
+</table>
+</div>
+
+<div class="card warn">
+<h4>Why Call the Real Function?</h4>
+<p>The wrapper calls the <strong>actual</strong> Nt* function in ntdll &mdash; not a copy, not a trampoline. If an EDR has hooked that function, the hook <em>executes</em>. However, the hardware breakpoint fires at the <code>syscall</code> instruction <strong>past</strong> the hook. The EDR sees a legitimate function call; LayeredSyscall intercepts it at the last possible moment before the kernel transition.</p>
+</div>
+
+<!-- ==================== SECTION 3 ==================== -->
+<h2>SetHwBp and the ACCESS_VIOLATION Trigger</h2>
+<p>The <code>SetHwBp</code> function stores global state and then deliberately crashes the program with a null pointer dereference. This crash is the entry point into the VEH handler chain.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Store global state for the VEH handlers
+void SetHwBp(ULONG_PTR addr, BOOL extArgs, int ssn) {
+    SyscallEntryAddr = addr;    // Target Nt* function address
+    ExtendedArgs     = extArgs; // Does it have &gt;4 arguments?
+    SyscallNo        = ssn;     // System Service Number
+
+    _SetHwBp(addr);  // Passes addr as RCX (first argument)
+}
+
+// This function deliberately crashes
+void _SetHwBp(ULONG_PTR addr) {
+    // TRIGGER_ACCESS_VIOLATION_EXCEPTION macro:
+    int *a = 0;
+    int b = *a;   // Null pointer dereference!
+}</code></pre>
+
+<div class="card highlight">
+<h4>Why a Separate <code>_SetHwBp</code>?</h4>
+<p>The split is deliberate. The <code>_SetHwBp</code> function receives <code>addr</code> as its first parameter, which on x64 means it is stored in the <strong>RCX register</strong>. When the ACCESS_VIOLATION fires and the VEH handler receives the <code>CONTEXT</code> structure, it can read <code>RCX</code> to recover the target address. This is a clever technique to pass data from normal code into the exception handler context without using additional global variables.</p>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Data Flow Through the Exception</h4>
+<div class="flow">
+<div class="box">SetHwBp()<br><small>stores globals</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">_SetHwBp(addr)<br><small>RCX = addr</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">*NULL = crash<br><small>ACCESS_VIOLATION</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">AddHwBp<br><small>reads RCX from CONTEXT</small></div>
+</div>
+</div>
+
+<!-- ==================== SECTION 4 ==================== -->
+<h2>Handler 1: AddHwBp &mdash; Detailed Walkthrough</h2>
+<p>This is the first VEH handler. It fires on the deliberate null dereference, scans the target function to locate the <code>syscall</code> and <code>ret</code> instructions, and installs hardware breakpoints on both.</p>
+
+<pre><code><span class="lang-tag">C++</span>LONG WINAPI AddHwBp(PEXCEPTION_POINTERS ExceptionInfo) {
+    // Only handle ACCESS_VIOLATION exceptions
+    if (ExceptionInfo-&gt;ExceptionRecord-&gt;ExceptionCode
+            == EXCEPTION_ACCESS_VIOLATION)
+    {
+        // Read target address from RCX register
+        ULONG_PTR funcAddr = ExceptionInfo-&gt;ContextRecord-&gt;Rcx;
+
+        // Scan forward up to 25 bytes for the syscall opcode
+        for (int i = 0; i &lt; 25; i++) {
+            // 0x050F = syscall in little-endian byte order
+            if (*(USHORT*)((ULONG_PTR)funcAddr + i) == 0x050F) {
+                OPCODE_SYSCALL_OFF     = i;
+                OPCODE_SYSCALL_RET_OFF = i + 2; // ret is 2 bytes after
+                break;
+            }
+        }
+
+        // Dr0 = breakpoint on syscall instruction
+        ExceptionInfo-&gt;ContextRecord-&gt;Dr0 =
+            funcAddr + OPCODE_SYSCALL_OFF;
+
+        // Dr1 = breakpoint on ret instruction (after syscall)
+        ExceptionInfo-&gt;ContextRecord-&gt;Dr1 =
+            funcAddr + OPCODE_SYSCALL_RET_OFF;
+
+        // Enable both breakpoints in Dr7
+        ExceptionInfo-&gt;ContextRecord-&gt;Dr7 |= (1 &lt;&lt; 0) | (1 &lt;&lt; 2);
+
+        // Skip past the null dereference (2-byte instruction)
+        ExceptionInfo-&gt;ContextRecord-&gt;Rip += OPCODE_SZ_ACC_VIO;
+
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}</code></pre>
+
+<h3>Step-by-Step Breakdown</h3>
+<div class="card">
+<h4>1. Exception Filter</h4>
+<p>The handler checks that <code>ExceptionCode == EXCEPTION_ACCESS_VIOLATION</code>. Other exception types are passed to the next handler via <code>EXCEPTION_CONTINUE_SEARCH</code>.</p>
+</div>
+
+<div class="card">
+<h4>2. Recover the Target Address</h4>
+<p>The Nt* function address was passed as RCX to <code>_SetHwBp</code>. The CONTEXT structure captures all register values at the point of the exception, so <code>ContextRecord-&gt;Rcx</code> holds the target address.</p>
+</div>
+
+<div class="card">
+<h4>3. Scan for the Syscall Opcode</h4>
+<p>The handler scans forward from the function address looking for <code>0x050F</code> &mdash; the <code>syscall</code> instruction encoded in little-endian. In a standard ntdll stub, this is typically at offset 0x12 (18 bytes), but the scan allows for variation due to EDR hooks or OS version differences. The scan window is 25 bytes.</p>
+</div>
+
+<div class="card">
+<h4>4. Record Offsets</h4>
+<p><code>OPCODE_SYSCALL_OFF</code> stores the offset to the <code>syscall</code> instruction. <code>OPCODE_SYSCALL_RET_OFF</code> is always <code>syscall_off + 2</code> because the <code>syscall</code> instruction is 2 bytes (<code>0F 05</code>) and the <code>ret</code> instruction immediately follows.</p>
+</div>
+
+<div class="card">
+<h4>5. Install Hardware Breakpoints</h4>
+<p>Debug registers <code>Dr0</code> and <code>Dr1</code> are set to the absolute addresses of the <code>syscall</code> and <code>ret</code> instructions. <code>Dr7</code> is the control register &mdash; bit 0 enables Dr0, bit 2 enables Dr1. The expression <code>(1 &lt;&lt; 0) | (1 &lt;&lt; 2)</code> enables both breakpoints.</p>
+</div>
+
+<div class="card">
+<h4>6. Advance RIP Past the Crash</h4>
+<p>The null dereference instruction (<code>mov eax, [0]</code>) is 2 bytes. By adding <code>OPCODE_SZ_ACC_VIO</code> (2) to RIP, execution resumes after the crash as if it never happened. The wrapper function then proceeds to call the real Nt* function.</p>
+</div>
+
+<!-- ==================== SECTION 5 ==================== -->
+<h2>Global State Variables</h2>
+<p>LayeredSyscall uses several global variables to pass state between the wrapper functions and the two VEH handlers. These are set by <code>SetHwBp</code> and consumed by <code>HandlerHwBp</code>:</p>
+
+<table>
+<tr><th>Variable</th><th>Type</th><th>Set By</th><th>Used By</th><th>Purpose</th></tr>
+<tr><td><code>SyscallEntryAddr</code></td><td><code>ULONG_PTR</code></td><td>SetHwBp</td><td>HandlerHwBp</td><td>Address of the target Nt* function in ntdll</td></tr>
+<tr><td><code>ExtendedArgs</code></td><td><code>BOOL</code></td><td>SetHwBp</td><td>HandlerHwBp</td><td>TRUE if function has &gt;4 arguments (need stack argument copying)</td></tr>
+<tr><td><code>SyscallNo</code></td><td><code>int</code></td><td>SetHwBp</td><td>HandlerHwBp</td><td>System Service Number to place in RAX</td></tr>
+<tr><td><code>IsSubRsp</code></td><td><code>int</code></td><td>HandlerHwBp</td><td>HandlerHwBp</td><td>State machine: 0 = searching, 1 = found sub rsp, 2 = found call</td></tr>
+<tr><td><code>SavedContext</code></td><td><code>CONTEXT</code></td><td>HandlerHwBp</td><td>HandlerHwBp</td><td>Complete CPU state saved at the syscall breakpoint (preserves all arguments)</td></tr>
+<tr><td><code>NtdllInfo</code></td><td><code>struct</code></td><td>Init</td><td>HandlerHwBp</td><td>Contains <code>DllBaseAddress</code> and <code>DllEndAddress</code> of ntdll.dll for range checks</td></tr>
+<tr><td><code>OPCODE_SYSCALL_OFF</code></td><td><code>int</code></td><td>AddHwBp</td><td>HandlerHwBp</td><td>Byte offset from function start to the <code>syscall</code> instruction</td></tr>
+<tr><td><code>OPCODE_SYSCALL_RET_OFF</code></td><td><code>int</code></td><td>AddHwBp</td><td>HandlerHwBp</td><td>Byte offset from function start to the <code>ret</code> instruction</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Thread Safety Concern</h4>
+<p>These globals make the current implementation <strong>single-threaded</strong>. If two threads call wrapped syscalls simultaneously, the globals would be overwritten. A production implementation would need thread-local storage or a mutex around the entire wrapper-to-return sequence.</p>
+</div>
+
+<!-- ==================== SECTION 6 ==================== -->
+<h2>Why This Design?</h2>
+<p>The dual-handler architecture is not arbitrary. Every design decision serves a specific evasion or engineering purpose.</p>
+
+<div class="card green">
+<h4>Deliberate ACCESS_VIOLATION</h4>
+<p>The null dereference is the <strong>entry point</strong> into the entire VEH-based system. It triggers the exception dispatcher, which calls AddHwBp, which installs hardware breakpoints. Without this deliberate crash, there would be no way to set up the debug registers before the Nt* function executes.</p>
+</div>
+
+<div class="card green">
+<h4>Hardware Breakpoints Are Invisible</h4>
+<p>Unlike software breakpoints (which patch memory with <code>0xCC</code> / <code>INT 3</code>), hardware breakpoints use CPU debug registers. They do not modify any memory, so integrity-checking scanners that compare ntdll in memory against ntdll on disk will find no discrepancies. The breakpoints exist only in the CPU state of the current thread.</p>
+</div>
+
+<div class="card green">
+<h4>Separation of Concerns</h4>
+<p>Handler 1 (AddHwBp) only cares about <strong>setup</strong>: finding the syscall opcode and installing breakpoints. Handler 2 (HandlerHwBp) only cares about <strong>execution management</strong>: saving context, redirecting execution, tracing, swapping, and cleaning up. This makes the code modular and each handler easy to reason about independently.</p>
+</div>
+
+<div class="card green">
+<h4>The EDR Hook Executes Normally</h4>
+<p>Because the wrapper calls the <strong>real</strong> Nt* function, any EDR inline hook at the function entry point runs normally. The breakpoint fires at the <code>syscall</code> instruction, which is <em>past</em> the hook. From the EDR's perspective, the function was called legitimately. The interception happens at the very last moment before the kernel transition.</p>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Where Interception Happens vs. Where EDR Hooks</h4>
+<div class="flow">
+<div class="box r">EDR JMP Hook<br><small>Function entry</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">mov r10, rcx<br><small>Stub setup</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">mov eax, SSN<br><small>Load SSN</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">syscall [Dr0]<br><small>BP fires here</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">ret [Dr1]<br><small>Clean return BP</small></div>
+</div>
+</div>
+
+<!-- ==================== QUIZ ==================== -->
+<div class="quiz" id="quiz5">
+<h4>Module 5 Quiz: Dual-Handler Architecture</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: In the wrapper function pattern, why does the wrapper call the real Nt* function instead of directly issuing a syscall?</p>
+<label data-opt="0"><input type="radio" name="q5_0"> To avoid needing the System Service Number</label>
+<label data-opt="1"><input type="radio" name="q5_0"> Because the wrapper does not know the syscall instruction address</label>
+<label data-opt="2"><input type="radio" name="q5_0"> So the EDR hook executes normally while the hardware breakpoint fires at the syscall instruction past the hook</label>
+<label data-opt="3"><input type="radio" name="q5_0"> To save memory by not duplicating the ntdll stub</label>
+<div class="explain">Correct! The real Nt* function is called so the EDR inline hook runs normally. The hardware breakpoint intercepts execution at the syscall instruction, which is past the hook. The EDR sees a legitimate call; LayeredSyscall hijacks it at the kernel boundary.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: Why does the code use a null pointer dereference to enter the VEH system?</p>
+<label data-opt="0"><input type="radio" name="q5_1"> It is faster than calling the handler directly</label>
+<label data-opt="1"><input type="radio" name="q5_1"> A deliberate ACCESS_VIOLATION triggers the VEH dispatcher, allowing AddHwBp to install hardware breakpoints via the CONTEXT structure</label>
+<label data-opt="2"><input type="radio" name="q5_1"> VEH handlers can only be invoked by exceptions, never by direct calls</label>
+<label data-opt="3"><input type="radio" name="q5_1"> It prevents the EDR from seeing the breakpoint installation</label>
+<div class="explain">The ACCESS_VIOLATION is the entry point into the VEH chain. When the handler receives the CONTEXT structure, it can modify debug registers (Dr0, Dr1, Dr7) and advance RIP past the crash. This is the only way to atomically set hardware breakpoints and resume execution in the same thread context.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz5')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Prev: Hardware Breakpoints</a>
+<a class="primary" href="module6.html">Next: Call Stack Construction &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

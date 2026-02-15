@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: Syscall Internals &amp; SSN Resolution - LayeredSyscall Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F6E1;&#xFE0F;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#22d3ee;--accent2:#f97316;--gradient:linear-gradient(135deg,#22d3ee,#f97316)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>LayeredSyscall Course</h2>
+<span>VEH Syscall Evasion</span>
+</div>
+<a class="home-link" href="../LayeredSyscall_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. EDR Hooks &amp; Detection</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module2.html"><span>2. Syscall Internals &amp; SSN</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Exception Handling &amp; VEH</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Hardware Breakpoints</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Dual-Handler Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Call Stack Construction</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module7.html"><span>7. Argument Marshalling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: Syscall Internals &amp; SSN Resolution</h1>
+<p class="subtitle">How user-mode code crosses into Ring 0, and how to find the right number.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>LayeredSyscall must know the correct <strong>System Service Number (SSN)</strong> for each Nt* function it wants to call. This module explains how the <code>syscall</code> instruction works at the CPU level, what the syscall stub does, and the various methods to resolve SSNs dynamically &mdash; culminating in the <strong>MDSec Exception Directory method</strong> that LayeredSyscall uses.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The x64 Syscall Instruction</h2>
+
+<p>The <code>syscall</code> instruction (opcode <code>0F 05</code>) is the x64 mechanism for transitioning from user mode (Ring 3) to kernel mode (Ring 0). When it executes, the CPU performs these steps in hardware:</p>
+
+<div class="card">
+<h4>What <code>syscall</code> Does (CPU Microcode)</h4>
+<table>
+<tr><th>Step</th><th>Action</th><th>Detail</th></tr>
+<tr><td>1</td><td>Save RIP &rarr; RCX</td><td>The return address (next instruction) is saved to RCX</td></tr>
+<tr><td>2</td><td>Save RFLAGS &rarr; R11</td><td>Current flags are preserved in R11</td></tr>
+<tr><td>3</td><td>Load RIP from IA32_LSTAR MSR</td><td>Kernel entry point (<code>KiSystemCall64</code>) is loaded</td></tr>
+<tr><td>4</td><td>Load CS/SS from IA32_STAR MSR</td><td>Switches to kernel code/stack segments</td></tr>
+<tr><td>5</td><td>Mask RFLAGS with IA32_FMASK MSR</td><td>Disables interrupts during transition</td></tr>
+</table>
+</div>
+
+<p>Once in kernel mode, <code>KiSystemCall64</code> reads the value in <strong>RAX</strong> (the SSN) and uses it as an index into the <strong>System Service Descriptor Table (SSDT)</strong>. The SSDT maps SSN 0x18 &rarr; <code>NtAllocateVirtualMemory</code>, SSN 0x50 &rarr; <code>NtCreateFile</code>, and so on.</p>
+
+<div class="card warn">
+<h4>Why RCX Is Clobbered</h4>
+<p>The <code>syscall</code> instruction unconditionally writes the return address into RCX. But in the Windows x64 calling convention, RCX holds the <strong>first argument</strong>. If the stub didn't save RCX first, the first argument would be lost. This is why every stub begins with <code>mov r10, rcx</code> &mdash; it preserves the first argument in R10, which the kernel expects.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. The ntdll Syscall Stub</h2>
+
+<p>Every <code>Nt*</code> function in ntdll.dll is a small assembly stub. Here is the complete stub with hex bytes, exactly as it appears in memory:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>NtAllocateVirtualMemory:
+  4C 8B D1          mov r10, rcx        ; preserve 1st arg (RCX will be clobbered)
+  B8 18 00 00 00    mov eax, 0x18       ; load SSN into EAX
+  0F 05             syscall             ; Ring 3 &rarr; Ring 0
+  C3                ret                 ; return to caller (12 bytes total)</code></pre>
+
+<h3>Byte-by-Byte Breakdown</h3>
+<table>
+<tr><th>Offset</th><th>Bytes</th><th>Instruction</th><th>Purpose</th></tr>
+<tr><td>+0</td><td><code>4C 8B D1</code></td><td><code>mov r10, rcx</code></td><td>Save 1st argument before syscall clobbers RCX</td></tr>
+<tr><td>+3</td><td><code>B8 XX 00 00 00</code></td><td><code>mov eax, SSN</code></td><td>Load System Service Number (4-byte immediate)</td></tr>
+<tr><td>+8</td><td><code>0F 05</code></td><td><code>syscall</code></td><td>Transition to kernel mode</td></tr>
+<tr><td>+10</td><td><code>C3</code></td><td><code>ret</code></td><td>Return to caller after kernel returns</td></tr>
+</table>
+
+<p>The SSN at offset +4 is what changes between different Nt* functions. <code>NtAllocateVirtualMemory</code> might be 0x18, <code>NtProtectVirtualMemory</code> might be 0x50, and these numbers <strong>change between Windows versions</strong>. This is why SSN resolution must be dynamic.</p>
+
+<div class="card">
+<h4>The <code>Zw*</code> and <code>Nt*</code> Duality</h4>
+<p>In ntdll.dll, every <code>Nt*</code> function has a corresponding <code>Zw*</code> function that points to the <strong>same address</strong>. For example, <code>NtAllocateVirtualMemory</code> and <code>ZwAllocateVirtualMemory</code> share the exact same stub. The distinction matters in the kernel (Zw* sets PreviousMode to KernelMode), but in user mode they are identical. LayeredSyscall exploits this duality for SSN resolution.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. SSN Resolution Methods &mdash; History</h2>
+
+<p>The challenge: if EDR hooks overwrite the stub bytes, you can't just read the SSN from offset +4 anymore. Several techniques evolved to solve this:</p>
+
+<table>
+<tr><th>Method</th><th>Author</th><th>How It Works</th><th>Limitation</th></tr>
+<tr><td><strong>Hell's Gate</strong></td><td>am0nsec &amp; smelly__vx</td><td>Read SSN directly from the stub at offset +4 (<code>B8 XX 00 00 00</code>)</td><td>Fails if the stub is hooked (first bytes overwritten by JMP)</td></tr>
+<tr><td><strong>Halo's Gate</strong></td><td>sektor7</td><td>If target stub is hooked, look at neighboring stubs (SSN &plusmn; N) and calculate the offset</td><td>Fails if neighbors are also hooked or if hook patterns vary</td></tr>
+<tr><td><strong>Tartarus Gate</strong></td><td>trickster0</td><td>Extends Halo's Gate to handle additional hook patterns (different EDR hooking styles)</td><td>Still relies on finding at least one clean neighbor</td></tr>
+<tr><td><strong>SysWhispers2</strong></td><td>jthuraisamy</td><td>Sort all <code>Zw*</code> export addresses in ascending order; the sort index equals the SSN</td><td>Requires parsing the full export table; more code in the binary</td></tr>
+<tr><td><strong>FreshyCalls</strong></td><td>crummie5</td><td>Similar to SysWhispers2 but resolves at runtime by sorting function pointers</td><td>Same overhead as SysWhispers2</td></tr>
+<tr><td><strong>MDSec Exception Directory</strong></td><td>MDSec (Peter Winter-Smith)</td><td>Use RUNTIME_FUNCTION entries from ntdll's Exception Directory to count Zw* functions</td><td>Elegant; works regardless of hooks; used by LayeredSyscall</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>4. MDSec Exception Directory Method</h2>
+
+<p>This is the method LayeredSyscall implements in its <code>GetSsnByName()</code> function. It exploits a structural property of ntdll: the <strong>Exception Directory</strong> (<code>IMAGE_DIRECTORY_ENTRY_EXCEPTION</code>) contains <code>RUNTIME_FUNCTION</code> entries that are ordered by function address, and syscall stubs are ordered by SSN.</p>
+
+<h3>Step-by-Step Walkthrough</h3>
+
+<div class="card">
+<h4>Step 1: Find ntdll Base Address via PEB</h4>
+<p>Walk the Process Environment Block (PEB) through <code>Ldr &rarr; InLoadOrderModuleList</code> to locate ntdll.dll's base address. This avoids calling <code>GetModuleHandle</code> (which EDRs monitor).</p>
+<pre><code><span class="lang-tag">C++</span>// Walk PEB-&gt;Ldr-&gt;InLoadOrderModuleList
+PPEB pPeb = (PPEB)__readgsqword(0x60);
+PLDR_DATA_TABLE_ENTRY pEntry =
+    (PLDR_DATA_TABLE_ENTRY)pPeb-&gt;Ldr-&gt;InLoadOrderModuleList.Flink;
+
+// ntdll is typically the second entry (after the EXE itself)
+pEntry = (PLDR_DATA_TABLE_ENTRY)pEntry-&gt;InLoadOrderLinks.Flink;
+PVOID ntdllBase = pEntry-&gt;DllBase;</code></pre>
+</div>
+
+<div class="card">
+<h4>Step 2: Parse the Exception Directory</h4>
+<p>The Exception Directory contains an array of <code>RUNTIME_FUNCTION</code> structures. Each entry describes a function's start address, end address, and unwind information:</p>
+<pre><code><span class="lang-tag">C++</span>typedef struct _RUNTIME_FUNCTION {
+    DWORD BeginAddress;    // RVA of function start
+    DWORD EndAddress;      // RVA of function end
+    DWORD UnwindData;      // RVA of unwind info
+} RUNTIME_FUNCTION;</code></pre>
+<p>Get the Exception Directory from the PE optional header:</p>
+<pre><code><span class="lang-tag">C++</span>PIMAGE_DATA_DIRECTORY pExceptionDir =
+    &amp;pOptHeader-&gt;DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+
+PRUNTIME_FUNCTION pRuntimeFunc = (PRUNTIME_FUNCTION)(
+    (ULONG_PTR)ntdllBase + pExceptionDir-&gt;VirtualAddress);
+
+DWORD numFunctions = pExceptionDir-&gt;Size / sizeof(RUNTIME_FUNCTION);</code></pre>
+</div>
+
+<div class="card">
+<h4>Step 3: Parse the Export Address Table</h4>
+<p>Also parse the Export Directory to get function names and their RVAs. This lets us match RUNTIME_FUNCTION entries to named exports.</p>
+<pre><code><span class="lang-tag">C++</span>PIMAGE_DATA_DIRECTORY pExportDir =
+    &amp;pOptHeader-&gt;DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+
+PIMAGE_EXPORT_DIRECTORY pExports = (PIMAGE_EXPORT_DIRECTORY)(
+    (ULONG_PTR)ntdllBase + pExportDir-&gt;VirtualAddress);
+
+PDWORD pNames    = (PDWORD)((ULONG_PTR)ntdllBase + pExports-&gt;AddressOfNames);
+PDWORD pFuncs    = (PDWORD)((ULONG_PTR)ntdllBase + pExports-&gt;AddressOfFunctions);
+PWORD  pOrdinals = (PWORD)((ULONG_PTR)ntdllBase + pExports-&gt;AddressOfNameOrdinals);</code></pre>
+</div>
+
+<div class="card highlight">
+<h4>Step 4: Count Zw* Functions (The Core Algorithm)</h4>
+<p>Iterate through each <code>RUNTIME_FUNCTION</code> entry. For each one, find its matching export name. If the name starts with <code>"Zw"</code>, increment a counter. When the name matches the <strong>target function</strong>, the counter value IS the SSN.</p>
+<pre><code><span class="lang-tag">C++</span>// From LayeredSyscall's HookModule.cpp - GetSsnByName()
+DWORD ssnCounter = 0;
+
+for (DWORD i = 0; i &lt; numFunctions; i++) {
+    // Match RUNTIME_FUNCTION BeginAddress against export RVAs
+    for (DWORD j = 0; j &lt; pExports-&gt;NumberOfNames; j++) {
+        if (pFuncs[pOrdinals[j]] == pRuntimeFunc[i].BeginAddress) {
+
+            PCHAR funcName = (PCHAR)((ULONG_PTR)ntdllBase + pNames[j]);
+
+            // Check if name starts with "Zw" (little-endian: 'wZ')
+            if (*(USHORT*)funcName == 'wZ') {
+                // Is this our target function?
+                if (StringCompare(funcName + 2, targetName + 2)) {
+                    return ssnCounter;  // SSN found!
+                }
+                ssnCounter++;
+            }
+            break;  // Move to next RUNTIME_FUNCTION
+        }
+    }
+}</code></pre>
+<p>The key insight: <code>*(USHORT*)funcName == 'wZ'</code> checks the first two bytes as a 16-bit value. Due to x86 little-endian byte order, the bytes in memory for <code>"Zw"</code> are <code>5A 77</code>, which as a USHORT is <code>0x775A</code>. The character literal <code>'wZ'</code> also evaluates to <code>0x775A</code> (multi-character literal, implementation-defined but consistent on MSVC).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Why RUNTIME_FUNCTION Works</h2>
+
+<p>This method works because of two structural guarantees in ntdll.dll:</p>
+
+<div class="card green">
+<h4>Guarantee 1: Exception Directory Entries Are Ordered by Address</h4>
+<p>The PE specification requires <code>RUNTIME_FUNCTION</code> entries to be sorted by <code>BeginAddress</code> in ascending order. Since syscall stubs in ntdll are laid out sequentially in memory (in SSN order), iterating the exception directory visits them in SSN order.</p>
+</div>
+
+<div class="card green">
+<h4>Guarantee 2: Zw* and Nt* Share Entry Points</h4>
+<p><code>ZwAllocateVirtualMemory</code> and <code>NtAllocateVirtualMemory</code> resolve to the <strong>same address</strong> in ntdll. The function checks for <code>"Zw"</code> prefix because both Zw* and Nt* exports exist, and counting only one set avoids double-counting. The choice of Zw* is arbitrary &mdash; Nt* would also work.</p>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);text-align:center;margin-bottom:15px;">Exception Directory &harr; SSN Mapping</h4>
+<div class="flow">
+<div class="box">RUNTIME_FUNCTION[0]<br><small>ZwAccessCheck &rarr; SSN 0</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">RUNTIME_FUNCTION[1]<br><small>ZwAddAtom &rarr; SSN 1</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">...<br><small>SSN N</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">RUNTIME_FUNCTION[K]<br><small>ZwAllocateVirtualMemory &rarr; SSN 0x18</small></div>
+</div>
+<p style="text-align:center;color:var(--dim);margin-top:10px;font-size:.85rem;">Counting Zw* entries encountered = SSN of the current function. Works regardless of hooks because it reads PE metadata, not stub bytes.</p>
+</div>
+
+<div class="card warn">
+<h4>Hook Resilience</h4>
+<p>Unlike Hell's Gate (which reads the SSN from the stub bytes at offset +4), the Exception Directory method never reads the stub instructions at all. It only reads PE structural metadata (export table and exception directory), which EDRs do not modify. Even if every single syscall stub is hooked, the SSN resolution still works correctly.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Additional Resolution: Syscall Address</h2>
+
+<p>Beyond the SSN, LayeredSyscall also needs the <strong>address of the <code>syscall</code> instruction</strong> within the stub. This is where hardware breakpoints will be set. The code scans forward from the function entry, looking for the two-byte sequence <code>0F 05</code>:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Scan for syscall (0F 05) within 25 bytes of function start
+PVOID funcAddr = (PVOID)((ULONG_PTR)ntdllBase + funcRva);
+for (DWORD offset = 0; offset &lt; 25; offset++) {
+    BYTE* p = (BYTE*)funcAddr + offset;
+    if (p[0] == 0x0F &amp;&amp; p[1] == 0x05) {
+        // Found syscall instruction
+        syscallAddr = (PVOID)p;
+        retAddr     = (PVOID)(p + 2);  // ret is right after syscall
+        break;
+    }
+}</code></pre>
+
+<p>This scan handles the case where an EDR hook might have modified early bytes but left the <code>syscall</code>/<code>ret</code> sequence intact (which is typical, since hooks redirect before the syscall is reached).</p>
+
+<!-- ============================================================ -->
+<h2>7. SSN Versioning &amp; Why Dynamic Resolution Matters</h2>
+
+<p>SSNs are <strong>not stable across Windows versions</strong>. Microsoft can add, remove, or reorder system calls between updates. A hardcoded SSN table that works on Windows 10 21H2 may crash on Windows 11 23H2.</p>
+
+<div class="card">
+<h4>Example SSN Changes Across Versions</h4>
+<table>
+<tr><th>Function</th><th>Win10 1809</th><th>Win10 21H2</th><th>Win11 22H2</th></tr>
+<tr><td><code>NtAllocateVirtualMemory</code></td><td>0x18</td><td>0x18</td><td>0x18</td></tr>
+<tr><td><code>NtProtectVirtualMemory</code></td><td>0x50</td><td>0x50</td><td>0x50</td></tr>
+<tr><td><code>NtCreateThreadEx</code></td><td>0xBD</td><td>0xC1</td><td>0xC2</td></tr>
+<tr><td><code>NtWriteVirtualMemory</code></td><td>0x3A</td><td>0x3A</td><td>0x3A</td></tr>
+<tr><td><code>NtCreateSection</code></td><td>0x4A</td><td>0x4A</td><td>0x4A</td></tr>
+</table>
+<p style="color:var(--dim);font-size:.85rem;margin-top:8px;">Note: While many common SSNs remain stable, newer or less-used functions can shift. Any technique relying on hardcoded numbers is fragile.</p>
+</div>
+
+<p>This is exactly why dynamic resolution methods like the Exception Directory approach are essential. They resolve the correct SSN at runtime by inspecting the actual ntdll loaded in the process, regardless of which Windows build is running.</p>
+
+<div class="card highlight">
+<h4>LayeredSyscall's Resolution Strategy</h4>
+<p>During initialization, LayeredSyscall calls <code>GetSsnByName()</code> for each Nt* function it wraps. The resolved SSNs and syscall/ret addresses are stored in a lookup table. When a wrapped function is invoked, the pre-resolved SSN is used immediately &mdash; no repeated PE parsing is needed.</p>
+<pre><code><span class="lang-tag">C++</span>// Initialization - resolve once, use many times
+typedef struct _SYSCALL_INFO {
+    DWORD  ssn;             // System Service Number
+    PVOID  syscallAddr;     // Address of 0F 05 in the stub
+    PVOID  retAddr;         // Address of C3 after syscall
+} SYSCALL_INFO;
+
+SYSCALL_INFO g_NtAllocateVM;
+g_NtAllocateVM.ssn = GetSsnByName("ZwAllocateVirtualMemory");
+// + find syscall/ret addresses...</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<h2>Key Terminology</h2>
+
+<table>
+<tr><th>Term</th><th>Definition</th></tr>
+<tr><td><strong>SSDT</strong></td><td>System Service Descriptor Table &mdash; kernel-side table mapping SSNs to kernel function addresses</td></tr>
+<tr><td><strong>RUNTIME_FUNCTION</strong></td><td>PE structure describing a function's address range and unwind info, stored in the Exception Directory</td></tr>
+<tr><td><strong>Export Address Table</strong></td><td>PE structure mapping function names/ordinals to their RVAs (Relative Virtual Addresses)</td></tr>
+<tr><td><strong>PEB</strong></td><td>Process Environment Block &mdash; per-process structure containing loaded module list, heap info, and more</td></tr>
+<tr><td><strong>InLoadOrderModuleList</strong></td><td>Doubly-linked list in PEB-&gt;Ldr containing all loaded DLLs in load order (EXE first, ntdll second)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz2">
+<h4>Module 2 Quiz: Syscall Internals</h4>
+
+<div class="quiz-q" data-correct="0">
+<p>Q1: Why does every syscall stub begin with <code>mov r10, rcx</code>?</p>
+<label data-opt="0"><input type="radio" name="q2_0"> Because the <code>syscall</code> instruction clobbers RCX with the return address</label>
+<label data-opt="1"><input type="radio" name="q2_0"> Because R10 is the kernel's first argument register</label>
+<label data-opt="2"><input type="radio" name="q2_0"> To set up a stack frame for exception handling</label>
+<label data-opt="3"><input type="radio" name="q2_0"> To clear the high 32 bits of RCX</label>
+<div class="explain">The <code>syscall</code> instruction saves the return address (RIP of the next instruction) into RCX, destroying whatever was there. Since RCX holds the first argument in the Windows x64 calling convention, the stub must save it to R10 first. The kernel's system call handler reads the first argument from R10.</div>
+</div>
+
+<div class="quiz-q" data-correct="2">
+<p>Q2: What is the purpose of the SSN (System Service Number) stored in EAX?</p>
+<label data-opt="0"><input type="radio" name="q2_1"> It identifies which DLL the function belongs to</label>
+<label data-opt="1"><input type="radio" name="q2_1"> It specifies the privilege level required for the call</label>
+<label data-opt="2"><input type="radio" name="q2_1"> It is an index into the SSDT that tells the kernel which function to execute</label>
+<label data-opt="3"><input type="radio" name="q2_1"> It is a hash of the function name for security validation</label>
+<div class="explain">The kernel reads EAX after the syscall transition and uses it as an index into the System Service Descriptor Table (SSDT). Each SSN maps to a specific kernel function. For example, SSN 0x18 might map to <code>NtAllocateVirtualMemory</code>'s kernel implementation.</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>Q3: Why does the MDSec Exception Directory method work even when syscall stubs are hooked?</p>
+<label data-opt="0"><input type="radio" name="q2_2"> It reads the SSN from a backup copy of ntdll</label>
+<label data-opt="1"><input type="radio" name="q2_2"> It uses PE metadata (export table + exception directory) without reading stub bytes</label>
+<label data-opt="2"><input type="radio" name="q2_2"> It bypasses hooks by jumping directly to the kernel</label>
+<label data-opt="3"><input type="radio" name="q2_2"> It restores the original stub bytes before reading the SSN</label>
+<div class="explain">The Exception Directory method resolves SSNs by counting Zw* entries in the RUNTIME_FUNCTION table, which is PE structural metadata. EDR hooks modify the code bytes of syscall stubs but do not alter the PE exception directory or export table. This makes the resolution completely hook-agnostic.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz2')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Prev: EDR Hooks &amp; Detection</a>
+<a class="primary" href="module3.html">Next: Exception Handling &amp; VEH &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

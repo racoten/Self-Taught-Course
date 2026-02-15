@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: Hardware Breakpoints &amp; Debug Registers - LayeredSyscall Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F6E1;&#xFE0F;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#22d3ee;--accent2:#f97316;--gradient:linear-gradient(135deg,#22d3ee,#f97316)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>LayeredSyscall Course</h2>
+<span>VEH Syscall Evasion</span>
+</div>
+<a class="home-link" href="../LayeredSyscall_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. EDR Hooks &amp; Detection</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Syscall Internals &amp; SSN</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Exception Handling &amp; VEH</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module4.html"><span>4. Hardware Breakpoints</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Dual-Handler Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Call Stack Construction</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module7.html"><span>7. Argument Marshalling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 4: Hardware Breakpoints &amp; Debug Registers</h1>
+<p class="subtitle">Using the CPU's own debug facilities to intercept execution &mdash; invisibly.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Hardware breakpoints are the mechanism LayeredSyscall uses to intercept execution at the <code>syscall</code> instruction inside ntdll. This module covers the x64 debug register architecture, how breakpoints are set from VEH handlers, the different breakpoint types, and why hardware breakpoints are far stealthier than software alternatives.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Software vs Hardware Breakpoints</h2>
+
+<p>There are two fundamentally different ways to set breakpoints on x64. Understanding the distinction is critical because <strong>one modifies memory</strong> (detectable) and <strong>one does not</strong> (stealthy).</p>
+
+<div class="versus">
+<div>
+<h5 style="color:var(--red)">Software Breakpoints (INT3)</h5>
+<ul>
+<li>Replaces the first byte of the target instruction with <code>0xCC</code> (INT3)</li>
+<li><strong>Modifies code in memory</strong> &mdash; changes the actual bytes of ntdll</li>
+<li>Detectable by comparing in-memory bytes against on-disk image</li>
+<li>Detectable by code integrity checks (checksum of .text section)</li>
+<li>Unlimited count &mdash; can set as many as needed</li>
+<li>Triggers <code>EXCEPTION_BREAKPOINT</code> (0x80000003)</li>
+</ul>
+</div>
+<div>
+<h5 style="color:var(--green)">Hardware Breakpoints (Debug Registers)</h5>
+<ul>
+<li>Uses CPU debug registers (Dr0&ndash;Dr3) to monitor addresses</li>
+<li><strong>No memory modification</strong> &mdash; ntdll bytes remain clean</li>
+<li>Invisible to memory scanners and integrity checks</li>
+<li>Limited to <strong>4 per thread</strong> (Dr0, Dr1, Dr2, Dr3)</li>
+<li>Per-thread: only affects the thread that set them</li>
+<li>Triggers <code>EXCEPTION_SINGLE_STEP</code> (0x80000004)</li>
+</ul>
+</div>
+</div>
+
+<pre><code><span class="lang-tag">Comparison</span>Software Breakpoint (INT3):
+  BEFORE:  4C 8B D1 B8 18 00 00 00 0F 05 C3    ; clean stub
+  AFTER:   CC 8B D1 B8 18 00 00 00 0F 05 C3    ; 0xCC replaces first byte!
+           ^^ DETECTABLE - byte changed in memory
+
+Hardware Breakpoint (Dr0):
+  MEMORY:  4C 8B D1 B8 18 00 00 00 0F 05 C3    ; unchanged! clean!
+  Dr0:     points to address of 0F 05 (syscall)
+  Dr7:     bit 0 enabled
+  Result:  exception fires when RIP reaches Dr0's address, but ntdll bytes are untouched</code></pre>
+
+<!-- ============================================================ -->
+<h2>2. x64 Debug Registers</h2>
+
+<p>The x64 architecture provides 8 debug registers (Dr0&ndash;Dr7). LayeredSyscall uses Dr0, Dr1, and Dr7:</p>
+
+<table>
+<tr><th>Register</th><th>Purpose</th><th>LayeredSyscall Usage</th></tr>
+<tr><td><strong>Dr0</strong></td><td>Breakpoint address 0</td><td>Address of the <code>syscall</code> instruction (0F 05) in the target Nt* stub</td></tr>
+<tr><td><strong>Dr1</strong></td><td>Breakpoint address 1</td><td>Address of the <code>ret</code> instruction (C3) after syscall</td></tr>
+<tr><td><strong>Dr2</strong></td><td>Breakpoint address 2</td><td>Not used (available for other purposes)</td></tr>
+<tr><td><strong>Dr3</strong></td><td>Breakpoint address 3</td><td>Not used</td></tr>
+<tr><td><strong>Dr4&ndash;Dr5</strong></td><td>Reserved (aliases for Dr6/Dr7 when CR4.DE=0)</td><td>Not used</td></tr>
+<tr><td><strong>Dr6</strong></td><td>Debug status register</td><td>Read by CPU to indicate which breakpoint fired (bits 0&ndash;3)</td></tr>
+<tr><td><strong>Dr7</strong></td><td>Debug control register</td><td>Enable/disable breakpoints, set conditions and length</td></tr>
+</table>
+
+<h3>Dr7: Debug Control Register Layout</h3>
+
+<p>Dr7 is the most complex debug register. It controls which breakpoints are active and what conditions trigger them:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);text-align:center;margin-bottom:15px;">Dr7 Bit Layout (Low 16 Bits)</h4>
+<table>
+<tr><th>Bits</th><th>Field</th><th>Description</th></tr>
+<tr><td>0</td><td><strong>L0</strong></td><td>Local enable for Dr0 &mdash; set to 1 to activate Dr0 breakpoint</td></tr>
+<tr><td>1</td><td>G0</td><td>Global enable for Dr0 (use L0 instead in user mode)</td></tr>
+<tr><td>2</td><td><strong>L1</strong></td><td>Local enable for Dr1 &mdash; set to 1 to activate Dr1 breakpoint</td></tr>
+<tr><td>3</td><td>G1</td><td>Global enable for Dr1</td></tr>
+<tr><td>4</td><td><strong>L2</strong></td><td>Local enable for Dr2</td></tr>
+<tr><td>5</td><td>G2</td><td>Global enable for Dr2</td></tr>
+<tr><td>6</td><td><strong>L3</strong></td><td>Local enable for Dr3</td></tr>
+<tr><td>7</td><td>G3</td><td>Global enable for Dr3</td></tr>
+<tr><td>16&ndash;17</td><td>R/W0</td><td>Condition for Dr0 (00=exec, 01=write, 10=I/O, 11=read/write)</td></tr>
+<tr><td>18&ndash;19</td><td>LEN0</td><td>Length for Dr0 (00=1 byte for execution)</td></tr>
+<tr><td>20&ndash;21</td><td>R/W1</td><td>Condition for Dr1</td></tr>
+<tr><td>22&ndash;23</td><td>LEN1</td><td>Length for Dr1</td></tr>
+<tr><td>24&ndash;25</td><td>R/W2</td><td>Condition for Dr2</td></tr>
+<tr><td>26&ndash;27</td><td>LEN2</td><td>Length for Dr2</td></tr>
+<tr><td>28&ndash;29</td><td>R/W3</td><td>Condition for Dr3</td></tr>
+<tr><td>30&ndash;31</td><td>LEN3</td><td>Length for Dr3</td></tr>
+</table>
+</div>
+
+<p>For LayeredSyscall, the relevant operations on Dr7 are:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Enable Dr0 (local enable, bit 0)
+Dr7 |= (1 &lt;&lt; 0);    // Sets bit 0 = L0 = enable Dr0
+
+// Enable Dr1 (local enable, bit 2)
+Dr7 |= (1 &lt;&lt; 2);    // Sets bit 2 = L1 = enable Dr1
+
+// Condition bits for Dr0 at bits 16-17: 00 = execution breakpoint
+// Condition bits for Dr1 at bits 20-21: 00 = execution breakpoint
+// (00 is the default, so no explicit set needed for execution type)
+
+// Disable Dr0
+Dr7 &amp;= ~(1 &lt;&lt; 0);   // Clears bit 0 = L0 = disable Dr0</code></pre>
+
+<!-- ============================================================ -->
+<h2>3. Setting Hardware Breakpoints via VEH</h2>
+
+<p>Normally, modifying debug registers requires the <code>SetThreadContext</code> API, which EDRs monitor. But when you're inside a VEH handler, you have <strong>direct access</strong> to the CONTEXT structure &mdash; including the debug registers. This is how LayeredSyscall sets breakpoints without calling any suspicious APIs.</p>
+
+<pre><code><span class="lang-tag">C++</span>// From LayeredSyscall's AddHwBp handler
+LONG WINAPI AddHwBp(PEXCEPTION_POINTERS ExceptionInfo) {
+    if (ExceptionInfo-&gt;ExceptionRecord-&gt;ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    PCONTEXT ctx = ExceptionInfo-&gt;ContextRecord;
+
+    // Set Dr0 = address of 'syscall' (0F 05) in the target Nt* function
+    ctx-&gt;Dr0 = (DWORD64)pSyscallAddress;
+
+    // Set Dr1 = address of 'ret' (C3) after the syscall instruction
+    ctx-&gt;Dr1 = (DWORD64)pRetAddress;
+
+    // Enable both breakpoints in Dr7
+    ctx-&gt;Dr7 |= (1 &lt;&lt; 0);  // Enable Dr0 (L0)
+    ctx-&gt;Dr7 |= (1 &lt;&lt; 2);  // Enable Dr1 (L1)
+
+    // Advance RIP past the faulting instruction (null deref)
+    ctx-&gt;Rip += INSTRUCTION_SIZE;
+
+    // Set up the call to the legitimate API...
+    return EXCEPTION_CONTINUE_EXECUTION;
+}</code></pre>
+
+<div class="card">
+<h4>No API Calls Needed</h4>
+<p>Traditional methods of setting hardware breakpoints require:</p>
+<pre><code><span class="lang-tag">C++ (Traditional - Detectable)</span>// This is what EDRs watch for!
+CONTEXT ctx;
+ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+GetThreadContext(hThread, &amp;ctx);
+ctx.Dr0 = targetAddr;
+ctx.Dr7 |= 1;
+SetThreadContext(hThread, &amp;ctx);  // EDR hooks this!</code></pre>
+<p>LayeredSyscall avoids this entirely. By modifying Dr0&ndash;Dr7 <strong>within a VEH handler</strong>, it uses the exception dispatch mechanism itself as the context-modification channel. No calls to <code>GetThreadContext</code> or <code>SetThreadContext</code> are needed.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Breakpoint Types</h2>
+
+<p>The R/W (condition) bits in Dr7 determine what triggers the breakpoint. There are four types:</p>
+
+<table>
+<tr><th>R/W Bits</th><th>Type</th><th>Trigger Condition</th><th>LayeredSyscall Use</th></tr>
+<tr><td><code>00</code></td><td><strong>Execution</strong></td><td>CPU attempts to execute instruction at the address</td><td>Used for both Dr0 and Dr1</td></tr>
+<tr><td><code>01</code></td><td>Data Write</td><td>CPU writes data to the address</td><td>Not used</td></tr>
+<tr><td><code>10</code></td><td>I/O Access</td><td>CPU executes I/O instruction for the port (requires CR4.DE=1)</td><td>Not used</td></tr>
+<tr><td><code>11</code></td><td>Data Read/Write</td><td>CPU reads or writes data at the address</td><td>Not used</td></tr>
+</table>
+
+<p>LayeredSyscall exclusively uses <strong>execution breakpoints</strong> (R/W = 00). This is the default value, so the condition bits don't need explicit configuration beyond enabling the local enable flags.</p>
+
+<!-- ============================================================ -->
+<h2>5. How LayeredSyscall Uses Hardware Breakpoints</h2>
+
+<p>LayeredSyscall sets two hardware breakpoints per syscall invocation, each serving a distinct purpose:</p>
+
+<div class="card green">
+<h4>Dr0: Syscall Interception Point</h4>
+<p><strong>Target:</strong> Address of the <code>syscall</code> instruction (<code>0F 05</code>) within the Nt* function stub.</p>
+<p><strong>Purpose:</strong> When a legitimate API (e.g., WriteFile) calls its corresponding Nt* function and execution reaches the <code>syscall</code> instruction, Dr0 fires. The VEH handler then swaps EAX (SSN) to the <em>desired</em> function's SSN and swaps the arguments.</p>
+</div>
+
+<div class="card green">
+<h4>Dr1: Return Interception Point</h4>
+<p><strong>Target:</strong> Address of the <code>ret</code> instruction (<code>C3</code>) immediately after the <code>syscall</code>.</p>
+<p><strong>Purpose:</strong> After the hijacked syscall returns from the kernel, Dr1 fires. The handler uses this opportunity to clean up: restore the original return value, fix the stack, clear the breakpoints, and return control to the caller.</p>
+</div>
+
+<h3>Finding the Syscall and Ret Addresses</h3>
+
+<p>The code scans forward from the beginning of the Nt* function, looking for the <code>0F 05</code> (syscall) byte sequence within the first 25 bytes:</p>
+
+<pre><code><span class="lang-tag">C++</span>// From LayeredSyscall - finding syscall instruction offset
+BOOL GetSyscallAddresses(PVOID funcBase, PVOID* pSyscall, PVOID* pRet) {
+    BYTE* p = (BYTE*)funcBase;
+
+    for (DWORD i = 0; i &lt; 25; i++) {
+        // Look for syscall opcode: 0F 05
+        if (p[i] == 0x0F &amp;&amp; p[i + 1] == 0x05) {
+            *pSyscall = (PVOID)&amp;p[i];       // Address of 'syscall'
+            *pRet     = (PVOID)&amp;p[i + 2];   // Address of 'ret' (C3)
+            return TRUE;
+        }
+    }
+    return FALSE;  // syscall not found within range
+}
+
+// These addresses become:
+// OPCODE_SYSCALL_OFF   = offset of 0F 05 from function base (typically +8)
+// OPCODE_SYSCALL_RET_OFF = offset of C3 from function base (typically +10)</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);text-align:center;margin-bottom:15px;">Breakpoint Placement in the Syscall Stub</h4>
+<pre><code><span class="lang-tag">Memory Layout</span>NtAllocateVirtualMemory:
+  +0:  4C 8B D1          mov r10, rcx
+  +3:  B8 18 00 00 00    mov eax, 0x18
+  +8:  0F 05             syscall          &larr; Dr0 breakpoint HERE
+  +10: C3                ret              &larr; Dr1 breakpoint HERE</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. The EXCEPTION_SINGLE_STEP Exception</h2>
+
+<p>When execution hits an address stored in Dr0&ndash;Dr3 (with the corresponding enable bit set in Dr7), the CPU raises an exception with code <code>0x80000004</code> (<code>EXCEPTION_SINGLE_STEP</code>). This is the same exception code produced by:</p>
+
+<table>
+<tr><th>Source</th><th>Exception Code</th><th>How to Differentiate</th></tr>
+<tr><td>Hardware breakpoint (Dr0&ndash;Dr3)</td><td><code>0x80000004</code></td><td>Check if RIP matches a Dr0&ndash;Dr3 address</td></tr>
+<tr><td>Trap Flag (TF) single-step</td><td><code>0x80000004</code></td><td>RIP does NOT match any Dr address; TF was set</td></tr>
+<tr><td>Branch trace (BTF)</td><td><code>0x80000004</code></td><td>Rarely used in user mode</td></tr>
+</table>
+
+<p>LayeredSyscall's <code>HandlerHwBp</code> differentiates by checking whether the exception address matches Dr0 or Dr1:</p>
+
+<pre><code><span class="lang-tag">C++</span>LONG WINAPI HandlerHwBp(PEXCEPTION_POINTERS ExceptionInfo) {
+    if (ExceptionInfo-&gt;ExceptionRecord-&gt;ExceptionCode != EXCEPTION_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    PCONTEXT ctx = ExceptionInfo-&gt;ContextRecord;
+    DWORD64 rip = ctx-&gt;Rip;
+
+    if (rip == ctx-&gt;Dr0) {
+        // Hit the syscall instruction breakpoint
+        // Swap SSN and arguments...
+    }
+    else if (rip == ctx-&gt;Dr1) {
+        // Hit the ret instruction breakpoint
+        // Clean up and restore state...
+    }
+    else {
+        // This is a trap flag single-step (used for call stack building)
+        // Handle single-step logic...
+    }
+
+    return EXCEPTION_CONTINUE_EXECUTION;
+}</code></pre>
+
+<div class="card">
+<h4>Dr6: Which Breakpoint Fired?</h4>
+<p>The CPU sets bits in Dr6 to indicate which breakpoint triggered:</p>
+<table>
+<tr><th>Dr6 Bit</th><th>Meaning</th></tr>
+<tr><td>Bit 0</td><td>Dr0 breakpoint was hit</td></tr>
+<tr><td>Bit 1</td><td>Dr1 breakpoint was hit</td></tr>
+<tr><td>Bit 2</td><td>Dr2 breakpoint was hit</td></tr>
+<tr><td>Bit 3</td><td>Dr3 breakpoint was hit</td></tr>
+<tr><td>Bit 14</td><td>Single-step (trap flag or BTF)</td></tr>
+</table>
+<p>LayeredSyscall primarily checks RIP against Dr0/Dr1 addresses rather than reading Dr6 bits, which is a simpler and equally reliable approach.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Advantages for Evasion</h2>
+
+<div class="card green">
+<h4>Why Hardware Breakpoints Are Ideal for Syscall Interception</h4>
+<table>
+<tr><th>Property</th><th>Benefit</th></tr>
+<tr><td><strong>No memory modification</strong></td><td>ntdll bytes remain pristine. Memory scanners (PE-sieve, Moneta) see a clean DLL. No 0xCC patches, no JMP hooks.</td></tr>
+<tr><td><strong>Per-thread scope</strong></td><td>Debug registers are part of the thread context. Setting Dr0 on thread A does not affect thread B. EDR monitoring of other threads sees nothing.</td></tr>
+<tr><td><strong>Dynamic set/clear</strong></td><td>Breakpoints can be installed just before a syscall and cleared immediately after. They exist for microseconds, minimizing the detection window.</td></tr>
+<tr><td><strong>No API calls</strong></td><td>Set from within a VEH handler by modifying the CONTEXT structure. No calls to <code>SetThreadContext</code> or <code>NtSetContextThread</code> for the EDR to intercept.</td></tr>
+<tr><td><strong>Executes from ntdll</strong></td><td>The <code>syscall</code> instruction still executes from its original address in ntdll. InstrumentationCallback sees a legitimate ntdll return address.</td></tr>
+</table>
+</div>
+
+<div class="card warn">
+<h4>Limitations to Be Aware Of</h4>
+<ul style="padding-left:20px;line-height:2;">
+<li><strong>Maximum 4 breakpoints per thread:</strong> Dr0&ndash;Dr3 only. LayeredSyscall uses 2 (Dr0 for syscall, Dr1 for ret), leaving Dr2&ndash;Dr3 available.</li>
+<li><strong>EDRs can check debug registers:</strong> Some EDRs periodically call <code>GetThreadContext</code> to inspect Dr0&ndash;Dr7. If non-zero debug registers are found outside a debugger context, it may be flagged. LayeredSyscall mitigates this by clearing breakpoints immediately after use.</li>
+<li><strong>Debugger interference:</strong> If a debugger is attached, it may use Dr0&ndash;Dr3 for its own breakpoints, conflicting with LayeredSyscall. The tool includes an <code>IsDebuggerPresent</code> check to avoid this.</li>
+<li><strong>Thread affinity:</strong> The breakpoints only exist on the thread that triggered the VEH handler. Multi-threaded applications need to ensure the syscall chain runs on the same thread that installed the breakpoints.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>Summary: The Complete Interception Chain</h2>
+
+<p>Combining what we learned in Modules 2&ndash;4, here is how the pieces fit together:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);text-align:center;margin-bottom:15px;">Hardware Breakpoint Interception Flow</h4>
+<div class="flow">
+<div class="box">Resolve SSN<br><small>(Exception Directory)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Find syscall addr<br><small>(scan for 0F 05)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Trigger VEH entry<br><small>(null deref)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Set Dr0/Dr1<br><small>(in VEH handler)</small></div>
+</div>
+<div class="flow" style="margin-top:10px;">
+<div class="box">Call legitimate API<br><small>(e.g., WriteFile)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Dr0 fires at syscall<br><small>SINGLE_STEP</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Swap SSN + args<br><small>(in VEH handler)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Kernel executes<br><small>desired function</small></div>
+</div>
+<div class="flow" style="margin-top:10px;">
+<div class="box">Kernel returns<br><small>(NTSTATUS)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Dr1 fires at ret<br><small>SINGLE_STEP</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Clean up &amp; restore<br><small>(clear Dr0/Dr1)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Return to caller<br><small>with real result</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz4">
+<h4>Module 4 Quiz: Hardware Breakpoints</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>Q1: Which Dr7 bit must be set to enable a hardware breakpoint on Dr0?</p>
+<label data-opt="0"><input type="radio" name="q4_0"> Bit 7 (G3)</label>
+<label data-opt="1"><input type="radio" name="q4_0"> Bit 1 (G0)</label>
+<label data-opt="2"><input type="radio" name="q4_0"> Bit 0 (L0 &mdash; local enable for Dr0)</label>
+<label data-opt="3"><input type="radio" name="q4_0"> Bit 16 (R/W0 condition)</label>
+<div class="explain">Bit 0 of Dr7 is L0, the local enable flag for Dr0. Setting <code>Dr7 |= (1 &lt;&lt; 0)</code> activates the breakpoint configured in Dr0. The "local" designation means it is automatically cleared on task switches (though in practice, Windows preserves debug registers across user-mode context switches within the same thread).</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>Q2: Why are hardware breakpoints stealthier than software breakpoints (INT3) for syscall interception?</p>
+<label data-opt="0"><input type="radio" name="q4_1"> Hardware breakpoints run in kernel mode and are invisible to user-mode scanners</label>
+<label data-opt="1"><input type="radio" name="q4_1"> They don't modify any bytes in memory, so ntdll remains clean and integrity checks pass</label>
+<label data-opt="2"><input type="radio" name="q4_1"> They are encrypted by the CPU and cannot be read by any software</label>
+<label data-opt="3"><input type="radio" name="q4_1"> EDRs cannot access the debug registers under any circumstances</label>
+<div class="explain">Software breakpoints replace instruction bytes with 0xCC (INT3), which memory scanners can detect by comparing in-memory ntdll against its on-disk image. Hardware breakpoints use CPU debug registers &mdash; no bytes in memory are modified, so scanners like PE-sieve and Moneta see a completely clean ntdll. Note that EDRs <em>can</em> read debug registers via GetThreadContext, but this is uncommon and LayeredSyscall clears breakpoints immediately after use.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz4')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Prev: Exception Handling &amp; VEH</a>
+<a class="primary" href="module5.html">Next: Dual-Handler Architecture &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

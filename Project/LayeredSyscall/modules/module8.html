@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Full Chain, Detection &amp; Prior Art - LayeredSyscall Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#22d3ee;--accent2:#f97316;--gradient:linear-gradient(135deg,#22d3ee,#f97316)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>LayeredSyscall Course</h2>
+<span>VEH Syscall Evasion</span>
+</div>
+<a class="home-link" href="../LayeredSyscall_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. EDR Hooks &amp; Detection</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Syscall Internals &amp; SSN</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Exception Handling &amp; VEH</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Hardware Breakpoints</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Dual-Handler Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Call Stack Construction</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module7.html"><span>7. Argument Marshalling</span><span class="diff d3">d3</span></a>
+<a class="mod-link active" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Full Chain, Detection &amp; Prior Art</h1>
+<p class="subtitle">Every step from wrapper to kernel and back &mdash; then how defenders can catch it all.</p>
+
+<div class="card highlight">
+<h4>Putting It All Together</h4>
+<p>Over the past seven modules, we dissected each component of LayeredSyscall in isolation. Now we trace the <strong>complete execution path</strong> from a single wrapper call through every exception, breakpoint, redirect, and context swap &mdash; all the way to the kernel and back. Then we examine how defenders can detect each layer.</p>
+</div>
+
+<!-- ==================== SECTION 1 ==================== -->
+<h2>End-to-End Execution Flow</h2>
+<p>Here is the complete 12-step sequence for every wrapped syscall. Each step maps to concepts from previous modules:</p>
+
+<div class="card">
+<h4>Step 1: Resolve Address</h4>
+<p><code>wrpNtXxx()</code> calls <code>GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtXxx")</code> to resolve the target function address in ntdll.dll. <em>(Module 5)</em></p>
+</div>
+
+<div class="card">
+<h4>Step 2: Resolve SSN</h4>
+<p><code>GetSsnByName("NtXxx")</code> walks the ntdll Exception Directory to find the function's ordinal, then maps that ordinal to the System Service Number. <em>(Module 2)</em></p>
+</div>
+
+<div class="card">
+<h4>Step 3: Trigger ACCESS_VIOLATION</h4>
+<p><code>SetHwBp(addr, extArgs, ssn)</code> stores global state, then <code>_SetHwBp(addr)</code> performs a null pointer dereference. The address is passed as RCX. <em>(Module 5)</em></p>
+</div>
+
+<div class="card">
+<h4>Step 4: AddHwBp Installs Breakpoints</h4>
+<p>VEH Handler 1 catches EXCEPTION_ACCESS_VIOLATION, reads RCX, scans for the <code>syscall</code> opcode (0x050F), and installs Dr0 (on syscall) and Dr1 (on ret). RIP advances past the crash. <em>(Module 5)</em></p>
+</div>
+
+<div class="card">
+<h4>Step 5: Call Real Nt* Function</h4>
+<p>The wrapper calls the real ntdll function through the resolved pointer. Any EDR inline hook at the function entry point executes normally. <em>(Module 5)</em></p>
+</div>
+
+<div class="card">
+<h4>Step 6: Dr0 Fires at Syscall Instruction</h4>
+<p>Execution reaches the <code>syscall</code> instruction inside the Nt* stub. The Dr0 hardware breakpoint fires, generating EXCEPTION_SINGLE_STEP. <em>(Module 4)</em></p>
+</div>
+
+<div class="card">
+<h4>Step 7: Save Context &amp; Redirect</h4>
+<p>HandlerHwBp (Phase 2) disables Dr0, saves the entire CONTEXT via memcpy, redirects RIP to <code>demofunction()</code> (MessageBoxW), and enables the Trap Flag (EFlags |= 0x100). <em>(Module 6)</em></p>
+</div>
+
+<div class="card">
+<h4>Step 8: Single-Step Trace</h4>
+<p>Execution flows through MessageBoxW &rarr; user32.dll internals &rarr; various Win32 layers. Each instruction triggers EXCEPTION_SINGLE_STEP. The handler re-enables TF each time, building genuine call stack frames. <em>(Module 6)</em></p>
+</div>
+
+<div class="card">
+<h4>Step 9: Three Conditions Met</h4>
+<p>Once execution enters ntdll (range check), the handler finds a <code>sub rsp &gt;= 0x58</code> (IsSubRsp = 1), then a <code>call</code> instruction (IsSubRsp = 2). All three conditions satisfied. <em>(Module 6)</em></p>
+</div>
+
+<div class="card green">
+<h4>Step 10: Context Swap</h4>
+<p>The handler saves TempRsp (legitimate stack), restores SavedContext (real arguments), replaces RSP with TempRsp, emulates <code>mov r10, rcx</code> and <code>mov eax, SSN</code>, copies extended arguments if needed, clears the Trap Flag, and sets RIP to the syscall instruction. <em>(Module 7)</em></p>
+</div>
+
+<div class="card green">
+<h4>Step 11: Syscall Executes</h4>
+<p>The <code>syscall</code> instruction executes from <strong>ntdll.dll memory</strong> with the correct SSN in RAX, real arguments in registers and on stack, and a <strong>genuine call stack</strong> showing MessageBoxW &rarr; user32 &rarr; ntdll. The kernel processes the request normally. <em>(Module 7)</em></p>
+</div>
+
+<div class="card">
+<h4>Step 12: Clean Return via Dr1</h4>
+<p>After the kernel returns, execution hits the <code>ret</code> instruction where Dr1 fires. The handler disables Dr1 and restores RSP to the original wrapper stack. The <code>ret</code> instruction returns to the wrapper with NTSTATUS in RAX. <em>(Module 7)</em></p>
+</div>
+
+<h3>Complete Flow Diagram</h3>
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Full Execution Chain</h4>
+<div class="flow" style="flex-wrap:wrap">
+<div class="box">1. Resolve addr<br><small>GetProcAddress</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">2. Get SSN<br><small>Exception Dir</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">3. NULL deref<br><small>ACCESS_VIOLATION</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">4. AddHwBp<br><small>Dr0 + Dr1</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">5. Call Nt*<br><small>EDR hook runs</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">6. Dr0 fires<br><small>SINGLE_STEP</small></div>
+</div>
+<div class="flow" style="flex-wrap:wrap;margin-top:10px">
+<div class="box">7. Save + Redirect<br><small>MessageBoxW</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">8. TF Trace<br><small>~1000s instrs</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">9. 3 Conditions<br><small>sub rsp + call</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">10. Ctx Swap<br><small>Args + Stack</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">11. Syscall!<br><small>Genuine stack</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">12. Dr1 Return<br><small>Restore RSP</small></div>
+</div>
+</div>
+
+<!-- ==================== SECTION 2 ==================== -->
+<h2>What the EDR Sees</h2>
+<p>The entire point of this technique is to change what kernel telemetry and call stack analysis reveals. Here is a side-by-side comparison:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Call Stack Comparison</h4>
+<div style="display:flex;gap:30px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:280px">
+<p style="text-align:center;color:var(--red);font-weight:700;margin-bottom:10px">Without LayeredSyscall (Anomalous)</p>
+<div class="flow" style="flex-direction:column;gap:3px">
+<div class="box r" style="width:100%">myapp.exe!main + 0x55</div>
+<div class="box r" style="width:100%">myapp.exe!wrpNtCreate + 0x30</div>
+<div class="box" style="width:100%">ntdll!NtCreateUserProcess + 0x14</div>
+<div class="box" style="width:100%">syscall</div>
+</div>
+<p style="text-align:center;color:var(--red);margin-top:8px;font-size:0.9em"><strong>Red flag:</strong> EXE jumps directly into ntdll</p>
+</div>
+<div style="flex:1;min-width:280px">
+<p style="text-align:center;color:var(--green);font-weight:700;margin-bottom:10px">With LayeredSyscall (Legitimate)</p>
+<div class="flow" style="flex-direction:column;gap:3px">
+<div class="box g" style="width:100%">user32!MessageBoxW + 0xAA</div>
+<div class="box g" style="width:100%">user32!InternalFunction + 0x42</div>
+<div class="box g" style="width:100%">ntdll!SomeNtdllFunc + 0x1B</div>
+<div class="box g" style="width:100%">ntdll!NtCreateUserProcess + 0x14</div>
+<div class="box" style="width:100%">syscall</div>
+</div>
+<p style="text-align:center;color:var(--green);margin-top:8px;font-size:0.9em"><strong>Legitimate:</strong> Standard API chain into ntdll</p>
+</div>
+</div>
+</div>
+
+<div class="card green">
+<h4>Genuine, Not Fabricated</h4>
+<p>The frames above are not synthetic return addresses pushed onto the stack. Execution <em>actually passed through</em> those functions. If a defender walks the stack using unwind metadata or checks that each return address corresponds to a valid call site, every frame will pass validation. This is the key advantage over frame-fabrication approaches.</p>
+</div>
+
+<!-- ==================== SECTION 3 ==================== -->
+<h2>The Demo: Creating calc.exe</h2>
+<p>The repository includes <code>demo.cpp</code>, which demonstrates launching <code>calc.exe</code> as a child process using the fully wrapped <code>NtCreateUserProcess</code> syscall (11 arguments, ExtendedArgs = TRUE).</p>
+
+<pre><code><span class="lang-tag">C++</span>// Initialize the VEH handlers
+InitializeHooks();
+
+// Build the process parameters
+UNICODE_STRING NtImagePath;
+RtlInitUnicodeString(&amp;NtImagePath, L"\\??\\C:\\Windows\\System32\\calc.exe");
+
+PRTL_USER_PROCESS_PARAMETERS ProcessParameters = NULL;
+RtlCreateProcessParametersEx(
+    &amp;ProcessParameters,
+    &amp;NtImagePath,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    RTL_USER_PROCESS_PARAMETERS_NORMALIZED
+);</code></pre>
+
+<pre><code><span class="lang-tag">C++</span>// Create the process using the wrapped syscall
+PS_CREATE_INFO CreateInfo = { 0 };
+CreateInfo.Size = sizeof(CreateInfo);
+CreateInfo.State = PsCreateInitialState;
+
+PPS_ATTRIBUTE_LIST AttributeList = /* ... setup ... */;
+
+HANDLE hProcess = NULL, hThread = NULL;
+
+NTSTATUS status = wrpNtCreateUserProcess(
+    &amp;hProcess,              // arg 1  (RCX)
+    &amp;hThread,               // arg 2  (RDX)
+    PROCESS_ALL_ACCESS,     // arg 3  (R8)
+    THREAD_ALL_ACCESS,      // arg 4  (R9)
+    NULL,                   // arg 5  (stack: 0x28)
+    NULL,                   // arg 6  (stack: 0x30)
+    0,                      // arg 7  (stack: 0x38)
+    0,                      // arg 8  (stack: 0x40)
+    ProcessParameters,      // arg 9  (stack: 0x48)
+    &amp;CreateInfo,            // arg 10 (stack: 0x50)
+    AttributeList           // arg 11 (stack: 0x58)
+);</code></pre>
+
+<div class="card">
+<h4>What Happens Under the Hood</h4>
+<p>This single call triggers the entire 12-step chain from above. The 11 arguments span both registers and stack slots through <code>ELEVENTH_ARGUMENT</code> (offset 0x58). The EDR sees a legitimate-looking call stack originating from MessageBoxW, not from the offensive tool's main function. Calculator launches successfully.</p>
+</div>
+
+<!-- ==================== SECTION 4 ==================== -->
+<h2>Detection Surface Analysis</h2>
+<p>Despite the sophistication of the technique, several detection opportunities exist. Defenders should layer multiple signals for confidence.</p>
+
+<div class="card warn">
+<h4>VEH Registration Monitoring</h4>
+<p><strong>Signal:</strong> Calls to <code>AddVectoredExceptionHandler</code> from non-standard modules. Legitimate use of VEH is rare outside debugging frameworks and language runtimes. An executable registering two VEH handlers early in its lifecycle is suspicious.</p>
+<p><strong>Detection:</strong> Hook or monitor <code>RtlAddVectoredExceptionHandler</code> in ntdll. Alert when the callback address is outside known legitimate modules.</p>
+</div>
+
+<div class="card warn">
+<h4>Hardware Breakpoint Detection</h4>
+<p><strong>Signal:</strong> Debug registers (Dr0-Dr3) contain non-zero values outside of a debugger session. Normal applications never set hardware breakpoints.</p>
+<p><strong>Detection:</strong> Periodically call <code>NtGetContextThread</code> on process threads and inspect debug registers. Non-zero Dr0-Dr3 values outside a debugger are highly anomalous. Note: LayeredSyscall clears breakpoints after each syscall, so timing is important.</p>
+</div>
+
+<div class="card warn">
+<h4>Trap Flag Abuse</h4>
+<p><strong>Signal:</strong> The EFlags TF bit (0x100) is set during normal execution. This bit is virtually never set outside of debugger single-stepping.</p>
+<p><strong>Detection:</strong> ETW providers or kernel callbacks that observe RFLAGS can flag processes with frequent TF-related exceptions. The sheer volume of EXCEPTION_SINGLE_STEP events is a strong signal.</p>
+</div>
+
+<div class="card warn">
+<h4>Exception Frequency Analysis</h4>
+<p><strong>Signal:</strong> Hundreds or thousands of EXCEPTION_SINGLE_STEP exceptions per syscall. Normal applications generate near-zero single-step exceptions. A process generating thousands per second is clearly doing something unusual.</p>
+<p><strong>Detection:</strong> Monitor exception dispatch rates via ETW or kernel instrumentation. Statistical anomaly detection on exception frequency per process.</p>
+</div>
+
+<div class="card warn">
+<h4>Heuristic: Phantom API Calls</h4>
+<p><strong>Signal:</strong> MessageBoxW (or another demo function) is called but never displays. The API enters its execution path but is abandoned mid-execution when the trap-flag trace redirects to the real syscall.</p>
+<p><strong>Detection:</strong> Correlate API call entry events with completion events. A MessageBoxW that starts but never creates a window is suspicious. Note: the demo function is configurable, so this specific heuristic can be evaded by changing it.</p>
+</div>
+
+<table>
+<tr><th>Detection Vector</th><th>Difficulty</th><th>Reliability</th><th>Evasion Possible?</th></tr>
+<tr><td>VEH Registration</td><td>Low</td><td>Medium</td><td>Could register from a DLL that looks legitimate</td></tr>
+<tr><td>Hardware BP Detection</td><td>Medium</td><td>Low (timing-dependent)</td><td>BPs are cleared after each syscall</td></tr>
+<tr><td>Trap Flag / TF Abuse</td><td>Medium</td><td>High</td><td>Difficult to avoid &mdash; fundamental to the technique</td></tr>
+<tr><td>Exception Frequency</td><td>Low</td><td>High</td><td>Cannot be reduced without changing the technique</td></tr>
+<tr><td>Phantom API Calls</td><td>High</td><td>Medium</td><td>Change demo function to something less conspicuous</td></tr>
+</table>
+
+<!-- ==================== SECTION 5 ==================== -->
+<h2>Prior Art Comparison</h2>
+<p>LayeredSyscall builds on years of syscall evasion research. Here is how it compares to the major techniques:</p>
+
+<div class="versus">
+<table>
+<tr>
+<th>Project</th>
+<th>SSN Resolution</th>
+<th>Syscall Location</th>
+<th>Call Stack</th>
+<th>Mechanism</th>
+</tr>
+<tr>
+<td><strong>Hell's Gate</strong></td>
+<td>Stub opcodes</td>
+<td>Direct (in EXE memory)</td>
+<td>Anomalous</td>
+<td>Read SSN from ntdll stub bytes</td>
+</tr>
+<tr>
+<td><strong>SysWhispers3</strong></td>
+<td>Zw* sort order</td>
+<td>Indirect (jumps into ntdll)</td>
+<td>Anomalous</td>
+<td>Static <code>jmp</code> to syscall in ntdll</td>
+</tr>
+<tr>
+<td><strong>HWSyscalls</strong></td>
+<td>HalosGate</td>
+<td>Indirect (in ntdll)</td>
+<td>Synthetic trampoline</td>
+<td>HW breakpoints + VEH</td>
+</tr>
+<tr>
+<td><strong>TamperingSyscalls</strong></td>
+<td>Various</td>
+<td>Through hook</td>
+<td>Spoofed arguments</td>
+<td>HW breakpoints + VEH</td>
+</tr>
+<tr>
+<td><strong>WithSecure Spoofer</strong></td>
+<td>N/A (separate)</td>
+<td>Various</td>
+<td>Fabricated frames</td>
+<td>UNWIND_CODE parsing</td>
+</tr>
+<tr style="background:rgba(34,211,238,0.08)">
+<td><strong>LayeredSyscall</strong></td>
+<td>Exception Directory</td>
+<td>Indirect (in ntdll)</td>
+<td><strong>GENUINE frames</strong></td>
+<td>VEH + HW BPs + Trap Flag</td>
+</tr>
+</table>
+</div>
+
+<div class="card highlight">
+<h4>Key Differentiator: Genuine vs. Fabricated Stacks</h4>
+<p>Hell's Gate and SysWhispers3 make no attempt at stack spoofing &mdash; their stacks are anomalous. HWSyscalls uses a synthetic trampoline (one frame). WithSecure fabricates multiple frames using UNWIND_CODE metadata, but the execution never actually passed through those frames. LayeredSyscall is unique in producing <strong>genuinely traversed</strong> call stack frames by actually executing a legitimate API (MessageBoxW) and hijacking its execution context at the right moment.</p>
+</div>
+
+<div class="card">
+<h4>Evolution of SSN Resolution</h4>
+<p>Each project uses a different approach to resolve System Service Numbers:</p>
+<ul>
+<li><strong>Hell's Gate:</strong> Reads the <code>mov eax, SSN</code> instruction from the ntdll stub (fails if hooked)</li>
+<li><strong>HalosGate:</strong> If the stub is hooked, scans neighboring stubs to infer the SSN</li>
+<li><strong>SysWhispers3:</strong> Sorts Zw* function addresses; the sort order equals the SSN</li>
+<li><strong>LayeredSyscall:</strong> Uses the ntdll Exception Directory to map function names to ordinals, then to SSNs. This is independent of stub byte patterns.</li>
+</ul>
+</div>
+
+<!-- ==================== SECTION 6 ==================== -->
+<h2>Limitations</h2>
+<p>LayeredSyscall is a proof of concept, not production-ready malware. Understanding its limitations is as important as understanding its capabilities.</p>
+
+<div class="card warn">
+<h4>Cannot Wrap NtSetContextThread</h4>
+<p>This function modifies thread context, including the debug registers (Dr0-Dr7) that LayeredSyscall relies on. Wrapping it would create a circular dependency: the hardware breakpoints need to persist to intercept the syscall, but the syscall itself would overwrite them. Any tool that needs to call <code>NtSetContextThread</code> must do so outside the LayeredSyscall framework.</p>
+</div>
+
+<div class="card warn">
+<h4>Performance Overhead</h4>
+<p>Each wrapped syscall generates hundreds to thousands of EXCEPTION_SINGLE_STEP exceptions during the trap-flag trace. Each exception involves a kernel-to-user transition, VEH dispatch, and handler execution. For a single syscall like NtCreateUserProcess this is acceptable, but wrapping performance-sensitive syscalls in a tight loop would be impractical.</p>
+</div>
+
+<div class="card warn">
+<h4>x64 Only</h4>
+<p>The technique relies on x64-specific features: the <code>syscall</code> instruction (not <code>sysenter</code>), the x64 register-based calling convention (RCX, RDX, R8, R9), and 64-bit CONTEXT structure layout. Porting to x86 (WoW64) would require fundamental redesign.</p>
+</div>
+
+<div class="card warn">
+<h4>Default Demo Function Fingerprinting</h4>
+<p>The default <code>demofunction()</code> is MessageBoxW. If defenders look for processes that call MessageBoxW but never create a message box window, this is detectable. However, the demo function is <strong>configurable</strong> &mdash; any API that eventually reaches ntdll would work. Using something more common (like a file operation API) would be harder to fingerprint.</p>
+</div>
+
+<div class="card warn">
+<h4>No Build System in Repository</h4>
+<p>The repository does not include Visual Studio project files, CMakeLists, or a Makefile. Users must manually integrate the source files into an existing MSVC project with the correct settings (x64, C++17 or later, Windows SDK headers).</p>
+</div>
+
+<!-- ==================== SECTION 7 ==================== -->
+<h2>References &amp; Further Reading</h2>
+<div class="card">
+<h4>Core Projects</h4>
+<ul>
+<li><strong>LayeredSyscall</strong> &mdash; The project this course is based on (GitHub: WKL-Sec/LayeredSyscall)</li>
+<li><strong>Hell's Gate</strong> &mdash; Original dynamic SSN resolution (GitHub: am0nsec/HellsGate)</li>
+<li><strong>Halo's Gate</strong> &mdash; Hooked-stub neighbor scanning (GitHub: trickster0/TartarusGate)</li>
+<li><strong>SysWhispers3</strong> &mdash; Zw sort-order SSN resolution with indirect syscalls (GitHub: klezVirus/SysWhispers3)</li>
+<li><strong>HWSyscalls</strong> &mdash; Hardware breakpoint-based syscalls (GitHub: ShorSec/HWSyscalls)</li>
+<li><strong>TamperingSyscalls</strong> &mdash; Argument-spoofing syscalls via VEH (GitHub: rad9800/TamperingSyscalls)</li>
+</ul>
+</div>
+
+<div class="card">
+<h4>Call Stack Spoofing Research</h4>
+<ul>
+<li><strong>WithSecure Call Stack Spoofer</strong> &mdash; UNWIND_CODE-based frame fabrication</li>
+<li><strong>VulcanRaven</strong> &mdash; Return address spoofing via synthetic frames</li>
+<li><strong>ThreadStackSpoofer</strong> &mdash; Sleep-time stack manipulation</li>
+</ul>
+</div>
+
+<div class="card">
+<h4>Detection Resources</h4>
+<ul>
+<li><strong>Elastic Blog</strong> &mdash; Research on detecting direct/indirect syscalls via call stack analysis</li>
+<li><strong>ETW Threat Intelligence</strong> &mdash; Microsoft's ETW provider for kernel callback telemetry</li>
+<li><strong>Windows Internals, 7th Edition</strong> &mdash; Pavel Yosifovich et al. (comprehensive OS internals reference)</li>
+</ul>
+</div>
+
+<!-- ==================== SECTION 8 ==================== -->
+<h2>Course Complete</h2>
+<div class="card green">
+<h4>Congratulations!</h4>
+<p>You have completed the LayeredSyscall course. Over 8 modules, you learned:</p>
+<ul>
+<li><strong>Module 1:</strong> How EDRs hook userland APIs and why syscall evasion matters</li>
+<li><strong>Module 2:</strong> Syscall internals, the SSDT, and how LayeredSyscall resolves SSNs via the Exception Directory</li>
+<li><strong>Module 3:</strong> Windows exception handling from SEH through VEH and how to weaponize it</li>
+<li><strong>Module 4:</strong> Hardware breakpoints via debug registers (Dr0-Dr7) and their role in the technique</li>
+<li><strong>Module 5:</strong> The dual-handler architecture: AddHwBp (setup) and HandlerHwBp (execution management)</li>
+<li><strong>Module 6:</strong> Call stack construction via CPU Trap Flag tracing through a legitimate API</li>
+<li><strong>Module 7:</strong> Argument marshalling, the context swap, and clean return via Dr1</li>
+<li><strong>Module 8:</strong> The complete execution chain, detection surfaces, and comparison with prior art</li>
+</ul>
+</div>
+
+<div class="card">
+<h4>Suggested Next Steps</h4>
+<ul>
+<li><strong>Read the source:</strong> Clone the LayeredSyscall repository and trace through HookModule.cpp line by line with this course as a guide</li>
+<li><strong>Build and test:</strong> Set up a Windows VM with a debugger (x64dbg or WinDbg) and step through the exception chain</li>
+<li><strong>Extend:</strong> Try wrapping additional Nt* functions not in the default set</li>
+<li><strong>Detect:</strong> Write a detector for trap flag abuse or exception frequency anomalies</li>
+<li><strong>Compare:</strong> Build HWSyscalls or TamperingSyscalls and compare the call stacks side by side</li>
+<li><strong>Study prior art:</strong> Read the Hell's Gate and SysWhispers3 source code to understand the evolution</li>
+</ul>
+</div>
+
+<!-- ==================== QUIZ ==================== -->
+<div class="quiz" id="quiz8">
+<h4>Final Exam: Full Chain &amp; Detection</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: In the complete 12-step chain, what happens between "Call real Nt* function" (Step 5) and "Save context &amp; redirect" (Step 7)?</p>
+<label data-opt="0"><input type="radio" name="q8_0"> The EDR detects and blocks the syscall</label>
+<label data-opt="1"><input type="radio" name="q8_0"> The Dr0 hardware breakpoint fires at the syscall instruction, generating EXCEPTION_SINGLE_STEP (Step 6)</label>
+<label data-opt="2"><input type="radio" name="q8_0"> The Trap Flag is enabled and tracing begins</label>
+<label data-opt="3"><input type="radio" name="q8_0"> The SSN is loaded into RAX by the ntdll stub</label>
+<div class="explain">Step 6 is the Dr0 breakpoint firing when execution reaches the syscall instruction inside the Nt* stub. This generates EXCEPTION_SINGLE_STEP, which is caught by HandlerHwBp. The ntdll stub may have loaded RAX with the SSN, but the breakpoint fires at the syscall instruction itself, before it enters the kernel.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q2: Which detection vector is hardest for LayeredSyscall to evade?</p>
+<label data-opt="0"><input type="radio" name="q8_1"> VEH registration monitoring</label>
+<label data-opt="1"><input type="radio" name="q8_1"> Hardware breakpoint detection</label>
+<label data-opt="2"><input type="radio" name="q8_1"> Phantom API call heuristics</label>
+<label data-opt="3"><input type="radio" name="q8_1"> Exception frequency analysis (hundreds of SINGLE_STEP per syscall)</label>
+<div class="explain">The massive number of EXCEPTION_SINGLE_STEP exceptions is fundamental to the technique and cannot be reduced. VEH registration can be hidden, hardware breakpoints are cleared between calls, and the demo function can be changed. But the trap-flag trace necessarily generates hundreds or thousands of exceptions per syscall.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: How does LayeredSyscall's call stack differ from WithSecure's call stack spoofer?</p>
+<label data-opt="0"><input type="radio" name="q8_2"> LayeredSyscall uses fewer stack frames</label>
+<label data-opt="1"><input type="radio" name="q8_2"> WithSecure's stacks are genuine while LayeredSyscall's are fabricated</label>
+<label data-opt="2"><input type="radio" name="q8_2"> LayeredSyscall's frames are genuine (actually executed) while WithSecure fabricates synthetic frames via UNWIND_CODE parsing</label>
+<label data-opt="3"><input type="radio" name="q8_2"> There is no difference; both produce identical call stacks</label>
+<div class="explain">WithSecure's approach parses UNWIND_CODE structures to construct plausible-looking stack frames without actually executing the corresponding code. LayeredSyscall calls a real API (MessageBoxW), lets the OS build genuine stack frames, then hijacks the execution context. The frames are real because code actually executed through them.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q4: Why can't LayeredSyscall wrap NtSetContextThread?</p>
+<label data-opt="0"><input type="radio" name="q8_3"> NtSetContextThread modifies debug registers, creating a circular dependency with the hardware breakpoints the technique relies on</label>
+<label data-opt="1"><input type="radio" name="q8_3"> NtSetContextThread has too many arguments (more than 12)</label>
+<label data-opt="2"><input type="radio" name="q8_3"> NtSetContextThread is not exported by ntdll.dll</label>
+<label data-opt="3"><input type="radio" name="q8_3"> The SSN for NtSetContextThread cannot be resolved via the Exception Directory</label>
+<div class="explain">NtSetContextThread writes to the thread's CONTEXT, which includes debug registers Dr0-Dr7. LayeredSyscall needs those registers active (Dr0 on syscall, Dr1 on ret) throughout the execution chain. If the syscall itself modifies those registers, the hardware breakpoints would be corrupted mid-execution.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz8')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Prev: Argument Marshalling</a>
+<a class="primary" href="../LayeredSyscall_index.html">Back to Course Home &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

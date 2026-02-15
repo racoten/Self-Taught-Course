@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: EDR Hooks &amp; The Detection Problem - LayeredSyscall Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F6E1;&#xFE0F;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#22d3ee;--accent2:#f97316;--gradient:linear-gradient(135deg,#22d3ee,#f97316)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>LayeredSyscall Course</h2>
+<span>VEH Syscall Evasion</span>
+</div>
+<a class="home-link" href="../LayeredSyscall_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span>1. EDR Hooks &amp; Detection</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Syscall Internals &amp; SSN</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Exception Handling &amp; VEH</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Hardware Breakpoints</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Dual-Handler Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Call Stack Construction</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module7.html"><span>7. Argument Marshalling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: EDR Hooks &amp; The Detection Problem</h1>
+<p class="subtitle">Why calling NtAllocateVirtualMemory isn't as simple as it used to be.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Before diving into LayeredSyscall's implementation, you need to understand <strong>what problem it solves</strong>. This module covers how EDRs instrument Windows API calls, the three detection layers that catch most syscall evasion techniques, and why a new approach was needed.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. What Is an EDR?</h2>
+
+<p><strong>Endpoint Detection and Response (EDR)</strong> is the evolution of traditional antivirus. While AV relies on static signature matching, EDR monitors process behavior in real-time. It watches what your code <em>does</em>, not just what it <em>looks like</em>.</p>
+
+<p>Every modern EDR deploys a <strong>user-mode component</strong> &mdash; typically a DLL that gets loaded into every process. This DLL patches (hooks) critical API functions so the EDR can inspect arguments and return values before they reach the kernel.</p>
+
+<div class="card">
+<h4>Key EDR Components</h4>
+<table>
+<tr><th>Component</th><th>Location</th><th>Purpose</th></tr>
+<tr><td>User-mode DLL</td><td>Loaded into every process</td><td>Hooks ntdll functions, inspects API arguments</td></tr>
+<tr><td>Kernel driver</td><td>Ring 0</td><td>Kernel callbacks, ETW providers, minifilters</td></tr>
+<tr><td>Cloud backend</td><td>Remote</td><td>Telemetry correlation, threat intelligence</td></tr>
+<tr><td>InstrumentationCallback</td><td>Per-process (kernel-set)</td><td>Validates syscall return addresses</td></tr>
+</table>
+</div>
+
+<p>The user-mode hook is the most relevant to LayeredSyscall. It intercepts calls at the <strong>ntdll.dll</strong> level &mdash; the lowest user-mode layer before the kernel transition.</p>
+
+<!-- ============================================================ -->
+<h2>2. How EDR Hooks Work</h2>
+
+<p>Every <code>Nt*</code> function in ntdll.dll is a thin wrapper called a <strong>syscall stub</strong>. In its clean (unhooked) state, the stub looks like this:</p>
+
+<h3>Unhooked ntdll Syscall Stub</h3>
+<pre><code><span class="lang-tag">x86-64 ASM</span>NtAllocateVirtualMemory:
+  4C 8B D1          mov r10, rcx        ; save 1st arg (RCX clobbered by syscall)
+  B8 18 00 00 00    mov eax, 0x18       ; SSN (System Service Number)
+  0F 05             syscall             ; transition to Ring 0
+  C3                ret                 ; return to caller</code></pre>
+
+<p>The stub is only <strong>12 bytes</strong>. It loads the syscall number into EAX, executes the <code>syscall</code> instruction, and returns. No logic, no validation &mdash; just a gateway to the kernel.</p>
+
+<h3>Hooked ntdll Syscall Stub</h3>
+<p>An EDR replaces the first 5 bytes with a relative jump (<code>E9</code> opcode) to its own inspection function:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>NtAllocateVirtualMemory (HOOKED):
+  E9 XX XX XX XX    jmp EDR_Hook        ; 5-byte relative jump to EDR DLL
+  00 00 00          ; remaining bytes (corrupted/overwritten)
+  0F 05             syscall             ; still present but never reached via normal flow
+  C3                ret</code></pre>
+
+<p>The <code>E9</code> jump replaces <code>mov r10, rcx</code> (3 bytes) and the first 2 bytes of <code>mov eax, SSN</code>. When your code calls <code>NtAllocateVirtualMemory</code>, execution is redirected to the EDR's hook handler, which:</p>
+
+<div class="card">
+<h4>EDR Hook Handler Flow</h4>
+<div class="flow">
+<div class="box">Your code calls Nt* function</div>
+<div class="arrow">&rarr;</div>
+<div class="box r">JMP to EDR hook</div>
+<div class="arrow">&rarr;</div>
+<div class="box">EDR inspects args &amp; context</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Allow: execute real stub</div>
+</div>
+<p style="margin-top:10px;color:var(--dim);font-size:.85rem;">If the EDR deems the call suspicious, it can block or alert instead of forwarding to the real stub.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Three Layers of Detection</h2>
+
+<p>Over time, EDRs developed multiple detection layers. Each one catches a different class of evasion technique. Understanding all three is critical to appreciating why LayeredSyscall exists.</p>
+
+<div class="card">
+<h4>Layer 1: NTDLL Remapping Detection</h4>
+<p><strong>What it catches:</strong> Loading a fresh (unhooked) copy of ntdll.dll from disk.</p>
+<p>Early evasion techniques loaded a second copy of ntdll from <code>C:\Windows\System32\ntdll.dll</code> or from the <code>KnownDlls</code> section object. This gave them clean syscall stubs without EDR hooks.</p>
+<p><strong>How EDRs detect it:</strong> They monitor for suspicious file reads of ntdll.dll, section mapping of <code>\KnownDlls\ntdll.dll</code>, or processes with multiple ntdll mappings. Some EDRs use kernel callbacks (<code>PsSetLoadImageNotifyRoutine</code>) to detect fresh DLL loads.</p>
+</div>
+
+<div class="card">
+<h4>Layer 2: Direct Syscall Detection (InstrumentationCallback)</h4>
+<p><strong>What it catches:</strong> Executing the <code>syscall</code> instruction from outside ntdll memory.</p>
+<p>Direct syscall techniques (SysWhispers, Hell's Gate) embed the <code>syscall</code> instruction directly in the attacker's code. The <code>syscall</code> instruction saves RIP into RCX, and on return the kernel passes control to <code>KiUserExceptionDispatcher</code> or back to the return address.</p>
+<p><strong>How EDRs detect it:</strong> The <code>InstrumentationCallback</code> (set via <code>NtSetInformationProcess</code>) is invoked after every syscall return. It checks if the return address falls within ntdll's memory range. If the return address points to <code>.text</code> of your EXE or some unknown region, it's flagged as a direct syscall.</p>
+<pre><code><span class="lang-tag">Detection Logic</span>// InstrumentationCallback pseudo-code
+if (returnAddress &lt; ntdll_base || returnAddress &gt; ntdll_end) {
+    // syscall did NOT originate from ntdll
+    // Flag as DIRECT SYSCALL &rarr; alert/block
+}</code></pre>
+</div>
+
+<div class="card warn">
+<h4>Layer 3: Call Stack Analysis</h4>
+<p><strong>What it catches:</strong> Anomalous call stacks that skip the normal API call chain.</p>
+<p>A legitimate call to <code>NtAllocateVirtualMemory</code> produces a call stack like:</p>
+<pre><code><span class="lang-tag">Legitimate Stack</span>ntdll!NtAllocateVirtualMemory      ; syscall stub
+ntdll!RtlpAllocateHeapInternal      ; internal ntdll logic
+KERNELBASE!VirtualAlloc             ; Win32 wrapper
+kernel32!VirtualAllocStub           ; kernel32 thunk
+myapp.exe!main                      ; application code</code></pre>
+<p>When attacker code calls an Nt* function directly (even via indirect syscall), the stack looks wrong:</p>
+<pre><code><span class="lang-tag">Anomalous Stack</span>ntdll!NtAllocateVirtualMemory      ; syscall stub
+myapp.exe!some_function             ; DIRECT jump from EXE to ntdll!
+                                     ; Where's kernel32? KERNELBASE?</code></pre>
+<p><strong>How EDRs detect it:</strong> They walk the call stack (using <code>RtlVirtualUnwind</code> or stack frame pointers) and check that expected intermediate frames exist. A call from user code directly to an ntdll Nt* function, without traversing kernel32/KERNELBASE, is flagged as suspicious.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Why Indirect Syscalls Aren't Enough</h2>
+
+<p>Indirect syscalls (used by SysWhispers2, HWSyscalls, etc.) solve <strong>Layer 2</strong> by jumping to the <code>syscall</code> instruction inside ntdll's own memory. The return address now correctly points to ntdll, so InstrumentationCallback sees nothing wrong.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);text-align:center;margin-bottom:15px;">Indirect Syscall: Solves Layer 2, Fails Layer 3</h4>
+<div class="flow">
+<div class="box">myapp.exe</div>
+<div class="arrow">&rarr;</div>
+<div class="box r">ntdll!NtAllocateVirtualMemory<br><small>(jumps directly, no kernel32 frame)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">syscall executes from ntdll<br><small>(Layer 2: PASS)</small></div>
+</div>
+<p style="text-align:center;color:var(--red);margin-top:10px;font-weight:700;font-size:.9rem;">But the call stack shows: myapp.exe &rarr; ntdll (missing kernel32/KERNELBASE frames) &rarr; Layer 3: FAIL</p>
+</div>
+
+<div class="versus">
+<div>
+<h5 style="color:var(--red)">Indirect Syscall (e.g., SysWhispers2)</h5>
+<ul>
+<li>Syscall executes from ntdll memory (Layer 2 bypassed)</li>
+<li>Call stack shows EXE &rarr; ntdll directly</li>
+<li>Missing kernel32 / KERNELBASE frames</li>
+<li>Call stack analysis flags the anomaly</li>
+<li>Only addresses 2 of 3 detection layers</li>
+</ul>
+</div>
+<div>
+<h5 style="color:var(--green)">Legitimate API Call</h5>
+<ul>
+<li>Syscall executes from ntdll memory</li>
+<li>Call stack: EXE &rarr; kernel32 &rarr; KERNELBASE &rarr; ntdll</li>
+<li>All expected intermediate frames present</li>
+<li>Call stack analysis finds nothing wrong</li>
+<li>Passes all 3 detection layers</li>
+</ul>
+</div>
+</div>
+
+<p>Some tools attempted to solve Layer 3 by <strong>spoofing</strong> call stack frames &mdash; manually pushing fake return addresses onto the stack before the syscall. However, advanced EDRs can validate these frames by checking if the return addresses actually correspond to valid <code>CALL</code> instruction sites in the supposed caller modules.</p>
+
+<!-- ============================================================ -->
+<h2>5. What LayeredSyscall Solves</h2>
+
+<div class="card green">
+<h4>The LayeredSyscall Approach</h4>
+<p>Instead of <em>faking</em> call stack frames, LayeredSyscall generates <strong>real</strong> ones. It works by:</p>
+<ol style="margin-top:10px;padding-left:20px;line-height:2;">
+<li>Calling a <strong>legitimate Win32 API</strong> (e.g., <code>WriteFile</code>) that naturally traverses kernel32 &rarr; KERNELBASE &rarr; ntdll</li>
+<li>Using <strong>hardware breakpoints</strong> to intercept execution just before the <code>syscall</code> instruction inside ntdll</li>
+<li><strong>Swapping the syscall number</strong> (SSN in EAX) and <strong>arguments</strong> (in registers and on the stack) to those of the <em>desired</em> function</li>
+<li>Letting the <code>syscall</code> execute &mdash; the kernel sees the attacker's SSN but the <strong>call stack is completely legitimate</strong></li>
+</ol>
+<p style="margin-top:10px;">The result: every detection layer sees exactly what it expects. The syscall originates from ntdll (Layer 2), the call stack passes through kernel32 and KERNELBASE (Layer 3), and no fresh copy of ntdll was loaded (Layer 1).</p>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);text-align:center;margin-bottom:15px;">LayeredSyscall Execution Model</h4>
+<div class="flow">
+<div class="box">Call legitimate API<br><small>(e.g., WriteFile)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">kernel32 &rarr; KERNELBASE<br><small>(real frames built)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">ntdll stub reached<br><small>(HW breakpoint fires)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">VEH swaps SSN + args<br><small>(syscall hijacked)</small></div>
+</div>
+</div>
+
+<div class="card">
+<h4>Detection Layer Scorecard</h4>
+<table>
+<tr><th>Detection Layer</th><th>Direct Syscall</th><th>Indirect Syscall</th><th>Stack Spoofing</th><th>LayeredSyscall</th></tr>
+<tr><td>Layer 1: NTDLL Remapping</td><td style="color:var(--green)">PASS</td><td style="color:var(--green)">PASS</td><td style="color:var(--green)">PASS</td><td style="color:var(--green)">PASS</td></tr>
+<tr><td>Layer 2: Direct Syscall</td><td style="color:var(--red)">FAIL</td><td style="color:var(--green)">PASS</td><td style="color:var(--green)">PASS</td><td style="color:var(--green)">PASS</td></tr>
+<tr><td>Layer 3: Call Stack</td><td style="color:var(--red)">FAIL</td><td style="color:var(--red)">FAIL</td><td style="color:var(--dim)">PARTIAL</td><td style="color:var(--green)">PASS</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Real-World EDR Hooking Examples</h2>
+
+<p>Different EDR vendors implement their hooks in slightly different ways, but the core technique remains the same. Here are common patterns observed in the wild:</p>
+
+<div class="card">
+<h4>Common EDR Hook Patterns</h4>
+<table>
+<tr><th>Pattern</th><th>Bytes</th><th>Description</th></tr>
+<tr><td>5-byte JMP</td><td><code>E9 XX XX XX XX</code></td><td>Relative jump. Most common. Overwrites first 5 bytes of the stub.</td></tr>
+<tr><td>6-byte JMP [rip]</td><td><code>FF 25 00 00 00 00</code></td><td>Indirect jump via RIP-relative pointer. Followed by an 8-byte absolute address.</td></tr>
+<tr><td>2-byte JMP short</td><td><code>EB XX</code></td><td>Short relative jump (within &plusmn;127 bytes). Used when the trampoline is close.</td></tr>
+<tr><td>MOV RAX + JMP</td><td><code>48 B8 ... FF E0</code></td><td>Load absolute address into RAX then JMP RAX. 12 bytes total. Used for far targets.</td></tr>
+</table>
+</div>
+
+<h3>Detecting Hooks Programmatically</h3>
+
+<p>If you wanted to check whether a function is hooked, you could compare the first bytes against the expected clean stub pattern. This is how tools like Hell's Gate determine if they can read the SSN directly:</p>
+
+<pre><code><span class="lang-tag">C++</span>BOOL IsStubHooked(PVOID funcAddr) {
+    BYTE* p = (BYTE*)funcAddr;
+
+    // Clean stub starts with: 4C 8B D1 B8 (mov r10, rcx; mov eax, ...)
+    if (p[0] == 0x4C &amp;&amp; p[1] == 0x8B &amp;&amp; p[2] == 0xD1 &amp;&amp; p[3] == 0xB8) {
+        return FALSE;  // Unhooked
+    }
+
+    // Check for common hook patterns
+    if (p[0] == 0xE9)         return TRUE;  // JMP rel32
+    if (p[0] == 0xFF)         return TRUE;  // JMP [rip+disp32]
+    if (p[0] == 0xEB)         return TRUE;  // JMP short
+
+    return TRUE;  // Unknown pattern, assume hooked
+}</code></pre>
+
+<p>LayeredSyscall doesn't need this check because its SSN resolution method (Module 2) is completely independent of stub bytes. However, understanding hook detection helps appreciate why earlier techniques were fragile.</p>
+
+<div class="card warn">
+<h4>ETW (Event Tracing for Windows)</h4>
+<p>Beyond inline hooks, modern EDRs also leverage <strong>ETW</strong> (Event Tracing for Windows) for visibility. ETW provides kernel-level telemetry that user-mode evasion cannot disable. Key providers include:</p>
+<ul style="padding-left:20px;line-height:2;">
+<li><strong>Microsoft-Windows-Threat-Intelligence</strong> &mdash; Tracks memory allocation, process injection, and code integrity events</li>
+<li><strong>Microsoft-Windows-Kernel-Process</strong> &mdash; Process creation, thread creation, image loads</li>
+<li><strong>Microsoft-Windows-Kernel-Audit-API-Calls</strong> &mdash; Audits sensitive API calls from user mode</li>
+</ul>
+<p>LayeredSyscall's technique operates entirely in user mode and does not address kernel-level ETW telemetry. A complete evasion strategy would need to consider ETW as a separate detection surface.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>Key Terminology</h2>
+
+<table>
+<tr><th>Term</th><th>Definition</th></tr>
+<tr><td><strong>SSN</strong></td><td>System Service Number &mdash; index into the SSDT that identifies which kernel function to call</td></tr>
+<tr><td><strong>Syscall Stub</strong></td><td>The small assembly sequence in ntdll that loads the SSN and executes the <code>syscall</code> instruction</td></tr>
+<tr><td><strong>Inline Hook</strong></td><td>Overwriting the first bytes of a function with a JMP to redirect execution</td></tr>
+<tr><td><strong>InstrumentationCallback</strong></td><td>A per-process callback invoked after every syscall return; used to validate return addresses</td></tr>
+<tr><td><strong>VEH</strong></td><td>Vectored Exception Handling &mdash; process-wide exception handlers that intercept CPU exceptions</td></tr>
+<tr><td><strong>Hardware Breakpoint</strong></td><td>A CPU debug register (Dr0&ndash;Dr3) that fires an exception when a specific address is executed</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz1">
+<h4>Module 1 Quiz: EDR Hooks &amp; Detection</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>Q1: What opcode does an EDR use to hook the first bytes of an ntdll Nt* function?</p>
+<label data-opt="0"><input type="radio" name="q1_0"> 0xCC (INT3 software breakpoint)</label>
+<label data-opt="1"><input type="radio" name="q1_0"> 0F 05 (syscall instruction)</label>
+<label data-opt="2"><input type="radio" name="q1_0"> E9 (5-byte relative JMP)</label>
+<label data-opt="3"><input type="radio" name="q1_0"> FF 25 (indirect JMP via pointer)</label>
+<div class="explain">EDRs use a 5-byte relative jump (opcode E9) to redirect the first instructions of the syscall stub to their hook handler DLL. The 5-byte JMP replaces the <code>mov r10, rcx</code> and part of the <code>mov eax, SSN</code> instructions.</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>Q2: Which detection layer does InstrumentationCallback implement?</p>
+<label data-opt="0"><input type="radio" name="q1_1"> Layer 1: NTDLL Remapping Detection</label>
+<label data-opt="1"><input type="radio" name="q1_1"> Layer 2: Direct Syscall Detection (return address outside ntdll)</label>
+<label data-opt="2"><input type="radio" name="q1_1"> Layer 3: Call Stack Analysis</label>
+<label data-opt="3"><input type="radio" name="q1_1"> All three layers simultaneously</label>
+<div class="explain">InstrumentationCallback is invoked after every syscall return and checks whether the return address falls within ntdll's memory range. If the syscall instruction was executed from outside ntdll (e.g., from your EXE's .text section), this is Layer 2: Direct Syscall Detection.</div>
+</div>
+
+<div class="quiz-q" data-correct="3">
+<p>Q3: Why do indirect syscalls still fail call stack analysis (Layer 3)?</p>
+<label data-opt="0"><input type="radio" name="q1_2"> The syscall instruction is in the wrong memory region</label>
+<label data-opt="1"><input type="radio" name="q1_2"> The SSN is resolved incorrectly</label>
+<label data-opt="2"><input type="radio" name="q1_2"> They require loading a fresh copy of ntdll</label>
+<label data-opt="3"><input type="radio" name="q1_2"> The call stack shows EXE jumping directly to ntdll, missing kernel32/KERNELBASE frames</label>
+<div class="explain">Indirect syscalls execute the <code>syscall</code> from ntdll memory (passing Layer 2), but the call stack still shows your EXE calling the Nt* function directly without going through the normal Win32 API chain (kernel32 &rarr; KERNELBASE &rarr; ntdll). EDR call stack walkers flag this missing intermediate frame as anomalous.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: Syscall Internals &amp; SSN &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

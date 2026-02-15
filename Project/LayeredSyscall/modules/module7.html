@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: Argument Marshalling &amp; Syscall Execution - LayeredSyscall Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#22d3ee;--accent2:#f97316;--gradient:linear-gradient(135deg,#22d3ee,#f97316)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>LayeredSyscall Course</h2>
+<span>VEH Syscall Evasion</span>
+</div>
+<a class="home-link" href="../LayeredSyscall_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. EDR Hooks &amp; Detection</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Syscall Internals &amp; SSN</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Exception Handling &amp; VEH</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Hardware Breakpoints</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Dual-Handler Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Call Stack Construction</span><span class="diff d3">d3</span></a>
+<a class="mod-link active" href="module7.html"><span>7. Argument Marshalling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: Argument Marshalling &amp; Syscall Execution</h1>
+<p class="subtitle">Registers from the past, a stack from the present &mdash; the Frankenstein context that fools kernel telemetry.</p>
+
+<div class="card highlight">
+<h4>The Critical Moment</h4>
+<p>When the three-condition algorithm (Module 6) reaches <code>IsSubRsp == 2</code>, we hold two things: a <strong>saved context</strong> from the original syscall (containing all the real arguments) and a <strong>live stack</strong> with genuine call frames from the MessageBoxW chain. The context swap merges these into a single execution state: real arguments + legitimate call stack. This is the moment everything comes together.</p>
+</div>
+
+<!-- ==================== SECTION 1 ==================== -->
+<h2>The Context Swap</h2>
+<p>When <code>IsSubRsp</code> reaches 2, the handler performs the most critical operation in the entire technique &mdash; the context swap. This is a carefully ordered sequence that preserves exactly what we need from each context.</p>
+
+<pre><code><span class="lang-tag">C++</span>// IsSubRsp == 2: All three conditions met
+if (IsSubRsp == 2) {
+    // Step 1: Save the CURRENT RSP (legitimate call stack)
+    ULONG_PTR TempRsp = ExceptionInfo-&gt;ContextRecord-&gt;Rsp;
+
+    // Step 2: Restore the SAVED context (real syscall arguments)
+    //         This overwrites ALL registers including RSP
+    memcpy(ExceptionInfo-&gt;ContextRecord,
+           &amp;SavedContext,
+           sizeof(CONTEXT));
+
+    // Step 3: Replace RSP with the legitimate stack pointer
+    //         This keeps the genuine call frames from MessageBoxW chain
+    ExceptionInfo-&gt;ContextRecord-&gt;Rsp = TempRsp;
+
+    // ... (syscall emulation and argument copying follow)
+}</code></pre>
+
+<div class="card">
+<h4>Step-by-Step Breakdown</h4>
+<table>
+<tr><th>Step</th><th>What Changes</th><th>Why</th></tr>
+<tr><td><strong>Save TempRsp</strong></td><td>Copy current RSP to a local variable</td><td>The current RSP points to the legitimate call stack (MessageBoxW &rarr; user32 &rarr; ntdll). We must not lose this.</td></tr>
+<tr><td><strong>Restore SavedContext</strong></td><td>Overwrite the entire CONTEXT with the saved snapshot</td><td>This restores RCX, RDX, R8, R9 (first 4 arguments), RAX, and all other registers to their values at the original syscall breakpoint</td></tr>
+<tr><td><strong>Replace RSP</strong></td><td>Overwrite RSP with TempRsp</td><td>The saved RSP pointed to the wrapper function's stack. We replace it with the legitimate stack so the call frames above us are from the MessageBoxW chain.</td></tr>
+</table>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Context Swap Visualized</h4>
+<div style="display:flex;gap:30px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:var(--accent);font-weight:700;margin-bottom:10px">SavedContext (from Phase 2)</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box g" style="width:100%">RCX = arg1 (real)</div>
+<div class="box g" style="width:100%">RDX = arg2 (real)</div>
+<div class="box g" style="width:100%">R8 = arg3 (real)</div>
+<div class="box g" style="width:100%">R9 = arg4 (real)</div>
+<div class="box r" style="width:100%">RSP = wrapper stack (discard)</div>
+</div>
+</div>
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:var(--accent2);font-weight:700;margin-bottom:10px">Current Context (from trace)</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box r" style="width:100%">RCX = MessageBoxW junk (discard)</div>
+<div class="box r" style="width:100%">RDX = MessageBoxW junk (discard)</div>
+<div class="box r" style="width:100%">R8 = MessageBoxW junk (discard)</div>
+<div class="box r" style="width:100%">R9 = MessageBoxW junk (discard)</div>
+<div class="box g" style="width:100%">RSP = legitimate stack (keep!)</div>
+</div>
+</div>
+</div>
+<p style="text-align:center;margin-top:15px;color:var(--dim)"><em>Green = kept, Red = discarded. The final state has real arguments + legitimate stack.</em></p>
+</div>
+
+<!-- ==================== SECTION 2 ==================== -->
+<h2>Syscall Emulation</h2>
+<p>After the context swap restores the real arguments, the handler must set up the CPU state exactly as if the ntdll syscall stub had executed normally. This means emulating the two instructions that the stub performs before the <code>syscall</code> opcode:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>;; Normal ntdll stub (what we are emulating):
+mov r10, rcx        ; Save first argument (syscall clobbers RCX)
+mov eax, &lt;SSN&gt;      ; Load System Service Number
+syscall              ; Enter kernel</code></pre>
+
+<pre><code><span class="lang-tag">C++</span>// Emulate: mov r10, rcx
+ExceptionInfo-&gt;ContextRecord-&gt;R10 =
+    ExceptionInfo-&gt;ContextRecord-&gt;Rcx;
+
+// Emulate: mov eax, SSN
+ExceptionInfo-&gt;ContextRecord-&gt;Rax = SyscallNo;
+
+// Point RIP directly at the syscall instruction
+ExceptionInfo-&gt;ContextRecord-&gt;Rip =
+    SyscallEntryAddr + OPCODE_SYSCALL_OFF;</code></pre>
+
+<div class="card highlight">
+<h4>Why R10 = RCX?</h4>
+<p>The x64 <code>syscall</code> instruction is destructive: it saves the return address in <strong>RCX</strong> (overwriting whatever was there) and saves RFLAGS in <strong>R11</strong>. This means the first argument (originally in RCX per the Windows x64 calling convention) would be lost. The ntdll stub copies RCX to R10 before the syscall so the kernel can read the first argument from R10 instead. LayeredSyscall must replicate this behavior.</p>
+</div>
+
+<table>
+<tr><th>Register</th><th>Value Set</th><th>Purpose</th></tr>
+<tr><td><code>R10</code></td><td>Copy of RCX (first argument)</td><td>Kernel reads arg1 from R10 since <code>syscall</code> clobbers RCX</td></tr>
+<tr><td><code>RAX</code></td><td>System Service Number (SSN)</td><td>Kernel uses RAX to index the System Service Descriptor Table (SSDT)</td></tr>
+<tr><td><code>RIP</code></td><td><code>SyscallEntryAddr + OPCODE_SYSCALL_OFF</code></td><td>Execution resumes directly at the <code>syscall</code> instruction inside ntdll</td></tr>
+</table>
+
+<!-- ==================== SECTION 3 ==================== -->
+<h2>Extended Arguments (5th through 12th)</h2>
+<p>The x64 Windows calling convention passes the first four arguments in registers (RCX, RDX, R8, R9). Any additional arguments go on the <strong>stack</strong>. The context swap restored the registers but used the <em>legitimate</em> stack (TempRsp). That stack does not have the original arguments 5+. They must be copied from the saved stack.</p>
+
+<pre><code><span class="lang-tag">C++</span>if (ExtendedArgs) {
+    ULONG_PTR Rsp      = ExceptionInfo-&gt;ContextRecord-&gt;Rsp;  // Legitimate stack
+    ULONG_PTR SavedRsp = SavedContext.Rsp;                     // Original stack
+
+    // Copy arguments 5 through 12 from saved stack to legitimate stack
+    *(ULONG_PTR*)(Rsp + FIFTH_ARGUMENT)     = *(ULONG_PTR*)(SavedRsp + FIFTH_ARGUMENT);
+    *(ULONG_PTR*)(Rsp + SIXTH_ARGUMENT)     = *(ULONG_PTR*)(SavedRsp + SIXTH_ARGUMENT);
+    *(ULONG_PTR*)(Rsp + SEVENTH_ARGUMENT)   = *(ULONG_PTR*)(SavedRsp + SEVENTH_ARGUMENT);
+    *(ULONG_PTR*)(Rsp + EIGHTH_ARGUMENT)    = *(ULONG_PTR*)(SavedRsp + EIGHTH_ARGUMENT);
+    *(ULONG_PTR*)(Rsp + NINTH_ARGUMENT)     = *(ULONG_PTR*)(SavedRsp + NINTH_ARGUMENT);
+    *(ULONG_PTR*)(Rsp + TENTH_ARGUMENT)     = *(ULONG_PTR*)(SavedRsp + TENTH_ARGUMENT);
+    *(ULONG_PTR*)(Rsp + ELEVENTH_ARGUMENT)  = *(ULONG_PTR*)(SavedRsp + ELEVENTH_ARGUMENT);
+    *(ULONG_PTR*)(Rsp + TWELVETH_ARGUMENT)  = *(ULONG_PTR*)(SavedRsp + TWELVETH_ARGUMENT);
+}</code></pre>
+
+<h3>Argument Offset Table</h3>
+<table>
+<tr><th>Argument</th><th>Passing Method</th><th>Stack Offset</th><th>Hex</th></tr>
+<tr><td>1st (arg1)</td><td>RCX register</td><td>&mdash;</td><td>&mdash;</td></tr>
+<tr><td>2nd (arg2)</td><td>RDX register</td><td>&mdash;</td><td>&mdash;</td></tr>
+<tr><td>3rd (arg3)</td><td>R8 register</td><td>&mdash;</td><td>&mdash;</td></tr>
+<tr><td>4th (arg4)</td><td>R9 register</td><td>&mdash;</td><td>&mdash;</td></tr>
+<tr><td>5th</td><td>Stack</td><td>RSP + 0x28</td><td><code>FIFTH_ARGUMENT</code></td></tr>
+<tr><td>6th</td><td>Stack</td><td>RSP + 0x30</td><td><code>SIXTH_ARGUMENT</code></td></tr>
+<tr><td>7th</td><td>Stack</td><td>RSP + 0x38</td><td><code>SEVENTH_ARGUMENT</code></td></tr>
+<tr><td>8th</td><td>Stack</td><td>RSP + 0x40</td><td><code>EIGHTH_ARGUMENT</code></td></tr>
+<tr><td>9th</td><td>Stack</td><td>RSP + 0x48</td><td><code>NINTH_ARGUMENT</code></td></tr>
+<tr><td>10th</td><td>Stack</td><td>RSP + 0x50</td><td><code>TENTH_ARGUMENT</code></td></tr>
+<tr><td>11th</td><td>Stack</td><td>RSP + 0x58</td><td><code>ELEVENTH_ARGUMENT</code></td></tr>
+<tr><td>12th</td><td>Stack</td><td>RSP + 0x60</td><td><code>TWELVETH_ARGUMENT</code></td></tr>
+</table>
+
+<div class="card warn">
+<h4>Why 0x28 for the 5th Argument?</h4>
+<p>On x64 Windows, the caller allocates 32 bytes (0x20) of <strong>shadow space</strong> (also called "home space") on the stack even for the first 4 register arguments. The return address occupies another 8 bytes at RSP + 0x00. So the 5th argument starts at RSP + 0x28 (shadow space 0x20 + return address 0x08 = 0x28). Each subsequent argument is 8 bytes further.</p>
+</div>
+
+<div class="card">
+<h4>Why Not Always Copy?</h4>
+<p>Functions with 4 or fewer arguments (like <code>NtClose</code> with 1 argument) do not use stack arguments. The <code>ExtendedArgs</code> flag avoids unnecessary memory writes for these simple functions. This is both a performance optimization and a safety measure &mdash; writing to stack locations that are not expected to hold arguments could corrupt other data.</p>
+</div>
+
+<!-- ==================== SECTION 4 ==================== -->
+<h2>Clearing the Trap Flag</h2>
+<p>After the context swap and syscall emulation are complete, the handler <strong>must</strong> clear the Trap Flag. If it remains set, every instruction of the real syscall stub (and potentially kernel code) would trigger SINGLE_STEP exceptions, which would be catastrophic.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Clear the Trap Flag - stop single-stepping
+ExceptionInfo-&gt;ContextRecord-&gt;EFlags &amp;= ~0x100;
+
+// Reset the state machine for the next wrapped syscall
+IsSubRsp = 0;
+
+return EXCEPTION_CONTINUE_EXECUTION;
+// Execution resumes at the syscall instruction with:
+//   - Real arguments in registers (RCX, RDX, R8, R9)
+//   - R10 = RCX (syscall convention)
+//   - RAX = SSN
+//   - RSP pointing to legitimate call stack with args 5+ copied
+//   - RIP at the syscall instruction inside ntdll</code></pre>
+
+<div class="card green">
+<h4>What Happens Next</h4>
+<p>The <code>syscall</code> instruction executes inside ntdll.dll memory, with genuine call stack frames above it, correct arguments, and the proper SSN in RAX. The kernel processes the request normally. To the kernel's ETW telemetry, this looks like a completely legitimate system call from a standard API chain.</p>
+</div>
+
+<!-- ==================== SECTION 5 ==================== -->
+<h2>Phase 4: Clean Return via Dr1</h2>
+<p>After the kernel completes the syscall, execution returns to the <code>ret</code> instruction in the ntdll stub (immediately after the <code>syscall</code> instruction). The Dr1 hardware breakpoint fires, generating another <code>EXCEPTION_SINGLE_STEP</code>.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Inside HandlerHwBp - Phase 4: Return breakpoint
+if (ExceptionInfo-&gt;ContextRecord-&gt;Rip ==
+        SyscallEntryAddr + OPCODE_SYSCALL_RET_OFF)
+{
+    // 1. Disable Dr1 breakpoint (clear bit 2 in Dr7)
+    ExceptionInfo-&gt;ContextRecord-&gt;Dr7 &amp;= ~(1 &lt;&lt; 2);
+
+    // 2. Restore the original RSP from SavedContext
+    //    This points back to the wrapper function's stack frame
+    ExceptionInfo-&gt;ContextRecord-&gt;Rsp = SavedContext.Rsp;
+
+    // 3. Continue execution - the 'ret' instruction will now
+    //    return to the wrapper function as if nothing happened
+    return EXCEPTION_CONTINUE_EXECUTION;
+}</code></pre>
+
+<div class="card">
+<h4>Why Restore RSP Here?</h4>
+<p>During the syscall, RSP pointed to the legitimate stack (from the MessageBoxW chain). But the wrapper function expects to resume with <em>its own</em> stack frame. By restoring <code>SavedContext.Rsp</code>, the <code>ret</code> instruction pops the correct return address and execution returns to the wrapper function. The return value (NTSTATUS) is in RAX, exactly where the wrapper expects it.</p>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Clean Return Flow</h4>
+<div class="flow">
+<div class="box">Kernel returns<br><small>RAX = NTSTATUS</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">ret [Dr1 fires]<br><small>SINGLE_STEP</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">HandlerHwBp<br><small>Restore RSP</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">ret executes<br><small>Returns to wrapper</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">wrpNtXxx()<br><small>Returns NTSTATUS</small></div>
+</div>
+</div>
+
+<!-- ==================== SECTION 6 ==================== -->
+<h2>Memory Layout During Execution</h2>
+<p>Understanding the state of RSP at each phase is critical to understanding the full technique:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Stack State at Each Phase</h4>
+<div style="display:flex;gap:20px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:200px">
+<p style="text-align:center;font-weight:700;margin-bottom:10px;color:var(--accent)">Phase 2: Syscall BP</p>
+<div class="flow" style="flex-direction:column;gap:3px">
+<div class="box" style="width:100%;font-size:0.85em">RSP &rarr; wrapper stack</div>
+<div class="box" style="width:100%;font-size:0.85em">Args 5+ on stack</div>
+<div class="box" style="width:100%;font-size:0.85em">Return to wrpNtXxx</div>
+</div>
+</div>
+<div style="flex:1;min-width:200px">
+<p style="text-align:center;font-weight:700;margin-bottom:10px;color:var(--accent2)">Phase 3: After Swap</p>
+<div class="flow" style="flex-direction:column;gap:3px">
+<div class="box g" style="width:100%;font-size:0.85em">RSP &rarr; ntdll frame</div>
+<div class="box g" style="width:100%;font-size:0.85em">user32 frames</div>
+<div class="box g" style="width:100%;font-size:0.85em">MessageBoxW frames</div>
+<div class="box" style="width:100%;font-size:0.85em">Args 5+ copied here</div>
+</div>
+</div>
+<div style="flex:1;min-width:200px">
+<p style="text-align:center;font-weight:700;margin-bottom:10px;color:var(--green)">Phase 4: After Return</p>
+<div class="flow" style="flex-direction:column;gap:3px">
+<div class="box" style="width:100%;font-size:0.85em">RSP &rarr; wrapper stack</div>
+<div class="box" style="width:100%;font-size:0.85em">Return to wrpNtXxx</div>
+<div class="box" style="width:100%;font-size:0.85em">RAX = NTSTATUS</div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- ==================== SECTION 7 ==================== -->
+<h2>The Complete Wrapped Syscall List</h2>
+<p>LayeredSyscall wraps approximately 31 native API functions. Here is a representative subset grouped by category, showing their argument counts and whether they require extended argument copying:</p>
+
+<h3>Process &amp; Thread</h3>
+<table>
+<tr><th>Function</th><th>Args</th><th>ExtendedArgs</th></tr>
+<tr><td><code>NtCreateUserProcess</code></td><td>11</td><td>TRUE</td></tr>
+<tr><td><code>NtOpenProcess</code></td><td>4</td><td>FALSE</td></tr>
+<tr><td><code>NtTerminateProcess</code></td><td>2</td><td>FALSE</td></tr>
+<tr><td><code>NtCreateThreadEx</code></td><td>11</td><td>TRUE</td></tr>
+<tr><td><code>NtOpenThread</code></td><td>4</td><td>FALSE</td></tr>
+<tr><td><code>NtResumeThread</code></td><td>2</td><td>FALSE</td></tr>
+<tr><td><code>NtSuspendThread</code></td><td>2</td><td>FALSE</td></tr>
+</table>
+
+<h3>Memory</h3>
+<table>
+<tr><th>Function</th><th>Args</th><th>ExtendedArgs</th></tr>
+<tr><td><code>NtAllocateVirtualMemory</code></td><td>6</td><td>TRUE</td></tr>
+<tr><td><code>NtProtectVirtualMemory</code></td><td>5</td><td>TRUE</td></tr>
+<tr><td><code>NtFreeVirtualMemory</code></td><td>4</td><td>FALSE</td></tr>
+<tr><td><code>NtWriteVirtualMemory</code></td><td>5</td><td>TRUE</td></tr>
+<tr><td><code>NtReadVirtualMemory</code></td><td>5</td><td>TRUE</td></tr>
+<tr><td><code>NtMapViewOfSection</code></td><td>10</td><td>TRUE</td></tr>
+<tr><td><code>NtUnmapViewOfSection</code></td><td>2</td><td>FALSE</td></tr>
+</table>
+
+<h3>Section, Query &amp; Token</h3>
+<table>
+<tr><th>Function</th><th>Args</th><th>ExtendedArgs</th></tr>
+<tr><td><code>NtCreateSection</code></td><td>7</td><td>TRUE</td></tr>
+<tr><td><code>NtQueryInformationProcess</code></td><td>5</td><td>TRUE</td></tr>
+<tr><td><code>NtQuerySystemInformation</code></td><td>4</td><td>FALSE</td></tr>
+<tr><td><code>NtQueryVirtualMemory</code></td><td>6</td><td>TRUE</td></tr>
+<tr><td><code>NtOpenProcessToken</code></td><td>3</td><td>FALSE</td></tr>
+<tr><td><code>NtDuplicateToken</code></td><td>6</td><td>TRUE</td></tr>
+<tr><td><code>NtAdjustPrivilegesToken</code></td><td>6</td><td>TRUE</td></tr>
+</table>
+
+<h3>Handle &amp; Object</h3>
+<table>
+<tr><th>Function</th><th>Args</th><th>ExtendedArgs</th></tr>
+<tr><td><code>NtClose</code></td><td>1</td><td>FALSE</td></tr>
+<tr><td><code>NtDuplicateObject</code></td><td>7</td><td>TRUE</td></tr>
+<tr><td><code>NtWaitForSingleObject</code></td><td>3</td><td>FALSE</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Notable Absence: NtSetContextThread</h4>
+<p><code>NtSetContextThread</code> cannot be wrapped because it modifies thread context &mdash; including the debug registers that LayeredSyscall depends on. Wrapping it would create a circular dependency: the hardware breakpoints need to be active to intercept the syscall, but the syscall itself would modify those same breakpoints.</p>
+</div>
+
+<!-- ==================== QUIZ ==================== -->
+<div class="quiz" id="quiz7">
+<h4>Module 7 Quiz: Argument Marshalling</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why does the syscall emulation set R10 = RCX?</p>
+<label data-opt="0"><input type="radio" name="q7_0"> R10 is faster for the kernel to read than RCX</label>
+<label data-opt="1"><input type="radio" name="q7_0"> The x64 calling convention requires R10 for the first argument</label>
+<label data-opt="2"><input type="radio" name="q7_0"> The syscall instruction overwrites RCX with the return address, so the first argument must be in R10</label>
+<label data-opt="3"><input type="radio" name="q7_0"> EDR products only monitor RCX, not R10</label>
+<div class="explain">The x64 <code>syscall</code> instruction saves RIP into RCX and RFLAGS into R11. This destroys the first argument (which was in RCX). The ntdll stub copies RCX to R10 before issuing syscall so the kernel can read the first argument from R10. LayeredSyscall emulates this behavior.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: At what stack offset does the 5th argument begin, and why?</p>
+<label data-opt="0"><input type="radio" name="q7_1"> RSP + 0x20, because that is right after the 4 register arguments</label>
+<label data-opt="1"><input type="radio" name="q7_1"> RSP + 0x28, because 0x20 bytes of shadow space plus 0x08 bytes for the return address</label>
+<label data-opt="2"><input type="radio" name="q7_1"> RSP + 0x30, because each argument slot is 8 bytes and there are 6 reserved slots</label>
+<label data-opt="3"><input type="radio" name="q7_1"> RSP + 0x00, because x64 uses a flat stack model</label>
+<div class="explain">The 5th argument is at RSP + 0x28. The first 0x20 bytes (32 bytes) are the shadow/home space reserved for the 4 register arguments (even though they are in registers, this space is always allocated). Then 0x08 bytes for the return address. So 0x20 + 0x08 = 0x28.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q3: What does the Dr1 breakpoint handler do after the syscall returns from kernel mode?</p>
+<label data-opt="0"><input type="radio" name="q7_2"> Re-enables the Trap Flag for another trace</label>
+<label data-opt="1"><input type="radio" name="q7_2"> Copies the return value from RAX into a global variable</label>
+<label data-opt="2"><input type="radio" name="q7_2"> Clears all debug registers and terminates the VEH chain</label>
+<label data-opt="3"><input type="radio" name="q7_2"> Disables Dr1 and restores RSP to the original wrapper stack so ret returns to the caller</label>
+<div class="explain">The Dr1 handler clears the Dr1 breakpoint (bit 2 in Dr7) and restores RSP to <code>SavedContext.Rsp</code> (the wrapper function's stack pointer). When the <code>ret</code> instruction executes, it pops the return address from the original stack and returns to the wrapper function with the NTSTATUS result in RAX.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz7')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Prev: Call Stack Construction</a>
+<a class="primary" href="module8.html">Next: Full Chain &amp; Detection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

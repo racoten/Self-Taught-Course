@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Call Stack Construction via Trap Flag - LayeredSyscall Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#22d3ee;--accent2:#f97316;--gradient:linear-gradient(135deg,#22d3ee,#f97316)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>LayeredSyscall Course</h2>
+<span>VEH Syscall Evasion</span>
+</div>
+<a class="home-link" href="../LayeredSyscall_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. EDR Hooks &amp; Detection</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Syscall Internals &amp; SSN</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Exception Handling &amp; VEH</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Hardware Breakpoints</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Dual-Handler Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module6.html"><span>6. Call Stack Construction</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module7.html"><span>7. Argument Marshalling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 6: Call Stack Construction via Trap Flag</h1>
+<p class="subtitle">Real call stacks from real API calls &mdash; no fabrication, no forgery, just CPU abuse.</p>
+
+<div class="card highlight">
+<h4>The Novel Insight</h4>
+<p>Previous call stack spoofing techniques (like WithSecure's approach) <strong>fabricate</strong> fake stack frames by parsing UNWIND_CODE structures and constructing synthetic return addresses. LayeredSyscall takes a radically different approach: it calls a <strong>legitimate Windows API</strong> (MessageBoxW), lets the OS build a genuine call stack through user32.dll and into ntdll.dll, then <strong>hijacks that stack</strong> at the right moment. The call stack is real because a real API was called.</p>
+</div>
+
+<!-- ==================== SECTION 1 ==================== -->
+<h2>The Problem: How to Get a Legitimate Call Stack</h2>
+<p>EDR products and ETW telemetry examine the <strong>call stack</strong> at the moment a syscall enters the kernel. A legitimate call stack looks like this:</p>
+
+<pre><code><span class="lang-tag">Call Stack</span>ntdll!NtCreateUserProcess + 0x14       &lt;-- syscall here
+ntdll!SomeInternalFunction + 0x42
+user32!CreateProcessInternalW + 0x1A3
+kernel32!CreateProcessW + 0x66
+myapp.exe!main + 0x55</code></pre>
+
+<p>But when an offensive tool issues a direct or indirect syscall, the stack looks anomalous:</p>
+
+<pre><code><span class="lang-tag">Anomalous Stack</span>ntdll!NtCreateUserProcess + 0x14       &lt;-- syscall here
+myapp.exe!wrpNtCreateUserProcess + 0x30  &lt;-- suspicious!
+myapp.exe!main + 0x55</code></pre>
+
+<p>The jump from <code>myapp.exe</code> directly to <code>ntdll</code> without intermediate Windows DLL frames is a strong signal of a direct/indirect syscall. EDR vendors are increasingly flagging this pattern.</p>
+
+<div class="card warn">
+<h4>Fabricated vs. Genuine Stacks</h4>
+<p>Other tools construct fake frames by manually pushing return addresses onto the stack. These frames point to real code, but the <strong>execution never actually passed through them</strong>. Advanced detections can verify stack consistency using unwinding metadata. LayeredSyscall's approach is immune to such checks because the frames were created by <em>actual execution</em>.</p>
+</div>
+
+<!-- ==================== SECTION 2 ==================== -->
+<h2>Phase 2: Syscall Breakpoint Fires</h2>
+<p>After AddHwBp installs hardware breakpoints and the wrapper calls the real Nt* function, execution proceeds through the ntdll stub until it reaches the <code>syscall</code> instruction. The Dr0 hardware breakpoint fires, generating an <code>EXCEPTION_SINGLE_STEP</code> exception. This is where <code>HandlerHwBp</code> takes over.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Inside HandlerHwBp - Phase 2: Syscall breakpoint
+if (ExceptionInfo-&gt;ContextRecord-&gt;Rip ==
+        SyscallEntryAddr + OPCODE_SYSCALL_OFF)
+{
+    // 1. Disable Dr0 breakpoint (clear bit 0 in Dr7)
+    ExceptionInfo-&gt;ContextRecord-&gt;Dr7 &amp;= ~(1 &lt;&lt; 0);
+
+    // 2. Save the ENTIRE CPU context
+    //    This preserves all syscall arguments in registers + stack
+    memcpy(&amp;SavedContext,
+           ExceptionInfo-&gt;ContextRecord,
+           sizeof(CONTEXT));
+
+    // 3. Redirect execution to the demo function (MessageBoxW)
+    ExceptionInfo-&gt;ContextRecord-&gt;Rip = (ULONG_PTR)demofunction;
+
+    // 4. Enable the Trap Flag for single-step tracing
+    ExceptionInfo-&gt;ContextRecord-&gt;EFlags |= 0x100;
+
+    return EXCEPTION_CONTINUE_EXECUTION;
+}</code></pre>
+
+<h3>What Each Step Accomplishes</h3>
+
+<div class="card">
+<h4>1. Disable Dr0</h4>
+<p>The syscall breakpoint has served its purpose. We clear it so it does not fire again when we eventually execute the real syscall instruction later. Only the Dr1 (ret) breakpoint remains active for the clean return phase.</p>
+</div>
+
+<div class="card green">
+<h4>2. Save Full Context</h4>
+<p>The <code>memcpy</code> of the entire <code>CONTEXT</code> structure captures <strong>everything</strong>: all general-purpose registers (which hold the first 4 syscall arguments in RCX, RDX, R8, R9), RSP (which points to the stack containing arguments 5+), RFLAGS, and the segment registers. This snapshot is the blueprint for the eventual real syscall.</p>
+</div>
+
+<div class="card">
+<h4>3. Redirect to demofunction()</h4>
+<p>By setting RIP to <code>demofunction</code> (default: MessageBoxW), execution does not enter the kernel. Instead, it begins executing a completely legitimate Windows API. This API will build genuine call stack frames as it works through user32.dll and eventually calls into ntdll.dll.</p>
+</div>
+
+<div class="card highlight">
+<h4>4. Enable the Trap Flag</h4>
+<p>Setting bit 8 of EFlags (<code>0x100</code>) activates the CPU Trap Flag. After every single instruction, the CPU raises <code>EXCEPTION_SINGLE_STEP</code>. This gives HandlerHwBp the ability to monitor instruction-by-instruction execution through the legitimate API chain.</p>
+</div>
+
+<!-- ==================== SECTION 3 ==================== -->
+<h2>The CPU Trap Flag (TF)</h2>
+<div class="card highlight">
+<h4>EFlags Bit 8 &mdash; The Single-Step Mechanism</h4>
+<p>The Trap Flag is a single bit in the RFLAGS register (bit 8, value <code>0x100</code>). When set, the CPU raises a <strong>debug exception</strong> (<code>EXCEPTION_SINGLE_STEP</code>, code <code>0x80000004</code>) after executing <strong>every single instruction</strong>. The CPU automatically clears the TF after raising the exception, so the handler must re-set it if continued tracing is desired.</p>
+</div>
+
+<table>
+<tr><th>Property</th><th>Detail</th></tr>
+<tr><td>Register</td><td>RFLAGS (EFlags in CONTEXT)</td></tr>
+<tr><td>Bit Position</td><td>Bit 8</td></tr>
+<tr><td>Bitmask</td><td><code>0x100</code></td></tr>
+<tr><td>Exception Generated</td><td><code>EXCEPTION_SINGLE_STEP</code> (<code>0x80000004</code>)</td></tr>
+<tr><td>Auto-Cleared</td><td>Yes &mdash; CPU clears TF after each exception</td></tr>
+<tr><td>Normal Use</td><td>Debuggers for single-step execution</td></tr>
+<tr><td>LayeredSyscall Use</td><td>Monitor every instruction through a legitimate API chain to find the right moment to hijack</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Performance Impact</h4>
+<p>While the trap flag is active, <strong>every instruction</strong> generates an exception. The VEH handler runs after each one. A typical API call chain from MessageBoxW into ntdll may execute thousands of instructions. This means hundreds or thousands of exceptions per wrapped syscall. The overhead is significant but acceptable for the evasion benefit in targeted operations.</p>
+</div>
+
+<!-- ==================== SECTION 4 ==================== -->
+<h2>The demofunction() Redirect</h2>
+<p>After redirection, execution flows through a genuine Windows API call chain. The default demo function is <code>MessageBoxW</code>, which traverses multiple DLL layers before eventually reaching ntdll:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Legitimate Execution Chain</h4>
+<div class="flow">
+<div class="box">MessageBoxW<br><small>user32.dll</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Internal Win32<br><small>user32/win32u</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">NtUser* calls<br><small>win32u.dll</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">ntdll internals<br><small>ntdll.dll</small></div>
+</div>
+</div>
+
+<p>As execution passes through each function, the CPU pushes return addresses and creates stack frames. These are <strong>genuine frames</strong> because the code is actually executing. By the time execution reaches ntdll, the call stack looks exactly like a legitimate MessageBoxW call chain.</p>
+
+<div class="card">
+<h4>Why MessageBoxW?</h4>
+<p>MessageBoxW is the default <code>demofunction()</code> because it naturally calls deep into the Windows subsystem and eventually reaches ntdll. However, this is configurable. The key requirement is that the demo function must eventually call into <strong>ntdll.dll</strong>, creating a chain of legitimate frames. MessageBoxW never actually displays because execution is hijacked before the window system call completes.</p>
+</div>
+
+<div class="card warn">
+<h4>The MessageBox Never Appears</h4>
+<p>Even though MessageBoxW is called, the actual display never happens. The trap flag causes an exception after every instruction. Once the three conditions (explained below) are met inside ntdll, execution is redirected to the real syscall. MessageBoxW's internal state is abandoned. This is safe because the function was only used to build stack frames, not for its actual purpose.</p>
+</div>
+
+<!-- ==================== SECTION 5 ==================== -->
+<h2>Phase 3: The Three-Condition Algorithm</h2>
+<p>This is the <strong>core</strong> of the LayeredSyscall technique. While the trap flag traces through the legitimate API chain, <code>HandlerHwBp</code> monitors every instruction, checking three conditions that must be met before the real syscall can execute.</p>
+
+<h3>Waiting for ntdll</h3>
+<p>Before any conditions are checked, the handler verifies that execution is inside ntdll.dll:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Check if RIP is within ntdll address range
+if (ExceptionInfo-&gt;ContextRecord-&gt;Rip &gt;= NtdllInfo.DllBaseAddress &amp;&amp;
+    ExceptionInfo-&gt;ContextRecord-&gt;Rip &lt;= NtdllInfo.DllEndAddress)
+{
+    // Inside ntdll - start checking conditions
+    // ...
+}
+else {
+    // Not in ntdll yet - re-enable trap flag and continue
+    ExceptionInfo-&gt;ContextRecord-&gt;EFlags |= 0x100;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}</code></pre>
+
+<p>Until execution enters ntdll, the handler simply re-enables the trap flag (it is auto-cleared by the CPU) and continues. This loops thousands of times as execution traverses user32.dll and other intermediate DLLs.</p>
+
+<h3>Condition 1: Find <code>sub rsp, X</code> Where X &gt;= 0x58</h3>
+
+<div class="card highlight">
+<h4>IsSubRsp = 0 &rarr; 1</h4>
+<p>Once inside ntdll, the handler scans forward from the current RIP (up to 80 bytes) looking for the opcode <code>0xEC8348</code>, which encodes <code>sub rsp, imm8</code>. The immediate value must be <strong>&gt;= 0x58</strong> (88 bytes decimal).</p>
+</div>
+
+<pre><code><span class="lang-tag">C++</span>// Condition 1: Find a function prologue with sufficient stack space
+for (int i = 0; i &lt; 80; i++) {
+    ULONG_PTR scan = ExceptionInfo-&gt;ContextRecord-&gt;Rip + i;
+
+    // Check for 'ret' - if we hit ret first, this function is too small
+    if (*(BYTE*)scan == 0xC3) {
+        IsSubRsp = 0;  // Reset - keep looking
+        break;
+    }
+
+    // Check for 'sub rsp, imm8' where imm8 &gt;= 0x58
+    if ((*(UINT32*)scan &amp; 0x00FFFFFF) == 0xEC8348) {
+        BYTE stackSize = *(BYTE*)(scan + 3);
+        if (stackSize &gt;= 0x58) {
+            IsSubRsp = 1;  // Condition 1 met!
+            break;
+        }
+    }
+}</code></pre>
+
+<p>Why <code>0x58</code>? This is 88 bytes, which provides room for the 4 home space slots (32 bytes) plus 8 additional stack arguments (64 bytes) = 12 arguments total. This is the maximum number of arguments LayeredSyscall supports.</p>
+
+<h3>Condition 2: Find a <code>call</code> Instruction</h3>
+
+<div class="card highlight">
+<h4>IsSubRsp = 1 &rarr; 2</h4>
+<p>With IsSubRsp == 1, the handler now monitors each instruction looking for a <code>call</code> opcode (<code>0xE8</code>, relative near call). If a <code>ret</code> (<code>0xC3</code>) is encountered before a <code>call</code>, the function was too small and the state machine resets to 0.</p>
+</div>
+
+<pre><code><span class="lang-tag">C++</span>// Condition 2: Find a 'call' instruction within the function
+if (IsSubRsp == 1) {
+    BYTE opcode = *(BYTE*)(ExceptionInfo-&gt;ContextRecord-&gt;Rip);
+
+    if (opcode == 0xC3) {
+        // Hit 'ret' before 'call' - function too shallow, reset
+        IsSubRsp = 0;
+    }
+    else if (opcode == 0xE8) {
+        // Found a 'call' instruction!
+        IsSubRsp = 2;  // Condition 2 met!
+    }
+}</code></pre>
+
+<h3>Condition 3: Execute (IsSubRsp == 2)</h3>
+
+<div class="card green">
+<h4>All Conditions Met &mdash; Ready to Swap</h4>
+<p>When <code>IsSubRsp</code> reaches 2, we are positioned inside a legitimate ntdll function that has:</p>
+<ul>
+<li>A stack frame with at least 0x58 bytes (room for 12 arguments)</li>
+<li>A <code>call</code> instruction (deep enough in the function for a complete frame)</li>
+<li>Execution that arrived here through genuine API calls (MessageBoxW &rarr; user32 &rarr; ntdll)</li>
+</ul>
+<p>The call stack above us is <strong>genuine</strong>. This is the moment to swap in the real syscall arguments and execute.</p>
+</div>
+
+<h3>State Machine Diagram</h3>
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Three-Condition State Machine</h4>
+<div class="flow">
+<div class="box">IsSubRsp = 0<br><small>Searching for<br>sub rsp &gt;= 0x58</small></div>
+<div class="arrow">found &rarr;</div>
+<div class="box">IsSubRsp = 1<br><small>Looking for<br>call (0xE8)</small></div>
+<div class="arrow">found &rarr;</div>
+<div class="box g">IsSubRsp = 2<br><small>Execute!<br>Context swap</small></div>
+</div>
+<div style="margin-top:10px;text-align:center;color:var(--dim)">
+<em>If <code>ret</code> (0xC3) is found before the target opcode, state resets to 0</em>
+</div>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Full Trace Flow with Conditions</h4>
+<div class="flow" style="flex-wrap:wrap">
+<div class="box">MessageBoxW<br><small>user32.dll</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Trap Flag Trace<br><small>Every instruction</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Enter ntdll?<br><small>Range check</small></div>
+<div class="arrow">yes &rarr;</div>
+<div class="box">sub rsp &gt;= 0x58?<br><small>Condition 1</small></div>
+<div class="arrow">yes &rarr;</div>
+<div class="box">call found?<br><small>Condition 2</small></div>
+<div class="arrow">yes &rarr;</div>
+<div class="box g">Context Swap<br><small>Condition 3</small></div>
+</div>
+</div>
+
+<!-- ==================== SECTION 6 ==================== -->
+<h2>Why These Three Conditions?</h2>
+
+<div class="card">
+<h4><code>sub rsp &gt;= 0x58</code> &mdash; Stack Space Guarantee</h4>
+<p>The value <code>0x58</code> (88 bytes) ensures the current stack frame has room for:</p>
+<table>
+<tr><th>Component</th><th>Bytes</th><th>Purpose</th></tr>
+<tr><td>Shadow space / Home area</td><td>32 (0x20)</td><td>Required by x64 calling convention for RCX, RDX, R8, R9</td></tr>
+<tr><td>Arguments 5-12 on stack</td><td>56 (0x38)</td><td>Up to 8 additional stack arguments (7 slots at 8 bytes each)</td></tr>
+<tr><td>Alignment</td><td>Variable</td><td>Stack must be 16-byte aligned before <code>call</code></td></tr>
+</table>
+<p>With 88 bytes or more, we can safely copy up to 12 arguments (the maximum supported by any wrapped syscall) onto this stack frame without corrupting adjacent frames.</p>
+</div>
+
+<div class="card">
+<h4><code>call</code> Instruction &mdash; Frame Depth</h4>
+<p>Finding a <code>call</code> instruction means the function we are in is making sub-calls. This guarantees we are deep enough in the function that there is a proper stack frame established. If the function only did simple register operations and returned immediately (hitting <code>ret</code> before <code>call</code>), the stack frame would be too shallow and the call stack would not look convincing.</p>
+</div>
+
+<div class="card">
+<h4>Inside ntdll &mdash; Legitimate Origin</h4>
+<p>For the call stack to be convincing, the syscall must appear to originate from <strong>within ntdll.dll</strong>. If we hijacked execution in user32.dll, the call stack would show a syscall from user32 (unusual). By waiting until execution is inside ntdll, the final stack frame chain is: ntdll &larr; user32 &larr; MessageBoxW &mdash; exactly what a legitimate API call looks like.</p>
+</div>
+
+<!-- ==================== QUIZ ==================== -->
+<div class="quiz" id="quiz6">
+<h4>Module 6 Quiz: Call Stack Construction</h4>
+<div class="quiz-q" data-correct="3">
+<p>Q1: What does the CPU Trap Flag (EFlags bit 8) do when set?</p>
+<label data-opt="0"><input type="radio" name="q6_0"> Triggers an ACCESS_VIOLATION after each instruction</label>
+<label data-opt="1"><input type="radio" name="q6_0"> Disables all hardware breakpoints temporarily</label>
+<label data-opt="2"><input type="radio" name="q6_0"> Causes the CPU to execute instructions twice for verification</label>
+<label data-opt="3"><input type="radio" name="q6_0"> Causes the CPU to raise EXCEPTION_SINGLE_STEP after every instruction</label>
+<div class="explain">Correct! The Trap Flag (TF) causes the CPU to raise a debug exception (EXCEPTION_SINGLE_STEP) after executing each instruction. The CPU automatically clears TF after each exception. LayeredSyscall re-sets it in the handler to continue tracing.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What are the three conditions that must be met before the context swap occurs?</p>
+<label data-opt="0"><input type="radio" name="q6_1"> Inside kernel32, find a jmp instruction, find a syscall instruction</label>
+<label data-opt="1"><input type="radio" name="q6_1"> Inside ntdll, find sub rsp with immediate &gt;= 0x58, find a call instruction</label>
+<label data-opt="2"><input type="radio" name="q6_1"> Inside user32, find push rbp, find a ret instruction</label>
+<label data-opt="3"><input type="radio" name="q6_1"> Inside ntdll, find mov r10 rcx, find mov eax SSN</label>
+<div class="explain">The three conditions are: (1) execution must be inside ntdll.dll (range check), (2) a <code>sub rsp, imm8</code> with the immediate &gt;= 0x58 must be found (sufficient stack space), and (3) a <code>call</code> instruction must be found (deep enough frame). Together they ensure a legitimate, spacious stack frame inside ntdll.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: Why must the <code>sub rsp</code> immediate be at least 0x58 (88 bytes)?</p>
+<label data-opt="0"><input type="radio" name="q6_2"> Because that is the standard ntdll prologue size</label>
+<label data-opt="1"><input type="radio" name="q6_2"> Because it matches the size of the CONTEXT structure</label>
+<label data-opt="2"><input type="radio" name="q6_2"> Because 88 bytes provides room for the shadow space plus up to 12 total arguments on the stack</label>
+<label data-opt="3"><input type="radio" name="q6_2"> Because smaller values would cause stack overflow</label>
+<div class="explain">0x58 (88 bytes) provides 32 bytes of shadow space (required by x64 ABI for the first 4 register arguments) plus 56 bytes for up to 8 additional stack arguments. This covers the maximum 12-argument functions that LayeredSyscall supports (like NtCreateUserProcess with 11 arguments).</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz6')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Prev: Dual-Handler Architecture</a>
+<a class="primary" href="module7.html">Next: Argument Marshalling &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>
