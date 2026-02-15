@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Encryption &amp; Obfuscation - Hooka Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1FA9D;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#4ade80;--accent2:#2dd4bf;--gradient:linear-gradient(135deg,#4ade80,#2dd4bf)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Hooka Course</h2>
+<span>Shellcode Loader Generator</span>
+</div>
+<a class="home-link" href="../Hooka_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Introduction to Shellcode Loaders</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Injection Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Syscalls &amp; Gate Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Unhooking &amp; Patching</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Sandbox Detection &amp; Process Protection</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module6.html"><span>6. Encryption &amp; Obfuscation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. The Hooka Go Library</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. CLI Generator &amp; Full Chain</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 6: Encryption &amp; Obfuscation</h1>
+<p class="subtitle">Hide your payload in plain sight &mdash; four encryption algorithms, polymorphic encoding, string obfuscation, and binary signing.</p>
+
+<div class="card highlight">
+<h4>Why Encrypt Shellcode?</h4>
+<p>Static analysis engines scan binary files for known byte patterns, signatures, and YARA rules. Raw shellcode &mdash; especially well-known payloads like Cobalt Strike beacons or Meterpreter &mdash; contains recognizable sequences that trigger immediate detection. <strong>Encryption transforms the shellcode into random-looking ciphertext</strong> that matches no known signature. Decryption happens at runtime, in memory, just before injection. The defender must now either break the encryption or rely entirely on behavioral analysis.</p>
+</div>
+
+<!-- ==================== SECTION 1: Encryption Lifecycle ==================== -->
+<h2>Encryption in the Loader Lifecycle</h2>
+<p>Understanding when encryption and decryption occur is critical. The shellcode is never stored or transmitted in plaintext in the final binary:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Encryption Lifecycle</h4>
+<div class="flow">
+<div class="box">Build Time<br><small>Read shellcode</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Encrypt<br><small>AES/3DES/RC4/XOR</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Embed<br><small>Ciphertext in binary</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Runtime<br><small>Decrypt in memory</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Inject<br><small>Plaintext shellcode</small></div>
+</div>
+</div>
+
+<div class="card">
+<h4>Key Management</h4>
+<p>The encryption key is generated randomly at build time and embedded in the generated Go source code alongside the ciphertext. Both key and ciphertext are stored as byte arrays in the binary. While this means the key is technically recoverable by a skilled analyst who reverse-engineers the binary, the primary goal is to <strong>defeat automated static scanning</strong> &mdash; not to resist manual analysis. The key is never transmitted externally.</p>
+</div>
+
+<!-- ==================== SECTION 2: Four Encryption Algorithms ==================== -->
+<h2>Hooka's Four Encryption Algorithms</h2>
+<p>Hooka supports four encryption methods via the <code>--enc</code> CLI flag. Each offers different trade-offs between speed, strength, and detection resistance.</p>
+
+<h3>1. AES &mdash; Advanced Encryption Standard</h3>
+<div class="card">
+<h4><code>--enc aes</code></h4>
+<p>AES is the most widely recommended option and the default for serious loaders. Hooka uses AES in CBC mode with a randomly generated 256-bit key. A random <strong>Initialization Vector (IV)</strong> is prepended to the ciphertext so each encryption produces unique output even with the same key and plaintext.</p>
+<ul>
+<li><strong>Key size</strong>: 256 bits (32 bytes)</li>
+<li><strong>Block size</strong>: 128 bits (16 bytes)</li>
+<li><strong>Mode</strong>: CBC (Cipher Block Chaining)</li>
+<li><strong>IV</strong>: Random, prepended to ciphertext</li>
+</ul>
+<p>AES produces high-entropy output that is indistinguishable from random data. Go's <code>crypto/aes</code> and <code>crypto/cipher</code> packages provide the implementation.</p>
+</div>
+
+<h3>2. 3DES &mdash; Triple DES</h3>
+<div class="card">
+<h4><code>--enc 3des</code></h4>
+<p>Triple DES applies the legacy DES algorithm three times with different keys (encrypt-decrypt-encrypt). While considered obsolete for protecting sensitive data, it is still effective for obfuscating shellcode against pattern matching. The triple-round application makes it significantly stronger than single DES.</p>
+<ul>
+<li><strong>Key size</strong>: 168 bits (three 56-bit keys)</li>
+<li><strong>Block size</strong>: 64 bits (8 bytes)</li>
+<li><strong>Rounds</strong>: 3 (EDE &mdash; encrypt, decrypt, encrypt)</li>
+</ul>
+<p>3DES is slower than AES but adds variety &mdash; defenders tuning detection for AES patterns may miss 3DES-encrypted payloads.</p>
+</div>
+
+<h3>3. RC4 &mdash; Rivest Cipher 4</h3>
+<div class="card">
+<h4><code>--enc rc4</code></h4>
+<p>RC4 is a <strong>stream cipher</strong> that generates a pseudorandom keystream from a variable-length key and XORs it with the plaintext byte by byte. It is extremely fast and simple to implement, with minimal code footprint in the generated loader.</p>
+<ul>
+<li><strong>Key size</strong>: Variable (typically 128 bits)</li>
+<li><strong>Type</strong>: Stream cipher (no block padding needed)</li>
+<li><strong>Speed</strong>: Very fast &mdash; single-pass XOR operation</li>
+</ul>
+<p>RC4 has known cryptographic weaknesses (key scheduling biases), but these are irrelevant for shellcode obfuscation where the goal is static evasion, not long-term secrecy.</p>
+</div>
+
+<h3>4. XOR &mdash; Exclusive OR</h3>
+<div class="card">
+<h4><code>--enc xor</code></h4>
+<p>The simplest encryption: each byte of shellcode is XORed with the corresponding byte of a repeating key. XOR is its own inverse, so the same operation encrypts and decrypts. This produces the smallest decryption stub in the generated code.</p>
+<ul>
+<li><strong>Key size</strong>: Variable (typically 16&ndash;32 bytes)</li>
+<li><strong>Type</strong>: Substitution cipher</li>
+<li><strong>Speed</strong>: Fastest possible &mdash; single XOR per byte</li>
+</ul>
+<p>XOR encryption is trivially breakable by frequency analysis or known-plaintext attacks, but it still defeats automated signature matching. Best combined with other obfuscation layers.</p>
+</div>
+
+<!-- ==================== SECTION 3: Encryption Comparison ==================== -->
+<h2>Encryption Comparison</h2>
+
+<table>
+<tr><th>Algorithm</th><th>CLI Flag</th><th>Key Size</th><th>Speed</th><th>Strength</th><th>Detection Resistance</th></tr>
+<tr><td>AES-256-CBC</td><td><code>--enc aes</code></td><td>256 bits</td><td>Fast</td><td>Strong</td><td>High &mdash; indistinguishable from random</td></tr>
+<tr><td>3DES-EDE</td><td><code>--enc 3des</code></td><td>168 bits</td><td>Slow</td><td>Moderate</td><td>High &mdash; uncommon choice adds variety</td></tr>
+<tr><td>RC4</td><td><code>--enc rc4</code></td><td>Variable</td><td>Very Fast</td><td>Weak</td><td>Moderate &mdash; known patterns in keystream</td></tr>
+<tr><td>XOR</td><td><code>--enc xor</code></td><td>Variable</td><td>Fastest</td><td>Minimal</td><td>Low &mdash; breakable with known plaintext</td></tr>
+</table>
+
+<div class="card green">
+<h4>Recommendation</h4>
+<p>For most scenarios, <strong>AES</strong> is the best choice. It produces the highest-entropy output, is well-supported in Go's standard library, and is the industry standard. Use XOR only when you need the smallest possible decryption stub or are layering multiple obfuscation techniques.</p>
+</div>
+
+<!-- ==================== SECTION 4: Shikata Ga Nai ==================== -->
+<h2>Shikata Ga Nai (SGN) Encoding</h2>
+<p>Shikata Ga Nai ("it can't be helped" in Japanese) is a <strong>polymorphic XOR encoder</strong> that has been used in exploit development for over a decade. Each time it processes shellcode, it produces a completely different encoded output &mdash; even with the same input.</p>
+
+<div class="card highlight">
+<h4><code>--sgn</code> Flag</h4>
+<p>When the <code>--sgn</code> flag is specified, Hooka passes the encrypted shellcode through the external <code>sgn</code> tool after encryption. This adds a second encoding layer on top of the encryption. The SGN encoder uses:</p>
+<ul>
+<li><strong>Polymorphic XOR</strong>: each encoding uses different XOR keys and decoder stubs</li>
+<li><strong>Instruction substitution</strong>: replaces instructions with semantically equivalent alternatives</li>
+<li><strong>Dead code insertion</strong>: adds non-functional instructions (NOP sleds, redundant operations) to change the binary signature</li>
+<li><strong>Register reassignment</strong>: varies which CPU registers the decoder uses</li>
+</ul>
+<p>The result is that two encodings of the same shellcode produce completely different byte sequences, defeating signature-based detection even if the original payload's encrypted form becomes signatured.</p>
+</div>
+
+<pre><span class="lang-tag">Bash</span># Encrypt with AES then apply SGN encoding
+hooka -i shellcode.bin -o loader.exe --enc aes --sgn</pre>
+
+<div class="card warn">
+<h4>SGN Requires External Tool</h4>
+<p>The <code>sgn</code> binary must be installed separately and available in your PATH. Hooka calls it as a subprocess. Install from: <code>github.com/EgeBalci/sgn</code>. Without it, the <code>--sgn</code> flag will produce an error.</p>
+</div>
+
+<!-- ==================== SECTION 5: String Obfuscation ==================== -->
+<h2>Caesar Cipher String Obfuscation</h2>
+<p>Beyond encrypting the shellcode itself, the generated Go source code contains <strong>string literals</strong> that can reveal intent: function names like "VirtualAlloc", DLL names like "ntdll.dll", and error messages. Static analysis of the compiled binary can extract these strings.</p>
+
+<div class="card">
+<h4><code>--strings</code> Flag</h4>
+<p>The <code>--strings</code> flag applies a <strong>Caesar cipher shift</strong> to all string literals in the generated source code. Each character is shifted by N positions in the ASCII table. At runtime, the strings are decoded by shifting back before use.</p>
+<pre><span class="lang-tag">Go</span>// Without --strings:
+dll, _ := windows.LoadDLL("ntdll.dll")
+
+// With --strings (shift by 3):
+dll, _ := windows.LoadDLL(decryptStr("qwgoo1goo"))  // Each char shifted +3
+// 'n'+3='q', 't'+3='w', 'd'+3='g', etc.</pre>
+<p>This prevents tools like <code>strings</code>, <code>FLOSS</code>, or YARA string rules from finding meaningful API names in the binary.</p>
+</div>
+
+<!-- ==================== SECTION 6: Random Naming ==================== -->
+<h2>Random Variable &amp; Function Naming</h2>
+<p>The generated Go source code uses descriptive variable names by default (e.g., <code>shellcode</code>, <code>encryptedPayload</code>, <code>decryptionKey</code>). While this is only visible in the source, some information leaks into the compiled binary through Go's symbol table and DWARF debug info.</p>
+
+<div class="card">
+<h4><code>-r</code> / <code>--rand</code> Flag</h4>
+<p>The random naming flag replaces all variable and function names in the generated Go code with random strings before compilation. This defeats:</p>
+<ul>
+<li>Source-level pattern matching (if the source is recovered)</li>
+<li>Symbol table analysis of the compiled binary</li>
+<li>YARA rules targeting specific variable name patterns in Go binaries</li>
+</ul>
+<pre><span class="lang-tag">Go</span>// Without -r:
+func decryptShellcode(key []byte, encrypted []byte) []byte { ... }
+shellcode := decryptShellcode(encKey, encPayload)
+
+// With -r:
+func aK7mNxQ2(xR9pLw []byte, bT4vHn []byte) []byte { ... }
+jM3cYs := aK7mNxQ2(wE8dFq, nU6gRk)</pre>
+</div>
+
+<!-- ==================== SECTION 7: UPX Compression ==================== -->
+<h2>UPX Compression</h2>
+<p>Go binaries are notoriously large &mdash; a minimal loader can be 5&ndash;10 MB due to the Go runtime. UPX (Ultimate Packer for eXecutables) compresses the binary significantly while keeping it directly executable.</p>
+
+<div class="card">
+<h4><code>--compress</code> Flag</h4>
+<p>When <code>--compress</code> is specified, Hooka runs UPX on the compiled binary after the Go build completes. Combined with Go's linker flags (<code>-s -w</code> to strip debug info and symbols), this typically reduces binary size by 60&ndash;70%.</p>
+<table>
+<tr><th>Stage</th><th>Approximate Size</th></tr>
+<tr><td>Default Go build</td><td>8&ndash;12 MB</td></tr>
+<tr><td>With <code>-s -w</code> linker flags</td><td>5&ndash;7 MB</td></tr>
+<tr><td>With UPX compression</td><td>2&ndash;3 MB</td></tr>
+</table>
+<p>UPX also adds an obfuscation layer: the compressed binary has a different structure than the original, which can confuse some static analysis tools. However, UPX-packed binaries have a recognizable header that some security tools specifically flag.</p>
+</div>
+
+<!-- ==================== SECTION 8: Code Signing ==================== -->
+<h2>Code Signing</h2>
+<p>Signed executables receive less scrutiny from some security tools. Windows SmartScreen, for example, is less likely to block a signed binary. Hooka supports two signing approaches.</p>
+
+<div class="card">
+<h4>PFX Certificate Signing (<code>-c</code>)</h4>
+<p>If you have a valid code signing certificate in PFX format, the <code>-c</code> flag applies it to the generated binary using <code>osslsigncode</code>. This produces a <strong>legitimately signed</strong> binary that passes Windows signature verification.</p>
+<pre><span class="lang-tag">Bash</span># Sign with a real PFX certificate
+hooka -i shellcode.bin -o loader.exe -c /path/to/cert.pfx</pre>
+</div>
+
+<div class="card">
+<h4>Fake Signature Domain (<code>-d</code>)</h4>
+<p>The <code>-d</code> flag generates a <strong>self-signed certificate</strong> with a specified domain name (e.g., <code>www.microsoft.com</code>) and signs the binary with it. The signature will not pass rigorous verification, but it adds metadata that can fool some automated tools that only check for the <em>presence</em> of a signature rather than its validity chain.</p>
+<pre><span class="lang-tag">Bash</span># Sign with a fake Microsoft signature
+hooka -i shellcode.bin -o loader.exe -d www.microsoft.com</pre>
+</div>
+
+<div class="card warn">
+<h4>Why Code Signing Matters</h4>
+<p>Some AV products treat unsigned binaries with higher suspicion. Adding any signature &mdash; even an invalid one &mdash; can reduce the initial suspicion score enough to allow execution. However, EDR products with deep verification will flag self-signed or invalid certificates. Real PFX certificates from compromised or purchased signing identities are far more effective but carry legal and ethical implications.</p>
+</div>
+
+<!-- ==================== SECTION 9: Maldev Companion Library ==================== -->
+<h2>The maldev Companion Library</h2>
+<p>D3Ext also maintains <code>github.com/D3Ext/maldev</code>, a general-purpose Go library for malware development that provides additional cryptographic and encoding functions beyond what Hooka includes natively:</p>
+
+<div class="card">
+<h4>Additional Crypto Functions</h4>
+<table>
+<tr><th>Category</th><th>Functions</th></tr>
+<tr><td>Symmetric Encryption</td><td>ChaCha20</td></tr>
+<tr><td>Hashing</td><td>SHA512, MD5, SHA1, SHA256</td></tr>
+<tr><td>Encoding</td><td>Base32, Base64, ROT13, ROT47</td></tr>
+<tr><td>Password Hashing</td><td>Bcrypt</td></tr>
+<tr><td>Asymmetric</td><td>ECC (Elliptic Curve Cryptography)</td></tr>
+</table>
+<p>These functions are primarily useful when building custom loaders via the Go library (Module 7) rather than through the CLI. They enable advanced encryption chains like ChaCha20 + Base64 encoding or multi-layer encryption with different algorithms.</p>
+</div>
+
+<!-- ==================== SECTION 10: Detection Considerations ==================== -->
+<h2>Detection Considerations</h2>
+<p>Encryption is not a silver bullet. Defenders have adapted with techniques that can identify encrypted payloads without decrypting them.</p>
+
+<div class="card warn">
+<h4>What Defenders Look For</h4>
+<ul>
+<li><strong>Entropy analysis</strong>: Encrypted data has near-maximum Shannon entropy (~7.9 out of 8.0 for a byte). Sections of a binary with unusually high entropy are flagged as potentially encrypted payloads.</li>
+<li><strong>Decryption function patterns</strong>: Even with encrypted shellcode, the decryption routine itself must be in plaintext. AES decryption functions, XOR loops, and crypto library imports are detectable patterns.</li>
+<li><strong>Import table analysis</strong>: A binary importing <code>crypto/aes</code> but performing no legitimate cryptographic operations is suspicious.</li>
+<li><strong>Behavioral analysis</strong>: Sandboxes observe the decryption at runtime. The shellcode is encrypted on disk but plaintext in memory after decryption.</li>
+<li><strong>Memory scanning</strong>: EDR products can scan process memory after decryption occurs, finding the plaintext shellcode regardless of on-disk encryption.</li>
+</ul>
+</div>
+
+<div class="card green">
+<h4>Layered Approach</h4>
+<p>The most effective strategy combines multiple obfuscation layers. Hooka enables this by stacking techniques:</p>
+<pre><span class="lang-tag">Bash</span># Maximum obfuscation: AES encryption + SGN encoding + string obfuscation
+# + random naming + UPX compression + fake signature
+hooka -i shellcode.bin -o loader.exe \
+  --enc aes --sgn --strings -r --compress \
+  -d www.microsoft.com</pre>
+<p>Each layer addresses a different detection vector: encryption defeats byte pattern matching, SGN defeats re-signaturing, string obfuscation defeats string-based rules, random naming defeats symbol analysis, UPX changes binary structure, and signing reduces initial suspicion.</p>
+</div>
+
+<!-- ==================== QUIZ ==================== -->
+<div class="quiz" id="quiz6">
+<h4>Module 6 Quiz: Encryption &amp; Obfuscation</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: When is the shellcode decrypted in Hooka's loader lifecycle?</p>
+<label data-opt="0"><input type="radio" name="q6_0"> At build time, before embedding in the binary</label>
+<label data-opt="1"><input type="radio" name="q6_0"> At runtime, in memory, just before injection</label>
+<label data-opt="2"><input type="radio" name="q6_0"> During compilation by the Go compiler</label>
+<label data-opt="3"><input type="radio" name="q6_0"> It is never decrypted &mdash; the shellcode runs encrypted</label>
+<div class="explain">The shellcode is encrypted at build time and embedded as ciphertext. At runtime, the generated loader decrypts it in memory immediately before injection. The plaintext shellcode only exists in process memory, never on disk.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: What makes Shikata Ga Nai (SGN) "polymorphic"?</p>
+<label data-opt="0"><input type="radio" name="q6_1"> It uses multiple encryption algorithms simultaneously</label>
+<label data-opt="1"><input type="radio" name="q6_1"> It encrypts the shellcode in multiple passes</label>
+<label data-opt="2"><input type="radio" name="q6_1"> Each encoding produces completely different output even from the same input, using different XOR keys, decoder stubs, and instruction substitutions</label>
+<label data-opt="3"><input type="radio" name="q6_1"> It changes the shellcode's functionality each time</label>
+<div class="explain">Polymorphic means "many forms." SGN uses randomized XOR keys, varied decoder stubs, instruction substitution, dead code insertion, and register reassignment so that each encoding of the same shellcode produces a unique byte sequence. This defeats signature-based detection even after a specific encoded form is signatured.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q3: Why might a defender still detect encrypted shellcode despite strong encryption?</p>
+<label data-opt="0"><input type="radio" name="q6_2"> They can break AES-256 encryption</label>
+<label data-opt="1"><input type="radio" name="q6_2"> The encryption key is publicly known</label>
+<label data-opt="2"><input type="radio" name="q6_2"> They use quantum computers to decrypt it</label>
+<label data-opt="3"><input type="radio" name="q6_2"> High entropy analysis flags encrypted blobs, and behavioral analysis or memory scanning catches the plaintext after runtime decryption</label>
+<div class="explain">Defenders don't need to break the encryption. Entropy analysis identifies sections of the binary with near-maximum randomness (characteristic of encrypted data). Additionally, sandbox behavioral analysis and EDR memory scanning can observe or capture the plaintext shellcode after it is decrypted at runtime in process memory.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz6')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Prev: Sandbox Detection &amp; Process Protection</a>
+<a class="primary" href="module7.html">Next: The Hooka Go Library &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

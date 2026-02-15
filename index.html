@@ -285,6 +285,43 @@ header .separator {
   background: linear-gradient(135deg, #22d3ee, #f97316);
 }
 
+/* HOOKA CARD */
+.course-card.hooka:hover {
+  border-color: #4ade8040;
+}
+
+.course-card.hooka::before {
+  background: linear-gradient(135deg, #4ade80, #2dd4bf);
+}
+
+.course-card.hooka:hover::before {
+  opacity: 1;
+}
+
+.course-card.hooka .card-banner {
+  background: linear-gradient(135deg, #4ade8015, #2dd4bf15);
+  border-bottom: 1px solid #4ade8020;
+}
+
+.course-card.hooka .card-banner .icon-wrap {
+  background: linear-gradient(135deg, #4ade80, #2dd4bf);
+}
+
+.course-card.hooka .card-title {
+  background: linear-gradient(135deg, #4ade80, #2dd4bf);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.course-card.hooka .module-item .num {
+  background: #4ade8020;
+  color: #4ade80;
+}
+
+.course-card.hooka .launch-btn {
+  background: linear-gradient(135deg, #4ade80, #2dd4bf);
+}
+
 /* DRAUGR CARD */
 .course-card.draugr:hover {
   border-color: #a855f740;
@@ -512,11 +549,11 @@ footer {
 
 <div class="stats-bar">
   <div class="stat">
-    <div class="num">4</div>
+    <div class="num">5</div>
     <div class="label">Courses</div>
   </div>
   <div class="stat">
-    <div class="num">35</div>
+    <div class="num">43</div>
     <div class="label">Modules</div>
   </div>
   <div class="stat">
@@ -668,6 +705,58 @@ footer {
         <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> Call Stack Construction</li>
         <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Argument Marshalling</li>
         <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Detection</li>
+      </ul>
+    </div>
+
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          8 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  <!-- HOOKA CARD -->
+  <a href="Project/Hooka/Hooka_index.html" class="course-card hooka">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0022 16z"/><polyline points="7.5 4.21 12 6.81 16.5 4.21"/><polyline points="7.5 19.79 7.5 14.6 3 12"/><polyline points="21 12 16.5 14.6 16.5 19.79"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+      </div>
+      <div>
+        <div class="card-title">Hooka</div>
+        <div class="card-subtitle">Shellcode Loader Generator Masterclass</div>
+      </div>
+    </div>
+
+    <div class="card-body">
+      <p class="card-desc">
+        Generate shellcode loaders with comprehensive evasion. Injection techniques, syscall gates, NTDLL unhooking,
+        AMSI/ETW patching, sandbox detection &mdash; all from a Go library and CLI generator.
+      </p>
+
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">Go / Windows</span>
+      </div>
+
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Shellcode Loader Intro</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Injection Techniques</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> Syscalls &amp; Gates</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Unhooking &amp; Patching</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Sandbox &amp; Protection</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Encryption &amp; Obfuscation</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> The Hooka Go Library</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> CLI Generator &amp; Full Chain</li>
       </ul>
     </div>
 

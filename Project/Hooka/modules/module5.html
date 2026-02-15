@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: Sandbox Detection &amp; Process Protection - Hooka Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1FA9D;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#4ade80;--accent2:#2dd4bf;--gradient:linear-gradient(135deg,#4ade80,#2dd4bf)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Hooka Course</h2>
+<span>Shellcode Loader Generator</span>
+</div>
+<a class="home-link" href="../Hooka_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Introduction to Shellcode Loaders</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Injection Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Syscalls &amp; Gate Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Unhooking &amp; Patching</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module5.html"><span>5. Sandbox Detection &amp; Process Protection</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Obfuscation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. The Hooka Go Library</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. CLI Generator &amp; Full Chain</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 5: Sandbox Detection &amp; Process Protection</h1>
+<p class="subtitle">Know your environment before you act &mdash; nine checks to detect analysis sandboxes, plus techniques to harden your process against inspection.</p>
+
+<div class="card highlight">
+<h4>Why Sandbox Detection Matters</h4>
+<p>Modern AV and EDR products don't just scan files statically &mdash; they execute suspicious binaries inside <strong>virtual machine sandboxes</strong> to observe runtime behavior. These sandboxes record API calls, network traffic, file system changes, and memory operations. If your loader runs its full payload inside a sandbox, the AV engine captures its entire behavioral signature. Sandbox detection allows the loader to recognize when it is running inside an analysis environment and <strong>exit cleanly</strong> before revealing any malicious behavior.</p>
+</div>
+
+<div class="card">
+<h4>The Sandbox Problem</h4>
+<p>Sandboxes are purpose-built analysis VMs. They share common characteristics that distinguish them from real workstations: low resource allocation (RAM, CPU, disk), generic hostnames and usernames, specific virtualization drivers, and the presence of analysis tools. Hooka exploits these artifacts through nine distinct detection functions, each targeting a different sandbox fingerprint. Individually, each check has false-positive potential &mdash; but combined, they provide high-confidence detection.</p>
+</div>
+
+<!-- ==================== SECTION 1: Nine Sandbox Checks ==================== -->
+<h2>Hooka's Nine Sandbox Detection Checks</h2>
+<p>Each check function returns a boolean: <code>true</code> if the environment appears to be a sandbox, <code>false</code> if it looks like a real machine. All nine are defined in <code>pkg/hooka/sandbox.go</code>.</p>
+
+<h3>1. CheckMemory()</h3>
+<div class="card">
+<h4>RAM Size Detection</h4>
+<p>Sandboxes typically allocate minimal RAM to their analysis VMs &mdash; often 2&ndash;4 GB. Real workstations in 2024 almost always have 8 GB or more. <code>CheckMemory()</code> queries the total physical memory via <code>GlobalMemoryStatusEx</code> and flags environments with less than <strong>4 GB</strong> of RAM as probable sandboxes.</p>
+<pre><span class="lang-tag">Go</span>func CheckMemory() (bool, error) {
+    // Uses GlobalMemoryStatusEx to get total physical RAM
+    // Returns true if RAM &lt; 4GB (sandbox indicator)
+}</pre>
+</div>
+
+<h3>2. CheckDisk()</h3>
+<div class="card">
+<h4>Disk Size Detection</h4>
+<p>Analysis VMs use thin-provisioned disks that are often 40&ndash;80 GB. Production machines almost always have 100 GB+. <code>CheckDisk()</code> calls <code>GetDiskFreeSpaceExW</code> on the system drive and flags disks smaller than <strong>100 GB</strong> total capacity.</p>
+</div>
+
+<h3>3. CheckInternet()</h3>
+<div class="card">
+<h4>Network Connectivity Check</h4>
+<p>Many sandboxes run in isolated network environments without internet access to prevent malware from reaching C2 infrastructure. <code>CheckInternet()</code> attempts an HTTP connection to a known-good external endpoint. Failure to connect suggests an isolated sandbox environment.</p>
+</div>
+
+<h3>4. CheckHostname()</h3>
+<div class="card">
+<h4>Hostname Pattern Matching</h4>
+<p>Sandbox VMs frequently use default or generic hostnames. <code>CheckHostname()</code> retrieves the machine hostname via <code>os.Hostname()</code> and compares it against a list of known sandbox hostname patterns:</p>
+<ul>
+<li><code>WIN-*</code> and <code>DESKTOP-*</code> with random suffixes</li>
+<li><code>SANDBOX</code>, <code>MALWARE</code>, <code>VIRUS</code></li>
+<li><code>JOHN-PC</code>, <code>TEQUILABOOMBOOM</code></li>
+<li>Other common sandbox default names</li>
+</ul>
+</div>
+
+<h3>5. CheckUsername()</h3>
+<div class="card">
+<h4>Username Pattern Matching</h4>
+<p>Similar to hostname checks, sandboxes often run under predictable usernames. <code>CheckUsername()</code> retrieves the current user via <code>os.Getenv("USERNAME")</code> and checks against known sandbox defaults:</p>
+<ul>
+<li><code>admin</code>, <code>administrator</code>, <code>user</code></li>
+<li><code>malware</code>, <code>sandbox</code>, <code>virus</code></li>
+<li><code>test</code>, <code>sample</code>, <code>analyst</code></li>
+</ul>
+</div>
+
+<h3>6. CheckCpu()</h3>
+<div class="card">
+<h4>CPU Core Count</h4>
+<p>Sandboxes allocate minimal CPU resources &mdash; often a single core or two. <code>CheckCpu()</code> queries the processor count via <code>runtime.NumCPU()</code> and flags systems with fewer than <strong>2 cores</strong> as likely VMs. Most physical workstations have 4+ cores.</p>
+</div>
+
+<h3>7. CheckDrivers()</h3>
+<div class="card">
+<h4>Virtualization Driver Detection</h4>
+<p>Hypervisors install specific drivers that are visible from within the guest. <code>CheckDrivers()</code> enumerates loaded drivers and checks for signatures from common virtualization platforms:</p>
+<table>
+<tr><th>Platform</th><th>Driver Names</th></tr>
+<tr><td>VMware</td><td><code>vmci.sys</code>, <code>vmhgfs.sys</code>, <code>vmmouse.sys</code>, <code>vmrawdsk.sys</code></td></tr>
+<tr><td>VirtualBox</td><td><code>VBoxMouse.sys</code>, <code>VBoxGuest.sys</code>, <code>VBoxSF.sys</code>, <code>VBoxVideo.sys</code></td></tr>
+<tr><td>Hyper-V</td><td><code>vmbus.sys</code>, <code>VMBusHID.sys</code>, <code>hyperkbd.sys</code></td></tr>
+</table>
+</div>
+
+<h3>8. CheckProcess()</h3>
+<div class="card">
+<h4>Analysis Tool Detection</h4>
+<p>If analysis tools are running, the environment is almost certainly being monitored. <code>CheckProcess()</code> enumerates running processes via <code>CreateToolhelp32Snapshot</code> and looks for known analysis and debugging tools:</p>
+<ul>
+<li><strong>Network analysis</strong>: <code>wireshark.exe</code>, <code>tcpdump.exe</code>, <code>fiddler.exe</code></li>
+<li><strong>Process monitoring</strong>: <code>procmon.exe</code>, <code>procexp.exe</code>, <code>processhacker.exe</code></li>
+<li><strong>Debuggers</strong>: <code>x64dbg.exe</code>, <code>x32dbg.exe</code>, <code>ollydbg.exe</code>, <code>windbg.exe</code>, <code>ida.exe</code>, <code>ida64.exe</code></li>
+<li><strong>Sandbox agents</strong>: <code>vmsrvc.exe</code>, <code>vboxservice.exe</code>, <code>vmtoolsd.exe</code></li>
+</ul>
+</div>
+
+<h3>9. AutoCheck() &mdash; The Combined Check</h3>
+<div class="card green">
+<h4>All Checks Combined</h4>
+<p><code>AutoCheck()</code> is the master function that runs <strong>all eight checks</strong> above in sequence. If <strong>any single check</strong> returns <code>true</code>, AutoCheck considers the environment a sandbox and returns <code>true</code>. This is what the CLI <code>--sandbox</code> flag invokes internally.</p>
+<pre><span class="lang-tag">Go</span>func AutoCheck() (bool, error) {
+    // Runs all 8 checks sequentially
+    // Returns true if ANY check detects a sandbox
+    // Returns false only if ALL checks pass
+}</pre>
+<p>The fail-fast approach means the loader exits at the first sign of sandbox activity. This minimizes the behavioral footprint observed by the analysis engine.</p>
+</div>
+
+<!-- ==================== SECTION 2: Sandbox Decision Tree ==================== -->
+<h2>Sandbox Check Decision Tree</h2>
+<p>When the <code>--sandbox</code> flag is enabled, the generated loader runs this decision flow at startup before any injection occurs:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">AutoCheck() Execution Flow</h4>
+<div class="flow">
+<div class="box">Start<br><small>Loader begins</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">AutoCheck()<br><small>Run all 9 checks</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">Sandbox?<br><small>Any check true?</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Yes: Exit<br><small>os.Exit(0)</small></div>
+</div>
+<div class="flow" style="margin-top:10px">
+<div class="box" style="visibility:hidden">spacer</div>
+<div class="arrow" style="visibility:hidden">&rarr;</div>
+<div class="box" style="visibility:hidden">spacer</div>
+<div class="arrow">&darr;</div>
+<div class="box g">No: Continue<br><small>Proceed to injection</small></div>
+</div>
+</div>
+
+<!-- ==================== SECTION 3: Execution Environment Validation ==================== -->
+<h2>Execution Environment Validation</h2>
+<p>Beyond sandbox detection, Hooka can restrict execution to <strong>specific target machines</strong>. This ensures the loader only runs on the intended host, not on analyst workstations or unrelated systems.</p>
+
+<div class="card">
+<h4>Target Restriction Flags</h4>
+<table>
+<tr><th>Flag</th><th>Purpose</th><th>How It Works</th></tr>
+<tr><td><code>--user &lt;name&gt;</code></td><td>Restrict by username</td><td>Compares <code>os.Getenv("USERNAME")</code> against the specified value. If mismatch, the loader exits silently.</td></tr>
+<tr><td><code>--computername &lt;name&gt;</code></td><td>Restrict by hostname</td><td>Compares <code>os.Hostname()</code> against the specified value. If mismatch, the loader exits silently.</td></tr>
+</table>
+<p>These flags are particularly useful in targeted operations where you know the exact username and hostname of the target machine. If the loader lands on the wrong system (analyst VM, wrong workstation), it exits without executing any payload.</p>
+</div>
+
+<pre><span class="lang-tag">Bash</span># Only execute on the target machine "CORP-WS-042" as user "jsmith"
+hooka -i shellcode.bin -o loader.exe --user jsmith --computername CORP-WS-042</pre>
+
+<!-- ==================== SECTION 4: ACG Guard ==================== -->
+<h2>Arbitrary Code Guard (ACG)</h2>
+<p>ACG is a Windows mitigation policy that prevents a process from generating or modifying executable code at runtime. This directly interferes with how AV/EDR products inject monitoring DLLs into processes.</p>
+
+<div class="card highlight">
+<h4>How ACG Protects Your Process</h4>
+<p>When ACG is enabled via <code>SetProcessMitigationPolicy</code>, the following operations are <strong>blocked</strong> for the calling process:</p>
+<ul>
+<li>Allocating new executable memory (<code>PAGE_EXECUTE_*</code> via <code>VirtualAlloc</code>)</li>
+<li>Changing existing memory to executable (<code>VirtualProtect</code> to <code>PAGE_EXECUTE_*</code>)</li>
+<li>Mapping executable memory-mapped files</li>
+</ul>
+<p>This prevents AV/EDR engines from injecting their monitoring hooks into the process <strong>after</strong> ACG is enabled. The trick is that the loader enables ACG <em>after</em> its own shellcode is already mapped and executable, but before AV has a chance to inject.</p>
+</div>
+
+<pre><span class="lang-tag">Go</span>// EnableACG activates Arbitrary Code Guard for the current process
+func EnableACG() error {
+    // Calls SetProcessMitigationPolicy with ProcessDynamicCodePolicy
+    // Sets ProhibitDynamicCode = 1
+    // After this call, no new executable memory can be created
+}</pre>
+
+<div class="card warn">
+<h4>ACG Timing Is Critical</h4>
+<p>ACG must be enabled <strong>after</strong> your shellcode has been placed in executable memory but <strong>before</strong> EDR products attempt to inject their hooks. If enabled too early, it will block your own shellcode from being mapped. If enabled too late, the EDR hooks are already in place. The CLI flag <code>--acg</code> inserts the call at the correct point in the startup sequence.</p>
+</div>
+
+<!-- ==================== SECTION 5: BlockDLLs ==================== -->
+<h2>Block Non-Microsoft DLLs</h2>
+<p>EDR products typically inject monitoring DLLs into every new process. The <code>PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY</code> flag can prevent DLLs not signed by Microsoft from loading into a process.</p>
+
+<div class="card">
+<h4>BlockDLLs() &mdash; Self-Protection</h4>
+<p><code>BlockDLLs()</code> applies the DLL blocking policy to the <strong>current process</strong>. It calls <code>NtSetInformationProcess</code> with <code>ProcessMitigationPolicy</code> to enable the <code>PROCESS_CREATION_MITIGATION_POLICY_BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON</code> flag. After this call, any attempt to load a DLL that is not signed by Microsoft will fail.</p>
+</div>
+
+<div class="card">
+<h4>CreateProcessBlockDLLs(cmd) &mdash; Spawn Protected Process</h4>
+<p><code>CreateProcessBlockDLLs(cmd)</code> creates a <strong>new process</strong> with DLL blocking enabled from the start. It uses <code>CreateProcessW</code> with an extended startup info structure containing the mitigation policy attribute. This is particularly useful when spawning a sacrificial process for injection &mdash; the target process is protected from EDR DLL injection from the moment it starts.</p>
+<pre><span class="lang-tag">Go</span>// CreateProcessBlockDLLs spawns a new process with non-MS DLL blocking
+func CreateProcessBlockDLLs(cmd string) (*windows.ProcessInformation, error) {
+    // 1. Initialize STARTUPINFOEX with PROC_THREAD_ATTRIBUTE_LIST
+    // 2. Set PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY
+    // 3. Enable BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON
+    // 4. CreateProcessW with EXTENDED_STARTUPINFO_PRESENT
+}</pre>
+</div>
+
+<pre><span class="lang-tag">Bash</span># Generate a loader with DLL blocking enabled
+hooka -i shellcode.bin -o loader.exe --blockdlls</pre>
+
+<!-- ==================== SECTION 6: Phant0m ==================== -->
+<h2>Phant0m &mdash; Event Log Suppression</h2>
+<p>Windows Event Logging records security-relevant events (process creation, logon events, privilege escalation). The Phant0m technique suppresses logging by suspending all threads of the Event Log service.</p>
+
+<div class="card highlight">
+<h4>How Phant0m Works</h4>
+<ol>
+<li><strong>GetEventLogPid()</strong> locates the PID of the Windows Event Log service (<code>svchost.exe</code> hosting <code>EventLog</code>) by enumerating services via <code>EnumServicesStatusExW</code> and finding the one with service name "EventLog".</li>
+<li><strong>Phant0m(pid)</strong> takes the Event Log PID, enumerates all of its threads using <code>CreateToolhelp32Snapshot</code> with <code>TH32CS_SNAPTHREAD</code>, and <strong>suspends each thread</strong> via <code>SuspendThread</code>.</li>
+</ol>
+<p>With all threads suspended, the Event Log service is alive but cannot process or write any events. No crash, no restart &mdash; just silence.</p>
+</div>
+
+<pre><span class="lang-tag">Go</span>// Step 1: Find the Event Log service PID
+pid, err := hooka.GetEventLogPid()
+
+// Step 2: Suspend all threads in the Event Log process
+err = hooka.Phant0m(pid)</pre>
+
+<div class="card warn">
+<h4>Operational Considerations</h4>
+<p>Phant0m does <strong>not</strong> delete existing logs &mdash; it only prevents new events from being recorded. The suspended threads can be resumed by an administrator or a system restart. Some EDR products monitor the Event Log service's health and may alert if its threads are suspended. The CLI flag <code>--phantom</code> enables this technique in the generated loader.</p>
+</div>
+
+<!-- ==================== SECTION 7: Custom Sleep ==================== -->
+<h2>Custom Sleep for Time-Based Evasion</h2>
+<p>Sandboxes impose time limits on analysis &mdash; typically 30&ndash;120 seconds. If a sample doesn't exhibit malicious behavior within that window, the sandbox moves on. Conversely, some sandboxes detect calls to <code>Sleep()</code> or <code>WaitForSingleObject()</code> and fast-forward time.</p>
+
+<div class="card">
+<h4>Hooka's Sleep() Function</h4>
+<p>Hooka implements a custom sleep mechanism that delays execution without using the obvious <code>kernel32.Sleep</code> API. This serves two purposes:</p>
+<ul>
+<li><strong>Time-based evasion</strong>: delays execution past the sandbox's analysis window</li>
+<li><strong>API-level stealth</strong>: avoids hooking on the standard <code>Sleep</code> function</li>
+</ul>
+<p>The <code>--sleep</code> CLI flag inserts a sleep call at the very beginning of the loader's execution, before any sandbox checks or injection occurs.</p>
+</div>
+
+<pre><span class="lang-tag">Go</span>// Sleep delays execution using an alternative timing mechanism
+func Sleep() {
+    // Uses alternative wait method to avoid Sleep() API hooks
+    // Typical delay: several seconds to minutes
+    // Placed at the very start of loader execution
+}</pre>
+
+<!-- ==================== SECTION 8: Protection Comparison ==================== -->
+<h2>Protection Techniques Comparison</h2>
+
+<table>
+<tr><th>Technique</th><th>Function</th><th>CLI Flag</th><th>Defends Against</th></tr>
+<tr><td>Sandbox Detection</td><td><code>AutoCheck()</code></td><td><code>--sandbox</code></td><td>AV sandbox behavioral analysis</td></tr>
+<tr><td>User Restriction</td><td>Environment check</td><td><code>--user</code></td><td>Execution on wrong target machine</td></tr>
+<tr><td>Host Restriction</td><td>Environment check</td><td><code>--computername</code></td><td>Execution on analyst workstation</td></tr>
+<tr><td>ACG Guard</td><td><code>EnableACG()</code></td><td><code>--acg</code></td><td>Post-injection EDR code injection</td></tr>
+<tr><td>Block DLLs</td><td><code>BlockDLLs()</code></td><td><code>--blockdlls</code></td><td>EDR monitoring DLL injection</td></tr>
+<tr><td>Phant0m</td><td><code>Phant0m(pid)</code></td><td><code>--phantom</code></td><td>Windows Event Log recording</td></tr>
+<tr><td>Custom Sleep</td><td><code>Sleep()</code></td><td><code>--sleep</code></td><td>Time-based sandbox analysis</td></tr>
+</table>
+
+<!-- ==================== SECTION 9: Combining Protections ==================== -->
+<h2>Combining Protections</h2>
+<p>In practice, you layer multiple protections. The generated loader applies them in a specific order that maximizes effectiveness:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Protection Startup Sequence</h4>
+<div class="flow">
+<div class="box">Sleep<br><small>Time delay</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Sandbox<br><small>AutoCheck()</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">User/Host<br><small>Validate target</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">AMSI/ETW<br><small>Patch defenses</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Unhook<br><small>Clean NTDLL</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">ACG/Block<br><small>Harden process</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Inject<br><small>Payload exec</small></div>
+</div>
+</div>
+
+<div class="card green">
+<h4>Maximum Protection CLI Example</h4>
+<pre><span class="lang-tag">Bash</span># Enable all protective measures
+hooka -i shellcode.bin -o loader.exe \
+  --sandbox \
+  --user targetuser \
+  --computername CORP-WS-042 \
+  --acg \
+  --blockdlls \
+  --phantom \
+  --sleep</pre>
+<p>This generates a loader that sleeps first, then validates the sandbox, user, and hostname, patches AMSI/ETW, unhooks NTDLL, enables ACG and DLL blocking, suppresses event logging, and only then proceeds with shellcode injection.</p>
+</div>
+
+<!-- ==================== QUIZ ==================== -->
+<div class="quiz" id="quiz5">
+<h4>Module 5 Quiz: Sandbox Detection &amp; Process Protection</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: What does AutoCheck() return if CheckMemory() detects &lt;4 GB RAM but all other checks pass?</p>
+<label data-opt="0"><input type="radio" name="q5_0"> false &mdash; most checks passed</label>
+<label data-opt="1"><input type="radio" name="q5_0"> An error &mdash; conflicting results</label>
+<label data-opt="2"><input type="radio" name="q5_0"> true &mdash; any single positive check causes AutoCheck to return true</label>
+<label data-opt="3"><input type="radio" name="q5_0"> It runs the checks again for confirmation</label>
+<div class="explain">AutoCheck() returns true if ANY individual check detects a sandbox indicator. It uses a fail-fast approach: one positive detection is enough to classify the environment as a sandbox.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: Why must ACG (Arbitrary Code Guard) be enabled AFTER shellcode is mapped to memory?</p>
+<label data-opt="0"><input type="radio" name="q5_1"> ACG requires shellcode to be present before activation</label>
+<label data-opt="1"><input type="radio" name="q5_1"> ACG blocks all new executable memory allocation, which would prevent the loader from mapping its own shellcode</label>
+<label data-opt="2"><input type="radio" name="q5_1"> Windows requires this specific ordering</label>
+<label data-opt="3"><input type="radio" name="q5_1"> ACG only works on existing memory pages</label>
+<div class="explain">ACG prevents the creation of new executable memory via VirtualAlloc(PAGE_EXECUTE_*) and VirtualProtect to executable. If enabled before shellcode mapping, the loader would block itself. The correct timing is: map shellcode first, then enable ACG to prevent EDR from injecting its own code afterward.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: What does the Phant0m technique do to the Windows Event Log service?</p>
+<label data-opt="0"><input type="radio" name="q5_2"> Suspends all threads of the EventLog service process, preventing new events from being recorded</label>
+<label data-opt="1"><input type="radio" name="q5_2"> Terminates the EventLog service entirely</label>
+<label data-opt="2"><input type="radio" name="q5_2"> Deletes all existing Windows event logs</label>
+<label data-opt="3"><input type="radio" name="q5_2"> Redirects log output to /dev/null</label>
+<div class="explain">Phant0m finds the Event Log service PID via GetEventLogPid(), then enumerates and suspends all of its threads using SuspendThread. The service remains alive (no crash, no restart trigger) but cannot process any new events. Existing logs are not affected.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz5')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Prev: Unhooking &amp; Patching</a>
+<a class="primary" href="module6.html">Next: Encryption &amp; Obfuscation &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

