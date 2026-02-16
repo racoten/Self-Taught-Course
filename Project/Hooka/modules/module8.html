@@ -83,12 +83,12 @@ make
 <tr><td><code>-i</code></td><td><code>--input</code></td><td>Input file path or URL (required)</td></tr>
 <tr><td><code>-o</code></td><td><code>--output</code></td><td>Output file path (default: loader.exe)</td></tr>
 <tr><td><code>-f</code></td><td><code>--format</code></td><td>Output format: <code>exe</code> or <code>dll</code></td></tr>
-<tr><td></td><td><code>--exec</code></td><td>Injection technique (SuspendedProcess, ProcessHollowing, NtCreateThreadEx, EnumCalcProc, CreateFiber, QueueUserApc, CreateRemoteThread, NoRwx)</td></tr>
+<tr><td></td><td><code>--exec</code></td><td>Injection technique (SuspendedProcess, ProcessHollowing, NtCreateThreadEx, EtwpCreateEtwThread, NtQueueApcThreadEx, NoRwx)</td></tr>
 <tr><td></td><td><code>--unhook</code></td><td>Unhooking method: <code>classic</code>, <code>full</code>, or <code>peruns</code></td></tr>
 <tr><td></td><td><code>--amsi</code></td><td>Enable AMSI patching</td></tr>
 <tr><td></td><td><code>--etw</code></td><td>Enable ETW patching</td></tr>
 <tr><td></td><td><code>--halo</code></td><td>Use Halo's Gate for syscall resolution</td></tr>
-<tr><td></td><td><code>--sandbox</code></td><td>Enable all 9 sandbox detection checks</td></tr>
+<tr><td></td><td><code>--sandbox</code></td><td>Enable all 8 sandbox detection checks</td></tr>
 <tr><td></td><td><code>--sleep</code></td><td>Add custom sleep at startup</td></tr>
 <tr><td></td><td><code>--acg</code></td><td>Enable Arbitrary Code Guard</td></tr>
 <tr><td></td><td><code>--blockdlls</code></td><td>Block non-Microsoft DLLs</td></tr>
@@ -113,7 +113,7 @@ make
 <div class="card">
 <h4>Minimal Configuration</h4>
 <pre><span class="lang-tag">Bash</span>hooka -i shellcode.bin -o loader.exe</pre>
-<p>Uses default settings: NtCreateThreadEx injection, no encryption, no evasion. Good for testing in controlled environments where no AV/EDR is present.</p>
+<p>Uses default settings: SuspendedProcess injection, no encryption, no evasion. Good for testing in controlled environments where no AV/EDR is present.</p>
 </div>
 
 <h3>Scenario 2: Process Hollowing with Unhooking</h3>
@@ -153,7 +153,7 @@ make
   -r \
   --compress \
   -d www.microsoft.com</pre>
-<p>This generates a loader with: custom sleep delay, nine sandbox checks, AMSI and ETW patching, Perun's Fart NTDLL unhooking, Halo's Gate syscall resolution, DLL blocking, ACG Guard, Event Log suppression, AES encryption with SGN encoding, Caesar cipher string obfuscation, random naming, UPX compression, and a fake Microsoft code signature.</p>
+<p>This generates a loader with: custom sleep delay, eight sandbox checks, AMSI and ETW patching, Perun's Fart NTDLL unhooking, Halo's Gate syscall resolution, DLL blocking, ACG Guard, Event Log suppression, AES encryption with SGN encoding, Caesar cipher string obfuscation, random naming, UPX compression, and a fake Microsoft code signature.</p>
 </div>
 
 <!-- ==================== SECTION 5: Test Mode ==================== -->
@@ -356,7 +356,7 @@ hooka -i sc.bin -o loader.exe \
 <tr><td>ScareCrow</td><td>Optiv</td><td>EDR-aware loader with DLL side-loading and code signing</td></tr>
 <tr><td>Freeze</td><td>Optiv</td><td>Suspended process injection with ETW/AMSI patching</td></tr>
 <tr><td>Shhhloader</td><td>icyguider</td><td>Syscall-based loader with multiple injection methods</td></tr>
-<tr><td><strong>Hooka</strong></td><td>D3Ext</td><td>Combined all techniques + importable Go library + CLI generator with 8 injection methods, 3 gate techniques, 3 unhooking methods, 4 encryption algorithms, and 9 sandbox checks</td></tr>
+<tr><td><strong>Hooka</strong></td><td>D3Ext</td><td>Combined all techniques + importable Go library + CLI generator with 6 CLI injection methods (10 in library), 3 gate techniques, 3 unhooking methods, 4 encryption algorithms, and 8 sandbox checks</td></tr>
 </table>
 <p>Hooka's key differentiator is its dual nature: a complete CLI tool <strong>and</strong> an importable Go library. Previous tools were CLI-only, requiring users to modify source code for customization. Hooka's library approach allows building entirely custom tooling while leveraging battle-tested evasion primitives.</p>
 </div>
@@ -372,7 +372,7 @@ hooka -i sc.bin -o loader.exe \
 <tr><td>2</td><td>Injection Techniques</td><td>8 injection methods from SuspendedProcess to NoRwx</td></tr>
 <tr><td>3</td><td>Syscalls &amp; Gate Techniques</td><td>Direct syscalls, Hell's/Halo's/Tartarus' Gate, API hashing</td></tr>
 <tr><td>4</td><td>Unhooking &amp; Patching</td><td>3 unhooking methods, AMSI patching (2), ETW patching (2)</td></tr>
-<tr><td>5</td><td>Sandbox Detection &amp; Process Protection</td><td>9 sandbox checks, ACG, BlockDLLs, Phant0m, custom sleep</td></tr>
+<tr><td>5</td><td>Sandbox Detection &amp; Process Protection</td><td>8 sandbox checks, ACG, BlockDLLs, Phant0m, custom sleep</td></tr>
 <tr><td>6</td><td>Encryption &amp; Obfuscation</td><td>AES/3DES/RC4/XOR, SGN, string obfuscation, code signing</td></tr>
 <tr><td>7</td><td>The Hooka Go Library</td><td>40+ functions, custom loader building, sRDI, API reference</td></tr>
 <tr><td>8</td><td>CLI Generator &amp; Full Chain</td><td>Complete CLI reference, generation pipeline, tradecraft</td></tr>

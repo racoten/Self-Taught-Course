@@ -35,7 +35,7 @@
 
 <div class="card highlight">
 <h4>Module Objective</h4>
-<p>This module covers every injection technique available in Hooka &mdash; both the 6 CLI-accessible methods and the 14 library methods. You will learn the difference between self-injection, remote injection, and process-creation-based techniques, understand the API call chains behind each method, and see how Hooka implements them in Go.</p>
+<p>This module covers every injection technique available in Hooka &mdash; the 6 CLI-accessible methods and the additional library-only methods. You will learn the difference between self-injection, remote injection, and process-creation-based techniques, understand the API call chains behind each method, and see how Hooka implements them in Go.</p>
 </div>
 
 <!-- ============================================================ -->
@@ -363,7 +363,7 @@ func EnumSystemLocalesInject(shellcode []byte) error {
 <!-- ============================================================ -->
 <h2>11. Complete Technique Comparison</h2>
 
-<p>This table summarizes all 14 injection techniques available in Hooka's library:</p>
+<p>This table summarizes the injection techniques available in Hooka (10 exported library functions plus conceptual groupings):</p>
 
 <table>
 <tr><th>Technique</th><th>Type</th><th>Key API</th><th>CLI</th><th>Stealth</th></tr>
@@ -372,7 +372,8 @@ func EnumSystemLocalesInject(shellcode []byte) error {
 <tr><td>NtCreateThreadEx</td><td>Self / Remote</td><td>NtCreateThreadEx</td><td>Yes</td><td>Medium</td></tr>
 <tr><td>EtwpCreateEtwThread</td><td>Self</td><td>EtwpCreateEtwThread (undocumented)</td><td>Yes</td><td>High</td></tr>
 <tr><td>NtQueueApcThreadEx</td><td>Remote (APC)</td><td>NtQueueApcThreadEx</td><td>Yes</td><td>High</td></tr>
-<tr><td>QueueUserApc</td><td>Remote (APC)</td><td>QueueUserAPC</td><td>Yes</td><td>Medium</td></tr>
+<tr><td>NoRwx</td><td>Self</td><td>VirtualAlloc + VirtualProtect (no RWX)</td><td>Yes</td><td>Medium</td></tr>
+<tr><td>QueueUserApc</td><td>Remote (APC)</td><td>QueueUserAPC</td><td>No</td><td>Medium</td></tr>
 <tr><td>CreateRemoteThread</td><td>Remote</td><td>CreateRemoteThread</td><td>No</td><td>Low</td></tr>
 <tr><td>RtlCreateUserThread</td><td>Remote</td><td>RtlCreateUserThread (undocumented)</td><td>No</td><td>Medium</td></tr>
 <tr><td>UuidFromString</td><td>Self (Callback)</td><td>UuidFromStringA</td><td>No</td><td>High</td></tr>

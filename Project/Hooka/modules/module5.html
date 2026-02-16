@@ -31,7 +31,7 @@
 <main>
 <span class="diff-badge medium">Difficulty: Intermediate</span>
 <h1>Module 5: Sandbox Detection &amp; Process Protection</h1>
-<p class="subtitle">Know your environment before you act &mdash; nine checks to detect analysis sandboxes, plus techniques to harden your process against inspection.</p>
+<p class="subtitle">Know your environment before you act &mdash; eight checks to detect analysis sandboxes, plus techniques to harden your process against inspection.</p>
 
 <div class="card highlight">
 <h4>Why Sandbox Detection Matters</h4>
@@ -40,11 +40,11 @@
 
 <div class="card">
 <h4>The Sandbox Problem</h4>
-<p>Sandboxes are purpose-built analysis VMs. They share common characteristics that distinguish them from real workstations: low resource allocation (RAM, CPU, disk), generic hostnames and usernames, specific virtualization drivers, and the presence of analysis tools. Hooka exploits these artifacts through nine distinct detection functions, each targeting a different sandbox fingerprint. Individually, each check has false-positive potential &mdash; but combined, they provide high-confidence detection.</p>
+<p>Sandboxes are purpose-built analysis VMs. They share common characteristics that distinguish them from real workstations: low resource allocation (RAM, CPU, disk), generic hostnames and usernames, specific virtualization drivers, and the presence of analysis tools. Hooka exploits these artifacts through eight distinct detection functions, each targeting a different sandbox fingerprint. Individually, each check has false-positive potential &mdash; but combined, they provide high-confidence detection.</p>
 </div>
 
 <!-- ==================== SECTION 1: Nine Sandbox Checks ==================== -->
-<h2>Hooka's Nine Sandbox Detection Checks</h2>
+<h2>Hooka's Eight Sandbox Detection Checks</h2>
 <p>Each check function returns a boolean: <code>true</code> if the environment appears to be a sandbox, <code>false</code> if it looks like a real machine. All nine are defined in <code>pkg/hooka/sandbox.go</code>.</p>
 
 <h3>1. CheckMemory()</h3>
@@ -143,7 +143,7 @@
 <div class="flow">
 <div class="box">Start<br><small>Loader begins</small></div>
 <div class="arrow">&rarr;</div>
-<div class="box">AutoCheck()<br><small>Run all 9 checks</small></div>
+<div class="box">AutoCheck()<br><small>Run all 8 checks</small></div>
 <div class="arrow">&rarr;</div>
 <div class="box r">Sandbox?<br><small>Any check true?</small></div>
 <div class="arrow">&rarr;</div>
