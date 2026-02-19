@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Full Chain, Detection & Comparison - ShellcodeFluctuation Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A0;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#10b981;--accent2:#059669;--gradient:linear-gradient(135deg,#10b981,#059669)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>ShellcodeFluctuation</h2><span>Memory Fluctuation Masterclass</span></div>
+  <a class="home-link" href="../ShellcodeFluctuation_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span>1. Memory Scanning Threat Model</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module2.html"><span>2. XOR Encryption for Memory</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module3.html"><span>3. VirtualProtect &amp; Pages</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module4.html"><span>4. Sleep Function Hooking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module5.html"><span>5. The Fluctuation Algorithm</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module6.html"><span>6. Shellcode Region Tracking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module7.html"><span>7. Thread Stack Spoofing</span><span class="diff d3">d3</span></a>
+  <a class="mod-link active" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Full Chain, Detection &amp; Comparison</h1>
+<p class="subtitle">Comparing Ekko, FOLIAGE, and ShellcodeFluctuation &mdash; detection vectors, Moneta/pe-sieve bypass results, limitations, and the state of the art.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Synthesize everything from the course into a complete end-to-end understanding. Compare ShellcodeFluctuation against Ekko and FOLIAGE, analyze real-world detection results from Moneta and pe-sieve, identify remaining detection vectors, understand fundamental limitations, and assess the current state of sleep evasion research.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Complete Execution Chain</h2>
+
+<p>Here is the full end-to-end execution flow of ShellcodeFluctuation with ThreadStackSpoofer integration, from initial loading through multiple beacon cycles:</p>
+
+<pre><code class="language-cpp">// ============================================
+// PHASE 0: LOADER INITIALIZATION
+// ============================================
+// 1. Read shellcode (beacon.bin) from disk/resource
+// 2. VirtualAlloc(NULL, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
+// 3. memcpy(allocation, shellcode, size)
+// 4. VirtualProtect(allocation, size, PAGE_EXECUTE_READ, &old)
+// 5. Generate random XOR32 key
+// 6. Resolve kernel32!Sleep via GetProcAddress
+// 7. Install inline hook: Sleep -> MySleep
+// 8. Save original bytes + hook bytes
+// 9. (Optional) Register VEH for Mode 2
+// 10. CreateThread(NULL, 0, allocation, NULL, 0, NULL)
+//     -> Beacon shellcode begins executing
+
+// ============================================
+// PHASE 1: BEACON ACTIVE (repeats each cycle)
+// ============================================
+// Beacon performs its check-in:
+// - Connects to C2 server
+// - Downloads tasks
+// - Executes commands
+// - Uploads results
+// Duration: ~100ms
+
+// ============================================
+// PHASE 2: BEACON CALLS Sleep(interval)
+// ============================================
+// Beacon's sleep call is redirected to MySleep via inline hook
+
+// ============================================
+// PHASE 3: MySleep HANDLER
+// ============================================
+// 3a. Spoof stack: *_AddressOfReturnAddress() = 0
+// 3b. VirtualProtect(shellcode, RW)
+// 3c. xor32(shellcode, key)  [encrypt]
+// 3d. Unhook: restore original bytes to kernel32!Sleep
+// 3e. Sleep(interval)        [actual sleep - maximally hidden]
+// 3f. Rehook: restore hook bytes to kernel32!Sleep
+// 3g. xor32(shellcode, key)  [decrypt]
+// 3h. VirtualProtect(shellcode, RX)
+// 3i. Restore stack: *_AddressOfReturnAddress() = origAddr
+
+// ============================================
+// PHASE 4: RETURN TO BEACON
+// ============================================
+// MySleep returns, Beacon resumes at next instruction
+// -> Back to Phase 1</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Full Lifecycle</h4>
+<div class="flow">
+<div class="flow box">Loader Init<br><small>Inject + Hook</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Beacon Active<br><small>C2 check-in</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">MySleep<br><small>Encrypt+Spoof</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Sleep<br><small>Hidden state</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">MySleep<br><small>Decrypt+Restore</small></div>
+<div class="flow arrow">&circlearrowright;</div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Technique Comparison: Ekko vs FOLIAGE vs Fluctuation</h2>
+
+<p>Three prominent sleep evasion techniques take fundamentally different architectural approaches to the same problem:</p>
+
+<table>
+<tr><th>Property</th><th>Ekko (C5pider)</th><th>FOLIAGE (Austin Hudson)</th><th>ShellcodeFluctuation (mgeeky)</th></tr>
+<tr><td><strong>Sleep mechanism</strong></td><td>Timer queue callbacks via <code>CreateTimerQueueTimer</code></td><td>APC queuing with <code>NtContinue</code> context manipulation</td><td>Inline hook on <code>kernel32!Sleep</code></td></tr>
+<tr><td><strong>Encryption</strong></td><td>RC4 via <code>SystemFunction032</code></td><td>XOR or RC4 via ROP/APC chain</td><td>XOR32 (custom, no imports)</td></tr>
+<tr><td><strong>Protection change</strong></td><td>Via timer callback to <code>VirtualProtect</code></td><td>Via APC-queued <code>NtProtectVirtualMemory</code></td><td>Direct <code>VirtualProtect</code> call in hook handler</td></tr>
+<tr><td><strong>Call stack</strong></td><td>Clean &mdash; callbacks from <code>ntdll!TppWorkerThread</code></td><td>Clean &mdash; <code>NtContinue</code> creates clean context</td><td>Requires ThreadStackSpoofer for clean stack</td></tr>
+<tr><td><strong>Code complexity</strong></td><td>Moderate &mdash; chained timer callbacks</td><td>High &mdash; APC manipulation + context crafting</td><td>Low &mdash; straightforward hook handler</td></tr>
+<tr><td><strong>Hook IOC</strong></td><td>No function hooks needed</td><td>No function hooks needed</td><td>Inline hook on Sleep (mitigated by unhooking)</td></tr>
+<tr><td><strong>CET compatible</strong></td><td>No &mdash; uses ROP-like callback chains</td><td>Partially &mdash; <code>NtContinue</code> may be restricted</td><td>Yes &mdash; standard call/ret flow</td></tr>
+<tr><td><strong>Suspicious imports</strong></td><td><code>SystemFunction032</code>, <code>CreateTimerQueueTimer</code></td><td><code>NtContinue</code>, <code>NtQueueApcThread</code></td><td>None beyond standard APIs</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. Moneta Detection Results</h2>
+
+<p>Moneta is the gold standard for memory anomaly detection. Here are the actual detection results for each configuration:</p>
+
+<div class="card">
+<h4>Moneta Scan: Unprotected Beacon</h4>
+<pre><code class="language-text">// Moneta output for unprotected Cobalt Strike Beacon:
+[!] SUSPICIOUS: Private executable memory
+    Process: beacon.exe (PID: 4832)
+    Region:  0x000001A00000 - 0x000001A4C000
+    Size:    0x4C000 (311,296 bytes)
+    Protect: PAGE_EXECUTE_READ
+    Type:    MEM_PRIVATE
+    IOC:     Abnormal private executable memory</code></pre>
+</div>
+
+<div class="card green">
+<h4>Moneta Scan: Fluctuating Beacon (during sleep)</h4>
+<pre><code class="language-text">// Moneta output for ShellcodeFluctuation Mode 1 during sleep:
+// Region 0x000001A00000 - 0x000001A4C000:
+//   Protect: PAGE_READWRITE
+//   Type:    MEM_PRIVATE
+//   Content: Encrypted (no recognizable patterns)
+//   IOC:     None - RW private memory is normal
+
+// However, kernel32.dll shows:
+[*] MODIFIED: kernel32.dll
+    Region:  0x00007FFB1A240000
+    IOC:     Modified code (private working set page)
+    Note:    Page modified but content matches disk
+             (hook was removed before sleep)</code></pre>
+</div>
+
+<p>The fluctuating Beacon eliminates the "Abnormal private executable memory" IOC. The remaining IOC is the kernel32 private page artifact from the copy-on-write caused by the hook installation. Crucially, the content matches the on-disk file (because the hook bytes are restored), so the IOC is a weaker "private working set" anomaly rather than a clear "modified code" detection.</p>
+
+<!-- ============================================================ -->
+<h2>4. pe-sieve Detection Results</h2>
+
+<table>
+<tr><th>Configuration</th><th>pe-sieve Result</th><th>Details</th></tr>
+<tr><td>Unprotected Beacon</td><td><strong>Detected</strong></td><td>Shellcode found in private executable memory via implant scanning</td></tr>
+<tr><td>Fluctuation Mode 1 (during sleep)</td><td><strong>Not detected (shellcode)</strong></td><td>Encrypted RW memory does not match any shellcode signatures</td></tr>
+<tr><td>Fluctuation Mode 1 (during sleep)</td><td><strong>Possible IOC (kernel32)</strong></td><td>pe-sieve can detect that kernel32 has modified working set pages</td></tr>
+<tr><td>Fluctuation Mode 2 (NOACCESS)</td><td><strong>Not detected</strong></td><td>NOACCESS memory cannot even be read by the scanner</td></tr>
+<tr><td>Fluctuation + Stack Spoof</td><td><strong>Not detected</strong></td><td>Neither memory nor stack analysis reveals the implant</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. BeaconEye Detection Results</h2>
+
+<p>BeaconEye specifically targets Cobalt Strike Beacon configuration structures in memory:</p>
+
+<table>
+<tr><th>Configuration</th><th>BeaconEye Result</th><th>Why</th></tr>
+<tr><td>Unprotected Beacon</td><td><strong>Detected</strong></td><td>Single-byte XOR config found via brute force (256 keys)</td></tr>
+<tr><td>Fluctuation Mode 1 (during sleep)</td><td><strong>Not detected</strong></td><td>XOR32 encryption with ~4.3 billion possible keys; brute force infeasible</td></tr>
+<tr><td>Fluctuation (during active execution)</td><td><strong>Detected</strong></td><td>Config is decrypted while Beacon is active; original single-byte XOR remains</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Active Window Vulnerability</h4>
+<p>During the brief active window (~100ms per cycle), the Beacon's memory is fully decrypted and scannable. BeaconEye or any other scanner that happens to scan during this window will find the implant. ShellcodeFluctuation only protects during the sleep window. This is the fundamental limitation of all sleep-time-only evasion techniques.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Remaining Detection Vectors</h2>
+
+<p>Even with both ShellcodeFluctuation and ThreadStackSpoofer active, several detection paths remain available to defenders:</p>
+
+<table>
+<tr><th>Detection Vector</th><th>Description</th><th>Difficulty to Detect</th></tr>
+<tr><td><strong>Thread start address</strong></td><td>The thread was created with <code>CreateThread</code> pointing to private memory. The start address is recorded in the ETHREAD structure and cannot be changed post-creation</td><td>Easy &mdash; visible via <code>NtQueryInformationThread</code></td></tr>
+<tr><td><strong>Private working set pages in kernel32</strong></td><td>Copy-on-write from hook installation creates private pages that persist even after unhooking</td><td>Moderate &mdash; requires working set analysis</td></tr>
+<tr><td><strong>ETW telemetry</strong></td><td><code>VirtualProtect</code> calls generate ETW events. Periodic RW/RX toggling on the same region is an anomalous pattern</td><td>Moderate &mdash; requires ETW consumer + pattern analysis</td></tr>
+<tr><td><strong>Timing correlation</strong></td><td>Periodic <code>VirtualProtect</code> calls correlated with network beaconing can reveal the sleep cycle</td><td>Hard &mdash; requires cross-signal correlation</td></tr>
+<tr><td><strong>Active window scanning</strong></td><td>Scanning during the ~100ms active window catches the decrypted shellcode</td><td>Hard &mdash; requires fast, frequent scanning or triggered scanning</td></tr>
+<tr><td><strong>Kernel callbacks</strong></td><td><code>PsSetCreateThreadNotifyRoutine</code> logs thread creation with private memory start addresses</td><td>Easy from kernel mode</td></tr>
+<tr><td><strong>Memory allocation patterns</strong></td><td>Large <code>VirtualAlloc</code> + <code>PAGE_EXECUTE_READ</code> for private memory is itself suspicious</td><td>Moderate &mdash; many legitimate uses exist</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>7. Fundamental Limitations</h2>
+
+<div class="card warn">
+<h4>What Sleep Evasion Cannot Solve</h4>
+<ul>
+<li><strong>Active-time exposure</strong> &mdash; during command execution, the entire shellcode must be decrypted and executable. No sleep-time technique helps here. Only per-function encryption (FunctionPeekaboo) addresses this</li>
+<li><strong>Network IOCs</strong> &mdash; C2 communication patterns (DNS beaconing, HTTPS to suspicious domains) are orthogonal to memory evasion</li>
+<li><strong>Behavioral detection</strong> &mdash; process injection, credential dumping, lateral movement all generate detectable events regardless of memory state</li>
+<li><strong>Kernel telemetry</strong> &mdash; ETW providers, minifilter drivers, and kernel callbacks operate below the level that user-mode techniques can control</li>
+<li><strong>Sleep 0 scenarios</strong> &mdash; if the beacon interval is 0 (continuous), Sleep is never called and the fluctuation mechanism never triggers. The shellcode sits permanently decrypted in executable memory</li>
+<li><strong>Hardware security</strong> &mdash; Intel CET (Control-flow Enforcement Technology) shadow stacks will eventually break techniques that manipulate return addresses, though ThreadStackSpoofer's approach is more CET-compatible than ROP-based alternatives</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. State of the Art and Evolution</h2>
+
+<p>ShellcodeFluctuation represents one point in the evolution of sleep evasion research. Understanding where it fits helps assess its current relevance:</p>
+
+<div class="card">
+<h4>Evolution of Sleep Evasion</h4>
+<table>
+<tr><th>Era</th><th>Technique</th><th>Innovation</th></tr>
+<tr><td>2021</td><td><strong>ShellcodeFluctuation</strong> (mgeeky)</td><td>Inline-hook approach with unhook/rehook cycle and XOR32 encryption</td></tr>
+<tr><td>2021</td><td><strong>ThreadStackSpoofer</strong> (mgeeky)</td><td>Return address overwriting for call stack evasion</td></tr>
+<tr><td>2022</td><td><strong>Ekko</strong> (C5pider)</td><td>First public timer-callback-based sleep encryption with clean call stacks</td></tr>
+<tr><td>2022</td><td><strong>FOLIAGE</strong> (Austin Hudson)</td><td>APC + NtContinue for clean execution context</td></tr>
+<tr><td>2022</td><td><strong>Cobalt Strike Sleep Mask Kit v2</strong></td><td>Official CS support for custom sleep masks with heap encryption</td></tr>
+<tr><td>2022-23</td><td><strong>SilentMoonwalk, Unwinder</strong></td><td>Full call stack fabrication with synthetic unwind metadata</td></tr>
+<tr><td>2023+</td><td><strong>Nighthawk, BruteRatel</strong></td><td>Commercial C2 frameworks with built-in sleep evasion suites</td></tr>
+<tr><td>2025</td><td><strong>FunctionPeekaboo</strong> (MDSec)</td><td>Per-function encryption at the LLVM compiler level &mdash; active-time protection</td></tr>
+</table>
+</div>
+
+<div class="card green">
+<h4>Where ShellcodeFluctuation Excels</h4>
+<ul>
+<li><strong>Simplicity</strong> &mdash; the hook-based architecture is easy to understand, implement, and debug. No ROP chains, no APC manipulation</li>
+<li><strong>CET compatibility</strong> &mdash; standard call/ret flow works with Intel CET shadow stacks, unlike Ekko's timer-callback chains</li>
+<li><strong>Zero suspicious imports</strong> &mdash; no <code>SystemFunction032</code>, no <code>NtContinue</code>, no timer queue APIs. Uses only <code>VirtualProtect</code>, <code>Sleep</code>, and <code>GetProcAddress</code></li>
+<li><strong>Integration-friendly</strong> &mdash; the <code>MySleep</code> hook handler can easily incorporate additional techniques (stack spoofing, heap encryption, etc.)</li>
+<li><strong>Educational value</strong> &mdash; the clear, sequential nature of the algorithm makes it an excellent teaching tool for understanding memory evasion concepts</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. Defense Recommendations</h2>
+
+<p>For blue team operators and detection engineers, the following approaches can detect ShellcodeFluctuation and similar techniques:</p>
+
+<div class="card">
+<h4>Detection Strategies</h4>
+<ol>
+<li><strong>Thread start address auditing</strong> &mdash; flag threads whose start address is in private (non-image) memory. This is a fundamental IOC that no user-mode sleep evasion technique can eliminate</li>
+<li><strong>ETW VirtualProtect monitoring</strong> &mdash; look for periodic <code>NtProtectVirtualMemory</code> calls toggling the same region between RW and RX. Correlate with sleep timing</li>
+<li><strong>Working set analysis</strong> &mdash; detect private pages in normally-shared DLL sections (kernel32.dll .text). This survives the unhook/rehook cycle</li>
+<li><strong>Triggered scanning</strong> &mdash; instead of periodic scans, trigger memory scans on behavioral events (network connections, process creation) that occur during the active window</li>
+<li><strong>Kernel callbacks</strong> &mdash; use kernel-mode notification routines that fire before user-mode code can react</li>
+<li><strong>Hardware-assisted detection</strong> &mdash; Intel PT (Processor Trace) can record control flow history, revealing the hook and encryption operations</li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2>10. Course Summary</h2>
+
+<table>
+<tr><th>Module</th><th>Key Concept</th></tr>
+<tr><td>1. Memory Scanning Threat Model</td><td>Scanners target the 99.8% sleep window where shellcode sits idle in executable memory</td></tr>
+<tr><td>2. XOR Encryption</td><td>XOR32 is self-inverse, in-place, zero-import, and fast enough to toggle on every sleep cycle</td></tr>
+<tr><td>3. VirtualProtect &amp; Pages</td><td>Toggle between RW (writable, not executable) and RX (executable, not writable) &mdash; never RWX</td></tr>
+<tr><td>4. Sleep Function Hooking</td><td>Inline hook on kernel32!Sleep intercepts every beacon cycle with an unhook/rehook IOC reduction</td></tr>
+<tr><td>5. The Fluctuation Algorithm</td><td>7-phase cycle: RW &rarr; encrypt &rarr; unhook &rarr; sleep &rarr; rehook &rarr; decrypt &rarr; RX</td></tr>
+<tr><td>6. Shellcode Region Tracking</td><td>VirtualQuery + AllocationBase identify the region; page alignment is guaranteed by the OS</td></tr>
+<tr><td>7. Thread Stack Spoofing</td><td>Overwrite return address to 0 during sleep; combined with fluctuation for dual-layer evasion</td></tr>
+<tr><td>8. Full Chain &amp; Detection</td><td>Bypasses Moneta/pe-sieve/BeaconEye during sleep; remaining IOCs are thread start address and working set anomalies</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Which detection vector persists even with ShellcodeFluctuation + ThreadStackSpoofer active during sleep?</p>
+<div class="quiz-btn" data-choice="A">A) Private executable memory</div>
+<div class="quiz-btn" data-choice="B">B) Thread start address pointing to private (non-image) memory</div>
+<div class="quiz-btn" data-choice="C">C) Beacon configuration in cleartext</div>
+<div class="quiz-btn" data-choice="D">D) RWX pages</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: What architectural advantage does ShellcodeFluctuation have over Ekko regarding Intel CET?</p>
+<div class="quiz-btn" data-choice="A">A) ShellcodeFluctuation uses hardware encryption</div>
+<div class="quiz-btn" data-choice="B">B) ShellcodeFluctuation operates in kernel mode</div>
+<div class="quiz-btn" data-choice="C">C) ShellcodeFluctuation uses standard call/ret flow (CET-compatible), while Ekko uses ROP-like timer callback chains</div>
+<div class="quiz-btn" data-choice="D">D) ShellcodeFluctuation disables CET before executing</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What fundamental limitation do ALL sleep-time-only evasion techniques share?</p>
+<div class="quiz-btn" data-choice="A">A) During the active execution window, the entire shellcode is decrypted and scannable</div>
+<div class="quiz-btn" data-choice="B">B) They cannot encrypt memory larger than 1 MB</div>
+<div class="quiz-btn" data-choice="C">C) They only work on Windows 10 and later</div>
+<div class="quiz-btn" data-choice="D">D) They require administrator privileges</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Prev: Thread Stack Spoofing Integration</a>
+<a class="primary" href="../ShellcodeFluctuation_index.html">Back to Course Home</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: Software Breakpoints &amp; INT3 - ShellGhost Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F47B;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#64748b;--accent2:#475569;--gradient:linear-gradient(135deg,#64748b,#475569)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ShellGhost Course</h2>
+<span>Single-Instruction Evasion</span>
+</div>
+<a class="home-link" href="../ShellGhost_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Memory Scanner Evasion Goals</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module2.html"><span>2. Software Breakpoints &amp; INT3</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Vectored Exception Handling</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. The ShellGhost Concept</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. SystemFunction032 &amp; Shellcode Mapping</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. VEH Handler Implementation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Background: Trap Flag &amp; Single-Stepping</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: Software Breakpoints &amp; INT3</h1>
+<p class="subtitle">The single-byte opcode that stops the CPU &mdash; and the foundation of ShellGhost's per-instruction control.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>This module explains the <code>INT3</code> instruction (opcode <code>0xCC</code>), how the CPU processes it, how debuggers use software breakpoints, and how the exception dispatch mechanism delivers EXCEPTION_BREAKPOINT to user-mode handlers. This is the trigger mechanism that ShellGhost exploits to gain control before each shellcode instruction executes.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The INT3 Instruction</h2>
+
+<p>The x86/x64 architecture defines a special one-byte instruction specifically for debugger breakpoints: <code>INT3</code>, encoded as the single byte <code>0xCC</code>. When the CPU executes this byte, it immediately raises a breakpoint exception (interrupt vector 3) without executing any further instructions.</p>
+
+<div class="card">
+<h4>Why 0xCC Is Special</h4>
+<p>The generic software interrupt instruction <code>INT n</code> is two bytes: <code>0xCD</code> followed by the interrupt number. For example, <code>INT 3</code> encoded generically would be <code>0xCD 0x03</code>. However, Intel specifically assigned the single-byte opcode <code>0xCC</code> to <code>INT 3</code> because debuggers need to <strong>replace a single byte</strong> in the instruction stream to set a breakpoint without disturbing the alignment of subsequent instructions.</p>
+</div>
+
+<table>
+<tr><th>Encoding</th><th>Bytes</th><th>Size</th><th>Purpose</th></tr>
+<tr><td><code>INT3</code> (compact)</td><td><code>0xCC</code></td><td>1 byte</td><td>Debugger breakpoint &mdash; designed for byte-level patching</td></tr>
+<tr><td><code>INT 3</code> (generic)</td><td><code>0xCD 0x03</code></td><td>2 bytes</td><td>Same interrupt, but takes 2 bytes &mdash; less useful for debugging</td></tr>
+<tr><td><code>INT 0x2E</code> (legacy syscall)</td><td><code>0xCD 0x2E</code></td><td>2 bytes</td><td>Legacy Windows system call mechanism (pre-SYSENTER)</td></tr>
+</table>
+
+<pre><span class="lang-tag">x86 ASM</span>; A simple function with a breakpoint inserted
+original_code:
+    push rbp            ; 0x55
+    mov rbp, rsp        ; 0x48 0x89 0xE5
+    sub rsp, 0x20       ; 0x48 0x83 0xEC 0x20
+    ...
+
+; After debugger sets breakpoint at the 'mov' instruction:
+patched_code:
+    push rbp            ; 0x55
+    int3                ; 0xCC  (replaced first byte of 'mov rbp, rsp')
+    db 0x89, 0xE5       ; remaining bytes of original instruction
+    sub rsp, 0x20       ; 0x48 0x83 0xEC 0x20
+    ...</pre>
+
+<!-- ============================================================ -->
+<h2>2. How Debuggers Use INT3</h2>
+
+<p>When a debugger (WinDbg, x64dbg, Visual Studio) sets a software breakpoint, it performs a simple three-step operation:</p>
+
+<ol>
+<li><strong>Save</strong> the original byte at the target address</li>
+<li><strong>Write</strong> <code>0xCC</code> to that address</li>
+<li><strong>Wait</strong> for the CPU to hit it and raise EXCEPTION_BREAKPOINT</li>
+</ol>
+
+<p>When the breakpoint fires, the debugger:</p>
+<ol>
+<li>Catches the EXCEPTION_BREAKPOINT exception</li>
+<li><strong>Restores</strong> the original byte to the target address</li>
+<li>Decrements the instruction pointer (RIP) by 1 (because the CPU advanced past the 0xCC byte)</li>
+<li>Allows the user to inspect state, then resumes execution from the restored instruction</li>
+</ol>
+
+<div class="card">
+<h4>The RIP Adjustment</h4>
+<p>When the CPU executes <code>0xCC</code>, it increments RIP past the one-byte instruction before raising the exception. However, on Windows, the kernel's exception dispatch logic (<code>KiDispatchException</code>) <strong>automatically decrements RIP by 1</strong> for EXCEPTION_BREAKPOINT exceptions before delivering the exception to user-mode handlers. This means that by the time a VEH handler receives the exception, <code>ContextRecord-&gt;Rip</code> already points back to the address of the <code>0xCC</code> byte. Debuggers rely on this kernel behavior, and ShellGhost uses <code>ContextRecord-&gt;Rip</code> directly without any further adjustment.</p>
+</div>
+
+<pre><span class="lang-tag">C</span>// How a debugger sets a software breakpoint (simplified)
+BYTE original_byte;
+LPVOID breakpoint_addr = (LPVOID)0x00007FF6A0001000;
+
+// Save and patch
+ReadProcessMemory(hProcess, breakpoint_addr, &original_byte, 1, NULL);
+BYTE int3 = 0xCC;
+WriteProcessMemory(hProcess, breakpoint_addr, &int3, 1, NULL);
+
+// ... CPU hits 0xCC, raises EXCEPTION_BREAKPOINT ...
+// KiDispatchException already decremented RIP by 1 for us
+
+// In debug event handler: restore original byte, RIP already correct
+WriteProcessMemory(hProcess, breakpoint_addr, &original_byte, 1, NULL);
+// context.Rip already points at breakpoint_addr (kernel adjusted it)
+SetThreadContext(hThread, &context);</pre>
+
+<!-- ============================================================ -->
+<h2>3. CPU Exception Flow for INT3</h2>
+
+<p>When the CPU encounters <code>0xCC</code>, a precise sequence of events unfolds at the hardware and OS levels:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">INT3 Exception Dispatch Chain</h4>
+<div class="flow">
+<div class="flow box">CPU: Execute 0xCC<br><small>Trap to kernel</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">KiBreakpointTrap<br><small>IDT vector #3</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">KiDispatchException<br><small>Kernel dispatcher</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">KiUserExceptionDispatcher<br><small>Transition to user-mode</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">RtlDispatchException<br><small>User-mode dispatch</small></div>
+</div>
+</div>
+
+<table>
+<tr><th>Step</th><th>Component</th><th>Action</th></tr>
+<tr><td>1</td><td>CPU Hardware</td><td>Detects <code>0xCC</code> opcode, saves context (RIP, RSP, RFLAGS, etc.) on the kernel stack, transitions to Ring 0 via IDT entry for vector 3</td></tr>
+<tr><td>2</td><td><code>KiBreakpointTrap</code></td><td>Kernel trap handler (ntoskrnl) receives control. Builds a <code>KTRAP_FRAME</code> from saved registers</td></tr>
+<tr><td>3</td><td><code>KiDispatchException</code></td><td>Creates an <code>EXCEPTION_RECORD</code> with <code>ExceptionCode = 0x80000003</code> (EXCEPTION_BREAKPOINT). Checks if a kernel debugger wants it first</td></tr>
+<tr><td>4</td><td><code>KiUserExceptionDispatcher</code></td><td>If no kernel debugger handles it, the kernel transitions back to user mode, calling <code>ntdll!KiUserExceptionDispatcher</code></td></tr>
+<tr><td>5</td><td><code>RtlDispatchException</code></td><td>Walks the Vectored Exception Handler (VEH) list first, then Structured Exception Handler (SEH) chain. The first handler that returns <code>EXCEPTION_CONTINUE_EXECUTION</code> wins</td></tr>
+</table>
+
+<div class="card green">
+<h4>Key Insight for ShellGhost</h4>
+<p>The exception dispatch mechanism guarantees that <strong>Vectored Exception Handlers are called before SEH handlers</strong>. By registering a VEH handler, ShellGhost intercepts every <code>0xCC</code> breakpoint exception before any debugger or other handler sees it. This gives ShellGhost first-priority control over the exception &mdash; and the ability to modify the thread context (including RIP and RFLAGS) before execution resumes.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. The EXCEPTION_BREAKPOINT Code</h2>
+
+<p>The exception code for an INT3 breakpoint is defined in the Windows headers as:</p>
+
+<pre><span class="lang-tag">C</span>// From winnt.h / ntstatus.h
+#define EXCEPTION_BREAKPOINT    0x80000003L
+#define STATUS_BREAKPOINT       0x80000003L
+
+// The exception record delivered to handlers:
+typedef struct _EXCEPTION_RECORD {
+    DWORD ExceptionCode;        // 0x80000003 for INT3
+    DWORD ExceptionFlags;       // 0 for first-chance
+    struct _EXCEPTION_RECORD *ExceptionRecord;
+    PVOID ExceptionAddress;     // Address of the 0xCC byte
+    DWORD NumberParameters;     // 1 for breakpoint
+    ULONG_PTR ExceptionInformation[EXCEPTION_MAXIMUM_PARAMETERS];
+} EXCEPTION_RECORD;</pre>
+
+<div class="card">
+<h4>ExceptionAddress Detail</h4>
+<p>For EXCEPTION_BREAKPOINT on Windows, the kernel (<code>KiDispatchException</code>) automatically decrements RIP by 1 before dispatching to user-mode handlers. This means by the time a VEH handler sees the exception, <code>ExceptionAddress</code> and <code>ContextRecord-&gt;Rip</code> already point to the address of the <code>0xCC</code> byte itself. No manual subtraction is needed. ShellGhost uses <code>ContextRecord-&gt;Rip</code> directly to identify which instruction to decrypt.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. INT3 vs Other Exception Mechanisms</h2>
+
+<p>ShellGhost specifically uses INT3 because of its unique properties compared to other exception-generating mechanisms:</p>
+
+<table>
+<tr><th>Mechanism</th><th>Opcode / Trigger</th><th>Exception Code</th><th>Size</th><th>ShellGhost Suitability</th></tr>
+<tr><td><strong>INT3</strong></td><td><code>0xCC</code></td><td><code>0x80000003</code></td><td>1 byte</td><td>Ideal &mdash; replaces any byte without alignment issues</td></tr>
+<tr><td>INT 1 (ICEBP)</td><td><code>0xF1</code></td><td><code>0x80000004</code></td><td>1 byte</td><td>Could work but raises SINGLE_STEP &mdash; conflates with trap flag</td></tr>
+<tr><td>UD2</td><td><code>0x0F 0x0B</code></td><td><code>0xC000001D</code></td><td>2 bytes</td><td>Too large &mdash; cannot replace a single byte</td></tr>
+<tr><td>Access violation</td><td>PAGE_NOACCESS</td><td><code>0xC0000005</code></td><td>N/A</td><td>Page-granular only, not byte-granular</td></tr>
+<tr><td>Hardware breakpoint</td><td>DR0-DR3</td><td><code>0x80000004</code></td><td>N/A</td><td>Limited to 4 breakpoints per thread</td></tr>
+</table>
+
+<div class="card">
+<h4>Why Exactly 0xCC?</h4>
+<p>The <code>0xCC</code> opcode has two critical properties for ShellGhost: (1) it is exactly <strong>one byte</strong>, meaning it can replace the first byte of any x86/x64 instruction without corrupting adjacent instructions, and (2) it generates a <strong>distinct exception code</strong> (<code>0x80000003</code>) that is easily identifiable by the VEH handler. ShellGhost uses a one-exception cycle: each EXCEPTION_BREAKPOINT handler both re-encrypts the previous instruction and decrypts the current one. The single-byte size of <code>0xCC</code> is what makes per-instruction stepping through the buffer possible.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Filling a Region with 0xCC</h2>
+
+<p>ShellGhost's preparation step fills the entire shellcode execution region with <code>0xCC</code>. Here is what that looks like in practice:</p>
+
+<pre><span class="lang-tag">C</span>// Allocate writable memory and fill with INT3
+SIZE_T shellcode_size = 512;  // size of actual shellcode
+
+LPVOID exec_mem = VirtualAlloc(
+    NULL,
+    shellcode_size,
+    MEM_COMMIT | MEM_RESERVE,
+    PAGE_READWRITE       // RW initially, toggled to RX for execution
+);
+
+// Fill entire region with 0xCC (INT3 breakpoints)
+memset(exec_mem, 0xCC, shellcode_size);
+
+// Memory dump at this point:
+// 00007FF6`A0000000  CC CC CC CC CC CC CC CC
+// 00007FF6`A0000008  CC CC CC CC CC CC CC CC
+// 00007FF6`A0000010  CC CC CC CC CC CC CC CC
+// ... (all 0xCC for shellcode_size bytes)</pre>
+
+<p>A memory scanner examining this region sees nothing but INT3 opcodes. There is no encrypted data, no entropy anomaly, and no signatured byte sequence. The <strong>real</strong> shellcode bytes (encrypted with RC4) are stored in a separate data buffer that is never made executable.</p>
+
+<div class="card green">
+<h4>Two Separate Buffers</h4>
+<p>ShellGhost maintains two buffers: (1) the <strong>execution buffer</strong>, which is allocated as RW and toggled to RX for execution (filled with <code>0xCC</code>), and (2) the <strong>encrypted shellcode data</strong>, containing per-instruction encrypted bytes generated by the preprocessing script. The VEH handler reads from the encrypted data, decrypts one full instruction using SystemFunction032, writes it into the execution buffer, toggles to RX, and after execution, re-encrypts it in the next handler invocation. The encrypted data is never executable, and the execution buffer never contains more than one decrypted instruction at a time.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. From Breakpoint to Handler: The ShellGhost Connection</h2>
+
+<p>Putting it all together, here is how INT3 connects to ShellGhost's execution model:</p>
+
+<ol>
+<li>A new thread starts at the first <code>0xCC</code> in the execution buffer</li>
+<li>CPU raises EXCEPTION_BREAKPOINT (<code>0x80000003</code>)</li>
+<li>Windows dispatches to VEH handlers first (ShellGhost's handler is registered with highest priority)</li>
+<li>ShellGhost's handler sees <code>ExceptionCode == 0x80000003</code></li>
+<li>Handler re-encrypts the previously executed instruction (if any) back to <code>0xCC</code></li>
+<li>Handler uses <code>ContextRecord-&gt;Rip</code> (already pointing at the 0xCC, adjusted by the kernel) to identify the current instruction</li>
+<li>Handler decrypts the full instruction from the encrypted data using SystemFunction032 (RC4)</li>
+<li>Handler writes the decrypted instruction bytes to the execution buffer</li>
+<li>Handler toggles the memory page from RW to RX via <code>VirtualProtect</code></li>
+<li>Handler returns EXCEPTION_CONTINUE_EXECUTION &mdash; the CPU resumes and executes the real instruction, then hits the next <code>0xCC</code></li>
+</ol>
+
+<p>The next module covers Vectored Exception Handling in detail &mdash; the mechanism that makes step 3 possible.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What is the opcode encoding for the single-byte INT3 breakpoint instruction?</p>
+<div class="quiz-btn" data-choice="A">A) 0xCD 0x03</div>
+<div class="quiz-btn" data-choice="B">B) 0xCC</div>
+<div class="quiz-btn" data-choice="C">C) 0x0F 0x0B</div>
+<div class="quiz-btn" data-choice="D">D) 0xF1</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: What exception code does INT3 generate?</p>
+<div class="quiz-btn" data-choice="A">A) 0x80000003 (EXCEPTION_BREAKPOINT)</div>
+<div class="quiz-btn" data-choice="B">B) 0x80000004 (EXCEPTION_SINGLE_STEP)</div>
+<div class="quiz-btn" data-choice="C">C) 0xC0000005 (EXCEPTION_ACCESS_VIOLATION)</div>
+<div class="quiz-btn" data-choice="D">D) 0xC000001D (EXCEPTION_ILLEGAL_INSTRUCTION)</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: Why does ShellGhost use INT3 (0xCC) instead of UD2 (0x0F 0x0B)?</p>
+<div class="quiz-btn" data-choice="A">A) UD2 cannot be caught by exception handlers</div>
+<div class="quiz-btn" data-choice="B">B) UD2 requires kernel-mode handling</div>
+<div class="quiz-btn" data-choice="C">C) INT3 is exactly one byte, so it can replace any instruction's first byte without corrupting adjacent instructions</div>
+<div class="quiz-btn" data-choice="D">D) UD2 is slower to execute</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Prev: Memory Scanner Evasion Goals</a>
+<a class="primary" href="module3.html">Next: Vectored Exception Handling &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

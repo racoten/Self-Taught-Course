@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: AV/EDR Scan Timing Window - ProcessGhosting Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A8;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#6366f1;--accent2:#4f46e5;--gradient:linear-gradient(135deg,#6366f1,#4f46e5)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ProcessGhosting</h2>
+<span>Ghost Process Evasion</span>
+</div>
+<a class="home-link" href="../ProcessGhosting_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Creation Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Tampering Overview</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. File States &amp; Delete-Pending</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Creating the Ghost File</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Section Mapping from Ghost</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Process &amp; Thread Creation</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module7.html"><span>7. AV/EDR Scan Timing</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: AV/EDR Scan Timing Window</h1>
+<p class="subtitle">Understanding exactly when antivirus and EDR products scan files during process creation &mdash; and why Process Ghosting bypasses all three inspection points.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Analyze the three primary inspection points where AV/EDR attempts to scan a process&rsquo;s backing file (file creation/write, section mapping, process creation callback), understand the kernel mechanisms behind each (minifilter callbacks, <code>PsSetCreateProcessNotifyRoutineEx</code>, image load callbacks), and demonstrate why Process Ghosting defeats all three by ensuring the file is either inaccessible or non-existent at each point.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Three Inspection Points</h2>
+
+<p>AV and EDR products have three primary opportunities to scan a process&rsquo;s backing executable. Each occurs at a different stage of the file &rarr; section &rarr; process pipeline:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">AV/EDR Inspection Points</h4>
+<div class="flow">
+<div class="flow box">Inspection 1<br><small>File Create/Write</small><br><small>Minifilter IRP</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Inspection 2<br><small>Image Load</small><br><small>PsSetLoadImageNotify</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Inspection 3<br><small>First Thread Insert</small><br><small>PsSetCreateProcess<br>NotifyRoutineEx</small></div>
+</div>
+</div>
+
+<table>
+<tr><th>Inspection Point</th><th>Kernel Mechanism</th><th>When It Fires</th><th>What AV Typically Does</th></tr>
+<tr><td><strong>1. File I/O</strong></td><td>Minifilter driver (IRP callbacks)</td><td>On file create, write, close</td><td>Scan file content on write/close</td></tr>
+<tr><td><strong>2. Image Load</strong></td><td><code>PsSetLoadImageNotifyRoutine</code></td><td>When an image section is mapped</td><td>Verify image integrity, check known signatures</td></tr>
+<tr><td><strong>3. Process Create</strong></td><td><code>PsSetCreateProcessNotifyRoutineEx</code></td><td>When the first thread is inserted via <code>NtCreateThreadEx</code> (not at <code>NtCreateProcessEx</code> time)</td><td>Open and scan the image file, apply policies</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. Inspection Point 1: File I/O Minifilter</h2>
+
+<p>The file system minifilter is the first line of defense. AV products register minifilter drivers that intercept file I/O operations (IRPs). The relevant callbacks are:</p>
+
+<div class="card">
+<h4>Minifilter IRP Callbacks for AV Scanning</h4>
+<table>
+<tr><th>IRP</th><th>When</th><th>AV Action</th></tr>
+<tr><td><code>IRP_MJ_CREATE</code></td><td>File is opened/created</td><td>Check file path, apply policies, may deny access</td></tr>
+<tr><td><code>IRP_MJ_WRITE</code></td><td>Data is written to file</td><td>May buffer writes for later scanning</td></tr>
+<tr><td><code>IRP_MJ_CLEANUP</code></td><td>Last user handle closed</td><td>Trigger on-close scan of file content</td></tr>
+<tr><td><code>IRP_MJ_SET_INFORMATION</code></td><td>File metadata changed (incl. disposition)</td><td>May detect delete-pending, but typically does not trigger a scan</td></tr>
+</table>
+</div>
+
+<div class="card green">
+<h4>Why Ghosting Bypasses Minifilter Scanning</h4>
+<p>During the ghosting sequence:</p>
+<ul>
+<li><strong>IRP_MJ_CREATE</strong>: The file is created empty. Nothing malicious to scan.</li>
+<li><strong>IRP_MJ_SET_INFORMATION</strong>: The file is marked delete-pending. Still empty. The minifilter sees a deletion request for an empty file &mdash; benign.</li>
+<li><strong>IRP_MJ_WRITE</strong>: The payload is written. The minifilter may see this write, but the file is already in the delete-pending state. If the AV tries to open the file independently to scan the written content, it gets <code>STATUS_DELETE_PENDING</code> regardless of the file&rsquo;s <code>ShareAccess</code> flags. It cannot read the file through a separate handle.</li>
+<li><strong>IRP_MJ_CLEANUP</strong>: When we close the handle, the file is deleted. The minifilter sees a close on a delete-pending file, which triggers deletion. There is nothing left to scan.</li>
+</ul>
+</div>
+
+<p>Some AV minifilters can scan data from the write IRP buffer directly (without opening a separate handle). However, most on-access scanners are designed to scan on <code>IRP_MJ_CLEANUP</code> (handle close) and rely on being able to re-open the file for scanning. The delete-pending state defeats this model.</p>
+
+<!-- ============================================================ -->
+<h2>3. Inspection Point 2: Image Load Notification</h2>
+
+<p>The kernel provides <code>PsSetLoadImageNotifyRoutine</code> for drivers to register callbacks that fire when an image (EXE or DLL) is mapped into a process. This callback provides the image&rsquo;s <code>FILE_OBJECT</code> and full image name:</p>
+
+<pre><code>// Kernel callback prototype
+typedef VOID (*PLOAD_IMAGE_NOTIFY_ROUTINE)(
+    PUNICODE_STRING FullImageName,
+    HANDLE ProcessId,
+    PIMAGE_INFO ImageInfo
+);
+
+// IMAGE_INFO structure
+typedef struct _IMAGE_INFO {
+    union {
+        ULONG Properties;
+        struct {
+            ULONG ImageAddressingMode : 8;
+            ULONG SystemModeImage : 1;
+            ULONG ImageMappedToAllPids : 1;
+            ULONG ExtendedInfoPresent : 1;
+            // ...
+        };
+    };
+    PVOID ImageBase;
+    ULONG ImageSelector;
+    SIZE_T ImageSize;
+    ULONG ImageSectionNumber;
+} IMAGE_INFO, *PIMAGE_INFO;</code></pre>
+
+<div class="card warn">
+<h4>Ghosting vs Image Load Callback</h4>
+<p>The image load callback fires when the image section is mapped into the process&rsquo;s address space (during <code>NtCreateProcessEx</code> or when DLLs are loaded). At this point, the ghost file has already been closed and deleted. The <code>FullImageName</code> parameter points to the path of the deleted file. If the AV driver tries to open this path for scanning, it fails with <code>STATUS_OBJECT_NAME_NOT_FOUND</code> because the file no longer exists.</p>
+<p>The <code>FILE_OBJECT</code> referenced by the section&rsquo;s control area may still exist in kernel memory, but it is not directly provided to the image load callback in a way that allows easy scanning. The callback gets the image name (a path), not a handle or file object.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Inspection Point 3: Process Creation Notification</h2>
+
+<p>The most important inspection point is <code>PsSetCreateProcessNotifyRoutineEx</code>. Despite its name, this callback does <strong>not</strong> fire when the process object is created (<code>NtCreateProcessEx</code>). It fires when the <strong>first thread is inserted</strong> into the process via <code>NtCreateThreadEx</code>. This timing gap &mdash; between process object creation and first thread insertion &mdash; is exactly what Process Ghosting exploits. The file can be deleted after creating the process object but before the notify routine fires. The callback provides the AV driver with the information needed to make a scan/block decision:</p>
+
+<pre><code>// Extended process notification callback
+typedef VOID (*PCREATE_PROCESS_NOTIFY_ROUTINE_EX)(
+    PEPROCESS Process,
+    HANDLE ProcessId,
+    PPS_CREATE_NOTIFY_INFO CreateInfo  // NULL for process exit
+);
+
+// PS_CREATE_NOTIFY_INFO (on process creation)
+typedef struct _PS_CREATE_NOTIFY_INFO {
+    SIZE_T Size;
+    union {
+        ULONG Flags;
+        struct {
+            ULONG FileOpenNameAvailable : 1;
+            ULONG IsSubsystemProcess : 1;
+            // ...
+        };
+    };
+    HANDLE ParentProcessId;
+    CLIENT_ID CreatingThreadId;
+    struct _FILE_OBJECT *FileObject;  // THE IMAGE FILE OBJECT
+    PUNICODE_STRING ImageFileName;    // image file path
+    PUNICODE_STRING CommandLine;
+    NTSTATUS CreationStatus;          // can set to block!
+} PS_CREATE_NOTIFY_INFO, *PPS_CREATE_NOTIFY_INFO;</code></pre>
+
+<div class="card highlight">
+<h4>The Critical Field: FileObject</h4>
+<p>The <code>FileObject</code> field in <code>PS_CREATE_NOTIFY_INFO</code> points to the file object of the image that backs the new process. For a normal process, this is a valid, open file object that the AV can use to read and scan the file. For a ghosted process, this file object points to a file that is <strong>deleted</strong>. The AV driver receives a reference to a file object whose backing file no longer exists in the filesystem namespace.</p>
+</div>
+
+<p>What happens when the AV tries to use this file object to scan the image?</p>
+
+<table>
+<tr><th>AV Action</th><th>Result with Ghost File</th></tr>
+<tr><td>Open file by name (<code>ImageFileName</code>)</td><td><code>STATUS_OBJECT_NAME_NOT_FOUND</code> &mdash; file deleted</td></tr>
+<tr><td>Read from <code>FileObject</code> directly</td><td>May succeed or fail depending on implementation. The file object exists in kernel memory but has no directory entry. Some drivers cannot handle this state.</td></tr>
+<tr><td>Query file information</td><td>May return stale or incomplete information since the file is deleted</td></tr>
+<tr><td>Set <code>CreationStatus</code> to block</td><td>Could block the process, but only if the AV has a reason to block (requires successful scan first)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. The Complete Timing Analysis</h2>
+
+<p>Here is a detailed timeline showing the state of the file at each inspection point during the ghosting sequence:</p>
+
+<div class="card">
+<h4>Ghosting Timeline vs AV Inspection Points</h4>
+<table>
+<tr><th>Ghosting Step</th><th>File State</th><th>Active Inspection</th><th>AV Can Scan?</th><th>Why Not?</th></tr>
+<tr><td><code>NtCreateFile</code></td><td>Empty, normal</td><td>Minifilter IRP_MJ_CREATE</td><td>Yes, but file is empty</td><td>Nothing malicious to find</td></tr>
+<tr><td><code>NtSetInformationFile</code></td><td>Delete-pending, empty</td><td>Minifilter IRP_MJ_SET_INFO</td><td>No content to scan</td><td>File still empty</td></tr>
+<tr><td><code>NtWriteFile</code></td><td>Delete-pending, has PE</td><td>Minifilter IRP_MJ_WRITE</td><td>Cannot re-open file</td><td><code>STATUS_DELETE_PENDING</code> blocks new opens</td></tr>
+<tr><td><code>NtCreateSection</code></td><td>Delete-pending, has PE</td><td>None (no callback for section creation from files)</td><td>No</td><td>No relevant callback fires</td></tr>
+<tr><td><code>NtClose(hFile)</code></td><td>Deleted</td><td>Minifilter IRP_MJ_CLEANUP</td><td>File gone</td><td><code>STATUS_OBJECT_NAME_NOT_FOUND</code></td></tr>
+<tr><td><code>NtCreateProcessEx</code></td><td>Deleted</td><td>None (callback does not fire here)</td><td>No</td><td>PsSetCreateProcessNotifyRoutineEx fires later at thread insertion</td></tr>
+<tr><td>Image mapping</td><td>Deleted</td><td>PsSetLoadImageNotifyRoutine</td><td>Cannot open by name</td><td>File does not exist</td></tr>
+<tr><td><code>NtCreateThreadEx</code></td><td>Deleted</td><td>PsSetCreateProcessNotifyRoutineEx</td><td>Cannot open by name</td><td>File does not exist</td></tr>
+</table>
+</div>
+
+<p>At <strong>every single inspection point</strong>, the AV either sees an empty file, cannot open the file because it is delete-pending, or cannot find the file because it has been deleted. There is no point in the sequence where the AV can both access the file and see malicious content.</p>
+
+<!-- ============================================================ -->
+<h2>6. Comparison: How Each Technique Handles the Scan Points</h2>
+
+<table>
+<tr><th>Inspection Point</th><th>Hollowing</th><th>Doppelg&auml;nging</th><th>Herpaderping</th><th>Ghosting</th></tr>
+<tr><td><strong>File I/O scan</strong></td><td>Clean file (legitimate EXE)</td><td>Transacted (visible only in TxF context)</td><td>Malicious content visible during write</td><td>Empty during create; delete-pending during write</td></tr>
+<tr><td><strong>Image load</strong></td><td>Mismatch detectable</td><td>Clean (transaction rolled back)</td><td>File now has benign content</td><td>File deleted</td></tr>
+<tr><td><strong>Process create</strong></td><td>File is clean; memory is not</td><td>File reverted to clean</td><td>File has benign content</td><td>File does not exist</td></tr>
+<tr><td><strong>Overall evasion</strong></td><td>Weak (memory/file mismatch)</td><td>Good (but TxF is flagged)</td><td>Good (but file still on disk)</td><td>Strong (no file at all)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>7. Kernel Callback Limitations</h2>
+
+<p>Understanding why the kernel&rsquo;s callback architecture has this gap reveals a fundamental design assumption:</p>
+
+<div class="card">
+<h4>Design Assumptions the Kernel Makes</h4>
+<ul>
+<li><strong>Files persist</strong>: The process creation callback (<code>PsSetCreateProcessNotifyRoutineEx</code>) fires at first thread insertion, not at process object creation. It was designed assuming the image file would still exist on disk at that point. The callback provides a file path and file object, expecting the AV to be able to use them.</li>
+<li><strong>Sequential operations</strong>: The kernel assumes file creation, section creation, process creation, and thread creation happen in a predictable order without interleaved manipulation of the file&rsquo;s disposition state. The gap between <code>NtCreateProcessEx</code> and <code>NtCreateThreadEx</code> (when the callback actually fires) gives the attacker time to delete the file.</li>
+<li><strong>No cross-operation dependency</strong>: There is no kernel mechanism to atomically bind file creation, section creation, and process creation into a single transaction that the AV can inspect as a unit.</li>
+</ul>
+</div>
+
+<div class="card warn">
+<h4>Why Microsoft Has Not Fully Fixed This</h4>
+<p>Microsoft could add a callback that fires at <code>NtCreateSection</code> time, providing the file object and content at the moment the section captures the image. However, this would be a significant kernel change with performance implications (every DLL load would trigger the callback). As of Windows 11, <code>PsSetCreateProcessNotifyRoutineEx2</code> provides improved information but the fundamental timing gap remains exploitable. The kernel would need to prevent section creation from delete-pending files entirely, or provide a mandatory scan window, to fully close this gap.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. ETW (Event Tracing for Windows) Visibility</h2>
+
+<p>ETW provides additional visibility but has its own limitations in detecting ghosting:</p>
+
+<table>
+<tr><th>ETW Provider</th><th>Events Available</th><th>Ghosting Detection Capability</th></tr>
+<tr><td><strong>Microsoft-Windows-Kernel-File</strong></td><td>File create, write, delete, rename</td><td>Can see the create &rarr; set disposition &rarr; write &rarr; close sequence, but requires correlation</td></tr>
+<tr><td><strong>Microsoft-Windows-Kernel-Process</strong></td><td>Process create, thread create</td><td>Can see process creation but file is already gone</td></tr>
+<tr><td><strong>Microsoft-Windows-Kernel-Audit-API-Calls</strong></td><td>NtCreateSection, NtCreateProcessEx</td><td>Can see section and process creation, but requires correlating with file events</td></tr>
+</table>
+
+<p>ETW-based detection is possible but requires <strong>event correlation</strong>: linking the file creation event, the disposition change, the write, the section creation, and the process creation into a single chain. This is non-trivial and most EDR products do not correlate these events in real time.</p>
+
+<div class="card green">
+<h4>Detection via ETW Correlation</h4>
+<p>A detection strategy based on ETW would look for: (1) NtCreateFile for a new file, (2) NtSetInformationFile with FileDispositionInformation shortly after, (3) NtWriteFile to the same handle, (4) NtCreateSection from the same handle, (5) NtCreateProcessEx with the section. Finding all five events in sequence on the same handle is a strong indicator of ghosting. Module 8 covers detection in detail.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: At which point in the ghosting sequence does the AV first have the opportunity to scan malicious content in the file?</p>
+<div class="quiz-btn" data-choice="A">A) During NtCreateFile (file creation)</div>
+<div class="quiz-btn" data-choice="B">B) During NtSetInformationFile (marking delete-pending)</div>
+<div class="quiz-btn" data-choice="C">C) Never &mdash; at every point the file is either empty, inaccessible (delete-pending), or deleted</div>
+<div class="quiz-btn" data-choice="D">D) During NtCreateProcessEx (process creation)</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q2: What does PsSetCreateProcessNotifyRoutineEx provide to the AV driver in its PS_CREATE_NOTIFY_INFO structure?</p>
+<div class="quiz-btn" data-choice="A">A) A copy of the PE file in a kernel buffer</div>
+<div class="quiz-btn" data-choice="B">B) A FILE_OBJECT pointer and the image file path, which for ghosted processes points to a deleted file</div>
+<div class="quiz-btn" data-choice="C">C) The process's virtual memory contents for direct scanning</div>
+<div class="quiz-btn" data-choice="D">D) A hash of the PE file content</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: Why can an AV minifilter not scan the payload when NtWriteFile writes it to the delete-pending file?</p>
+<div class="quiz-btn" data-choice="A">A) The file is in the delete-pending state, so the AV cannot open a second handle to read it (STATUS_DELETE_PENDING blocks all new opens)</div>
+<div class="quiz-btn" data-choice="B">B) NtWriteFile encrypts the data before writing</div>
+<div class="quiz-btn" data-choice="C">C) The minifilter callback does not fire for NtWriteFile</div>
+<div class="quiz-btn" data-choice="D">D) Write operations to delete-pending files are invisible to minifilters</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Prev: Process &amp; Thread Creation</a>
+<a class="primary" href="module8.html">Next: Full Chain, Detection &amp; Comparison &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

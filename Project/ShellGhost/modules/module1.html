@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: Memory Scanner Evasion Goals - ShellGhost Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F47B;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#64748b;--accent2:#475569;--gradient:linear-gradient(135deg,#64748b,#475569)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ShellGhost Course</h2>
+<span>Single-Instruction Evasion</span>
+</div>
+<a class="home-link" href="../ShellGhost_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span>1. Memory Scanner Evasion Goals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Software Breakpoints &amp; INT3</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Vectored Exception Handling</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. The ShellGhost Concept</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. SystemFunction032 &amp; Shellcode Mapping</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. VEH Handler Implementation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Background: Trap Flag &amp; Single-Stepping</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Memory Scanner Evasion Goals</h1>
+<p class="subtitle">Why decrypting your entire payload is a death sentence &mdash; and how ShellGhost avoids it.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the fundamental problem that ShellGhost solves: memory scanners can detect fully decrypted shellcode in process memory. This module explains why traditional decrypt-then-execute approaches fail against modern EDR memory scanning, introduces the concept of <strong>minimal decryption surface</strong>, and frames the threat model that drives ShellGhost's design by <strong>lem0nSec</strong>.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Shellcode Lifecycle in Memory</h2>
+
+<p>Every shellcode loader must eventually place raw executable machine code into memory and run it. Regardless of how cleverly the shellcode is encrypted on disk, there comes a moment when the decrypted bytes exist in a readable, executable memory region. This is the <strong>decryption window</strong> &mdash; and it is the single most exploitable moment in any loader's lifecycle.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Traditional Loader: The Decryption Window</h4>
+<div class="flow">
+<div class="flow box">Encrypted on Disk<br><small>Safe from static scan</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Decrypt to Memory<br><small>Full payload exposed</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Execute Shellcode<br><small>Running decrypted</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Memory Scan<br><small>Payload detected</small></div>
+</div>
+</div>
+
+<p>In a traditional loader, the full shellcode is decrypted into a contiguous memory region before execution begins. From the moment decryption completes until the shellcode finishes running (which could be minutes, hours, or indefinitely for a C2 beacon), the <strong>entire payload</strong> sits in plaintext in memory. Any memory scan during this window will find it.</p>
+
+<!-- ============================================================ -->
+<h2>2. How Memory Scanners Work</h2>
+
+<p>Modern EDR solutions perform periodic and event-triggered scans of process memory. Understanding their capabilities is essential to appreciating why ShellGhost's approach matters.</p>
+
+<table>
+<tr><th>Scanner Type</th><th>Trigger</th><th>What It Examines</th><th>Detection Method</th></tr>
+<tr><td><strong>Periodic Scan</strong></td><td>Timer-based (every N seconds)</td><td>All committed private memory pages</td><td>Signature matching, YARA rules</td></tr>
+<tr><td><strong>Event-Triggered</strong></td><td>Suspicious API call detected</td><td>Memory around the suspicious allocation</td><td>Pattern matching, entropy analysis</td></tr>
+<tr><td><strong>ETW-Based</strong></td><td>Allocation events via ETW providers</td><td>Newly allocated executable pages</td><td>Heuristic analysis of page contents</td></tr>
+<tr><td><strong>On-Demand</strong></td><td>Analyst requests scan</td><td>Full process memory dump</td><td>Offline YARA, custom signatures</td></tr>
+</table>
+
+<div class="card warn">
+<h4>The Fundamental Problem</h4>
+<p>If a memory scanner examines your process at any point after decryption, it will find the complete shellcode payload. Encryption only protects the payload <strong>before</strong> execution. Once decrypted, every byte of shellcode &mdash; including easily-signatured sequences like the Metasploit framework's <code>cld; and rsp, 0xFFFFFFFFFFFFFFF0</code> prologue &mdash; is visible to any scanner.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Existing Approaches and Their Limits</h2>
+
+<p>Several techniques attempt to reduce the decryption window. Each has trade-offs:</p>
+
+<div class="card">
+<h4>Sleep Encryption (e.g., Ekko, Foliage)</h4>
+<p>Encrypt the shellcode region during sleep, decrypt before resuming. The payload is still <strong>fully decrypted</strong> during active execution. A scan during the active window catches everything. Also, the encrypt/decrypt transitions themselves create detectable patterns (VirtualProtect calls, timer objects).</p>
+</div>
+
+<div class="card">
+<h4>Module Stomping / Phantom DLL Hollowing</h4>
+<p>Overwrite a legitimate DLL's <code>.text</code> section with shellcode. The memory appears backed by a legitimate file on disk, which avoids unbacked-memory heuristics. However, the shellcode content itself is still fully readable if scanned, and mismatches between the file on disk and the memory contents can be detected.</p>
+</div>
+
+<div class="card">
+<h4>Page Guard / No-Access Tricks</h4>
+<p>Mark shellcode pages as <code>PAGE_NOACCESS</code> when not executing, flip to <code>PAGE_EXECUTE_READ</code> on access. Creates detectable VirtualProtect call patterns and still requires full decryption of the page being executed.</p>
+</div>
+
+<div class="card green">
+<h4>ShellGhost's Approach: Minimal Decryption Surface</h4>
+<p>ShellGhost takes a radically different approach. Instead of decrypting the entire payload and protecting it during sleep, ShellGhost <strong>never decrypts more than a single instruction at a time</strong>. The decrypted instruction exists in memory only for the duration of that instruction's execution. Before and after that instant, every byte of the shellcode region contains <code>0xCC</code> (INT3 breakpoint opcodes) or encrypted data. A memory scan at any point will see nothing but breakpoints.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. The Minimal Decryption Surface Concept</h2>
+
+<p>The <strong>decryption surface</strong> is the number of shellcode bytes that exist in plaintext in memory at any given instant. Traditional loaders have a decryption surface equal to the entire shellcode size. ShellGhost reduces this to effectively <strong>one instruction</strong> (1&ndash;15 bytes).</p>
+
+<table>
+<tr><th>Technique</th><th>Decryption Surface</th><th>Exposure Duration</th></tr>
+<tr><td>Traditional decrypt-then-execute</td><td>Entire payload (thousands of bytes)</td><td>Entire execution lifetime</td></tr>
+<tr><td>Sleep encryption (Ekko-style)</td><td>Entire payload during active phase</td><td>Active execution periods</td></tr>
+<tr><td>Page-level toggling</td><td>One memory page (4096 bytes)</td><td>Per-page execution time</td></tr>
+<tr><td><strong>ShellGhost</strong></td><td><strong>1 instruction (1&ndash;15 bytes)</strong></td><td><strong>Single instruction execution</strong></td></tr>
+</table>
+
+<p>By minimizing the decryption surface to a single instruction, ShellGhost ensures that at no point does a recognizable shellcode pattern exist in memory. Even if a scanner reads the shellcode region mid-execution, it sees a sea of <code>0xCC</code> bytes with at most a few bytes of one instruction that look different &mdash; meaningless without the surrounding context.</p>
+
+<!-- ============================================================ -->
+<h2>5. Threat Model</h2>
+
+<p>ShellGhost is designed to defeat a specific set of threats. Understanding what it protects against (and what it does not) is critical for realistic expectations.</p>
+
+<div class="card">
+<h4>What ShellGhost Defeats</h4>
+<ul>
+<li><strong>Memory signature scanning</strong> &mdash; YARA rules, pattern matching, and byte-sequence signatures cannot match against a region filled with 0xCC</li>
+<li><strong>Periodic memory dumps</strong> &mdash; a dump at any point shows only INT3 opcodes in the shellcode region</li>
+<li><strong>Post-mortem forensics</strong> &mdash; if the process is suspended for analysis, the shellcode region contains no meaningful content</li>
+<li><strong>Entropy-based heuristics on payload</strong> &mdash; a region of identical 0xCC bytes has zero entropy</li>
+</ul>
+</div>
+
+<div class="card warn">
+<h4>What ShellGhost Does NOT Defeat</h4>
+<ul>
+<li><strong>Behavioral monitoring</strong> &mdash; the shellcode's actions (network connections, file operations) are still visible</li>
+<li><strong>VEH registration detection</strong> &mdash; calling <code>AddVectoredExceptionHandler</code> is observable via API hooks or ETW</li>
+<li><strong>Excessive exception monitoring</strong> &mdash; thousands of EXCEPTION_BREAKPOINT events per second is anomalous</li>
+<li><strong>Instruction-level tracing</strong> &mdash; a debugger stepping through the VEH handler can observe each decrypted instruction</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. The High-Level ShellGhost Flow</h2>
+
+<p>Before diving into implementation details in later modules, here is the conceptual overview of how ShellGhost operates:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">ShellGhost Execution Model</h4>
+<div class="flow">
+<div class="flow box">1. Alloc RW, Map SC<br><small>Fill with 0xCC bytes</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">2. Register VEH<br><small>Exception handler</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">3. CreateThread<br><small>Entry at .text end</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">4. VEH: Re-encrypt prev<br><small>Decrypt current instr</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">5. RW&rarr;RX, Execute<br><small>Hits next 0xCC</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">6. Next BP fires<br><small>Cycle repeats</small></div>
+</div>
+</div>
+
+<ol>
+<li><strong>Preprocessing</strong>: A Python script (<code>ShellGhost_mapping.py</code>) disassembles the shellcode, encrypts each instruction independently using RC4 via SystemFunction032, and generates C arrays of <code>CRYPT_BYTES_QUOTA</code> structs containing each instruction's RVA (offset) and byte count (quota).</li>
+<li><strong>Allocation</strong>: A memory region is allocated with <code>PAGE_READWRITE</code> (RW). The region is filled entirely with <code>0xCC</code> (INT3) bytes. The encrypted instruction data and mapping structs are compiled into the binary.</li>
+<li><strong>VEH Registration</strong>: A Vectored Exception Handler is registered. This handler will intercept all breakpoint exceptions.</li>
+<li><strong>Thread Creation</strong>: A new thread is created via <code>CreateThread()</code> with its entry point set to null bytes at the end of the <code>.text</code> segment (found by <code>ResolveEndofTextSegment()</code>). This avoids the IoC of a thread entry point in private memory. The first <code>0xCC</code> triggers EXCEPTION_BREAKPOINT.</li>
+<li><strong>Decrypt &amp; Execute</strong>: The VEH handler catches each breakpoint, re-encrypts the previous instruction (if any), decrypts the current instruction using SystemFunction032, toggles the page to <code>PAGE_EXECUTE_READ</code> (RX) via VirtualProtect, and resumes execution. One EXCEPTION_BREAKPOINT per instruction.</li>
+<li><strong>Next Instruction</strong>: After the decrypted instruction executes, the CPU hits the next <code>0xCC</code>, triggering another EXCEPTION_BREAKPOINT, and the cycle repeats.</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2>7. Why This Course Exists</h2>
+
+<p>ShellGhost combines several advanced Windows internals concepts: software breakpoints, vectored exception handling, CONTEXT structure manipulation, shellcode mapping preprocessing, per-instruction encryption via SystemFunction032, and RW/RX memory toggling. Each concept is well-documented individually, but their combination into a coherent evasion technique requires understanding how they interact.</p>
+
+<div class="card">
+<h4>Course Structure</h4>
+<table>
+<tr><th>Module</th><th>Topic</th><th>Why It Matters</th></tr>
+<tr><td>1 (this)</td><td>Memory Scanner Evasion Goals</td><td>Understand the problem and threat model</td></tr>
+<tr><td>2</td><td>Software Breakpoints &amp; INT3</td><td>The mechanism that triggers per-byte handling</td></tr>
+<tr><td>3</td><td>Vectored Exception Handling</td><td>The interception mechanism for breakpoint events</td></tr>
+<tr><td>4</td><td>The ShellGhost Concept</td><td>How all pieces combine into the evasion technique</td></tr>
+<tr><td>5</td><td>SystemFunction032 &amp; Shellcode Mapping</td><td>Per-instruction encryption and the preprocessing pipeline</td></tr>
+<tr><td>6</td><td>VEH Handler Implementation</td><td>The actual C code that makes it work</td></tr>
+<tr><td>7</td><td>Background: Trap Flag &amp; Single-Stepping</td><td>General x86 knowledge for context (not used by ShellGhost)</td></tr>
+<tr><td>8</td><td>Full Chain &amp; Detection</td><td>Complete flow, performance, and detection analysis</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: What is the primary weakness of traditional decrypt-then-execute shellcode loaders?</p>
+<div class="quiz-btn" data-choice="A">A) They cannot encrypt shellcode on disk</div>
+<div class="quiz-btn" data-choice="B">B) They require kernel-mode drivers</div>
+<div class="quiz-btn" data-choice="C">C) The entire decrypted payload is visible in memory during execution</div>
+<div class="quiz-btn" data-choice="D">D) They cannot execute position-independent code</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: What is the "decryption surface" of ShellGhost at any given instant?</p>
+<div class="quiz-btn" data-choice="A">A) One instruction (1&ndash;15 bytes)</div>
+<div class="quiz-btn" data-choice="B">B) One memory page (4096 bytes)</div>
+<div class="quiz-btn" data-choice="C">C) The entire shellcode</div>
+<div class="quiz-btn" data-choice="D">D) One function at a time</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q3: Which of the following is NOT defeated by ShellGhost's technique?</p>
+<div class="quiz-btn" data-choice="A">A) YARA-based memory signature scanning</div>
+<div class="quiz-btn" data-choice="B">B) Post-mortem process memory dumps</div>
+<div class="quiz-btn" data-choice="C">C) Entropy analysis of the shellcode region</div>
+<div class="quiz-btn" data-choice="D">D) Behavioral monitoring of shellcode network connections</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: Software Breakpoints &amp; INT3 &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

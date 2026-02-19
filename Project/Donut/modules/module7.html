@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: Advanced Payload Types - Donut Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F369;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#ec4899;--accent2:#db2777;--gradient:linear-gradient(135deg,#ec4899,#db2777)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Donut Course</h2>
+<span>PE-to-Shellcode Masterclass</span>
+</div>
+<a class="home-link" href="../Donut_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. The PE-to-Shellcode Problem</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Loader Fundamentals</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module3.html"><span>3. .NET CLR Hosting</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module4.html"><span>4. Module Architecture</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Donut Loader</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Anti-Detection</span><span class="diff d2">I</span></a>
+<a class="mod-link active" href="module7.html"><span>7. Advanced Payload Types</span><span class="diff d3">A</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">A</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: Advanced Payload Types</h1>
+<p class="subtitle">VBScript/JScript/XSL execution via COM, native DLL export calling with arguments, PE command-line injection, and exit option strategies.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how Donut executes non-PE payload types (VBScript, JScript, XSL) using COM scripting interfaces, how it handles native DLL payloads with custom export functions and arguments, how command-line arguments are injected for native EXEs, and the operational implications of different exit options.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Script Execution via COM</h2>
+
+<p>Beyond PE and .NET payloads, Donut can execute VBScript, JScript, and XSL files. This is implemented in <code>inmem_script.c</code> using Windows COM scripting interfaces. The key insight is that Windows provides COM objects for script execution that can be instantiated from unmanaged code.</p>
+
+<div class="diagram">
+<h4>Script Type Dispatch</h4>
+<div class="flow">
+<div class="box">VBScript<br><small>DONUT_MODULE_VBS</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">IActiveScript<br><small>COM scripting engine</small></div>
+</div>
+<br>
+<div class="flow">
+<div class="box">JScript<br><small>DONUT_MODULE_JS</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">IActiveScript<br><small>COM scripting engine</small></div>
+</div>
+<br>
+<div class="flow">
+<div class="box y">XSL<br><small>DONUT_MODULE_XSL</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">IXMLDOMDocument<br><small>XML/XSL processor</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. VBScript and JScript Execution</h2>
+
+<p>For VBS and JS payloads, Donut creates an instance of the Windows Script Host engine via COM. The script text (from the decrypted <code>DONUT_MODULE</code>) is fed directly to the engine without writing to disk:</p>
+
+<pre><span class="lang-tag">C</span>// inmem_script.c - VBScript/JScript execution via IActiveScript
+
+BOOL RunScript(PDONUT_INSTANCE inst, PDONUT_MODULE mod, LPVOID payload) {
+    // Initialize COM
+    inst-&gt;api.CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    // Choose the scripting engine CLSID based on module type
+    CLSID *engine_clsid;
+    if (mod-&gt;type == DONUT_MODULE_VBS) {
+        engine_clsid = &amp;CLSID_VBScript;     // {B54F3741-5B07-11CF-A4B0-00AA004A55E8}
+    } else if (mod-&gt;type == DONUT_MODULE_JS) {
+        engine_clsid = &amp;CLSID_JScript;      // {F414C260-6AC0-11CF-B6D1-00AA00BBBB58}
+    }
+
+    // Create the scripting engine
+    IActiveScript *engine = NULL;
+    inst-&gt;api.CoCreateInstance(
+        engine_clsid,
+        NULL,
+        CLSCTX_INPROC_SERVER,
+        &amp;IID_IActiveScript,
+        (void**)&amp;engine
+    );
+
+    // Get the IActiveScriptParse interface
+    IActiveScriptParse *parser = NULL;
+    engine-&gt;lpVtbl-&gt;QueryInterface(
+        engine, &amp;IID_IActiveScriptParse, (void**)&amp;parser
+    );
+
+    // Initialize the parser
+    parser-&gt;lpVtbl-&gt;InitNew(parser);
+
+    // Create and set a script site (IActiveScriptSite implementation)
+    // Donut implements a minimal script site for hosting
+    IActiveScriptSite *site = CreateScriptSite(inst);
+    engine-&gt;lpVtbl-&gt;SetScriptSite(engine, site);
+
+    // Convert the script text to a wide string
+    OLECHAR *script_text = ConvertToWideString(payload, mod-&gt;len);
+
+    // Parse and execute the script
+    parser-&gt;lpVtbl-&gt;ParseScriptText(
+        parser,
+        script_text,       // The script source code
+        NULL,              // Item name
+        NULL,              // Context
+        NULL,              // Delimiter
+        0,                 // Source context cookie
+        0,                 // Starting line
+        SCRIPTTEXT_ISEXPRESSION,
+        NULL,              // Result variant
+        NULL               // Exception info
+    );
+
+    // Set engine state to CONNECTED to execute
+    engine-&gt;lpVtbl-&gt;SetScriptState(engine, SCRIPTSTATE_CONNECTED);
+
+    return TRUE;
+}</pre>
+
+<div class="card">
+<h4>IActiveScriptSite</h4>
+<p>The scripting engine requires an <code>IActiveScriptSite</code> implementation that handles callbacks like <code>GetItemInfo</code>, <code>OnScriptError</code>, and <code>OnStateChange</code>. Donut implements a minimal version of this COM interface in its PIC loader, providing just enough functionality for the script to execute. Most methods return <code>E_NOTIMPL</code> or <code>S_OK</code>.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. XSL File Execution</h2>
+
+<p>XSL files are processed differently. Donut uses the MSXML COM objects to load the XSL as a stylesheet and apply it to a dummy XML document. The XSL can contain embedded VBScript or JScript via <code>&lt;msxsl:script&gt;</code> blocks:</p>
+
+<pre><span class="lang-tag">C</span>// XSL execution via IXMLDOMDocument and IXSLProcessor
+
+BOOL RunXSL(PDONUT_INSTANCE inst, PDONUT_MODULE mod, LPVOID payload) {
+    inst-&gt;api.CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    // Create IXMLDOMDocument2 for the XSL stylesheet
+    IXMLDOMDocument2 *xsl = NULL;
+    inst-&gt;api.CoCreateInstance(
+        &amp;CLSID_DOMDocument30,
+        NULL,
+        CLSCTX_INPROC_SERVER,
+        &amp;IID_IXMLDOMDocument2,
+        (void**)&amp;xsl
+    );
+
+    // Load the XSL content from the decrypted module
+    VARIANT_BOOL success;
+    BSTR xsl_text = inst-&gt;api.SysAllocString(wide_payload);
+    xsl-&gt;lpVtbl-&gt;loadXML(xsl, xsl_text, &amp;success);
+
+    // Create a dummy XML document to transform
+    IXMLDOMDocument2 *xml = NULL;
+    inst-&gt;api.CoCreateInstance(
+        &amp;CLSID_DOMDocument30, NULL, CLSCTX_INPROC_SERVER,
+        &amp;IID_IXMLDOMDocument2, (void**)&amp;xml
+    );
+    BSTR dummy_xml = inst-&gt;api.SysAllocString(L"&lt;?xml version=\"1.0\"?&gt;&lt;x/&gt;");
+    xml-&gt;lpVtbl-&gt;loadXML(xml, dummy_xml, &amp;success);
+
+    // Create the XSL template and processor
+    IXSLTemplate *tmpl = NULL;
+    inst-&gt;api.CoCreateInstance(
+        &amp;CLSID_XSLTemplate, NULL, CLSCTX_INPROC_SERVER,
+        &amp;IID_IXSLTemplate, (void**)&amp;tmpl
+    );
+
+    tmpl-&gt;lpVtbl-&gt;putref_stylesheet(tmpl, (IXMLDOMNode*)xsl);
+
+    IXSLProcessor *proc = NULL;
+    tmpl-&gt;lpVtbl-&gt;createProcessor(tmpl, &amp;proc);
+    proc-&gt;lpVtbl-&gt;put_input(proc, var_xml);
+
+    // Execute the transformation (runs embedded scripts)
+    VARIANT_BOOL status;
+    proc-&gt;lpVtbl-&gt;transform(proc, &amp;status);
+
+    return TRUE;
+}</pre>
+
+<div class="card warn">
+<h4>XSL as an Attack Vector</h4>
+<p>XSL files can contain embedded script code in <code>&lt;msxsl:script&gt;</code> elements. When the XSL processor transforms a document, these scripts execute. This technique (sometimes called XSL script processing) was historically used for application whitelisting bypass because <code>msxsl.exe</code> was a Microsoft-signed binary. Donut embeds the same execution logic directly in shellcode.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Native DLL with Custom Exports</h2>
+
+<p>For native (unmanaged) DLLs, Donut does more than just call <code>DllMain</code>. It can invoke a specific exported function with user-supplied arguments:</p>
+
+<pre><span class="lang-tag">C</span>// inmem_pe.c - After mapping the DLL and calling DllMain...
+
+// If a function name was specified in DONUT_MODULE
+if (mod-&gt;function[0] != 0) {
+    // Walk the DLL's export table to find the named function
+    PIMAGE_EXPORT_DIRECTORY exp = GetExportDirectory(base);
+    FARPROC func = FindExportByName(base, exp, mod-&gt;function);
+
+    if (func != NULL) {
+        // Call the export with the parameter string
+        typedef VOID (WINAPI *ExportFunc)(LPSTR);
+        ((ExportFunc)func)(mod-&gt;param);
+    }
+}
+
+// Example usage:
+// donut -f payload.dll -m RunPayload -p "arg1 arg2"
+// This calls: payload.dll!RunPayload("arg1 arg2")</pre>
+
+<p>This capability is essential for DLLs that expose specific functionality through exports. For example, a DLL might export a <code>RunPayload</code> function that accepts a configuration string.</p>
+
+<!-- ============================================================ -->
+<h2>5. Native EXE with Command-Line Arguments</h2>
+
+<p>When running a native EXE payload, Donut needs to provide command-line arguments. Since the EXE is loaded in-memory (not spawned as a new process), there is no real command line. Donut handles this by patching the Process Environment Block:</p>
+
+<pre><span class="lang-tag">C</span>// For native EXEs that need command-line arguments,
+// Donut modifies the PEB's ProcessParameters to inject
+// the user-supplied arguments
+
+VOID SetCommandLine(PDONUT_INSTANCE inst, PDONUT_MODULE mod) {
+    // Access the PEB
+    PPEB peb = GetPEB();
+
+    // Get the RTL_USER_PROCESS_PARAMETERS
+    PRTL_USER_PROCESS_PARAMETERS params = peb-&gt;ProcessParameters;
+
+    // Build the new command line: "payload.exe arg1 arg2"
+    WCHAR cmdline[DONUT_MAX_NAME * 2];
+    wsprintfW(cmdline, L"payload.exe %S", mod-&gt;param);
+
+    // Overwrite the CommandLine UNICODE_STRING
+    RtlInitUnicodeString(&amp;params-&gt;CommandLine, cmdline);
+}
+
+// Now when the EXE calls GetCommandLineW() or reads __argc/__argv,
+// it receives the injected arguments</pre>
+
+<div class="card">
+<h4>Alternative: Patching __argc/__argv</h4>
+<p>Some EXEs read arguments through the C runtime&rsquo;s <code>__argc</code> and <code>__argv</code> globals rather than <code>GetCommandLine</code>. Since these are initialized by the CRT startup code (which Donut&rsquo;s PE loader calls via the entry point), the PEB approach works because the CRT reads from <code>GetCommandLineW</code> during initialization.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Thread Execution Mode</h2>
+
+<p>Donut can optionally execute the payload in a <strong>new thread</strong> rather than in the current thread. This is controlled by the <code>thread</code> field in <code>DONUT_MODULE</code>:</p>
+
+<pre><span class="lang-tag">C</span>// Thread execution wrapper
+if (mod-&gt;thread) {
+    // Create a new thread for the payload
+    HANDLE hThread = inst-&gt;api.CreateThread(
+        NULL,           // Default security
+        0,              // Default stack size
+        PayloadThread,  // Thread function (runs the payload)
+        inst,           // Pass instance as parameter
+        0,              // Run immediately
+        NULL            // Don't need thread ID
+    );
+
+    // Wait for the payload thread to complete
+    inst-&gt;api.WaitForSingleObject(hThread, INFINITE);
+    inst-&gt;api.CloseHandle(hThread);
+} else {
+    // Execute directly in the current thread
+    ExecutePayload(inst, mod, payload);
+}</pre>
+
+<table>
+<tr><th>Mode</th><th>Use Case</th><th>Trade-off</th></tr>
+<tr><td><strong>Same thread</strong></td><td>Simple injection, callback-based execution</td><td>Payload crash kills the injection thread</td></tr>
+<tr><td><strong>New thread</strong></td><td>Long-running payloads, implants</td><td>New thread creation is potentially detectable</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>7. Exit Options in Detail</h2>
+
+<p>The exit behavior after payload execution has significant operational implications:</p>
+
+<div class="card">
+<h4>DONUT_OPT_EXIT_THREAD</h4>
+<p>Calls <code>ExitThread(0)</code>. Only the current thread terminates. The host process continues running normally. <strong>Best for:</strong> injection into long-lived processes where you want the host to survive. <strong>Risk:</strong> if the payload leaks handles or resources, they persist in the host process.</p>
+</div>
+
+<div class="card">
+<h4>DONUT_OPT_EXIT_PROCESS</h4>
+<p>Calls <code>ExitProcess(0)</code>. The entire host process terminates. <strong>Best for:</strong> sacrificial processes (e.g., you spawned <code>svchost.exe</code> specifically to inject into). <strong>Risk:</strong> if you accidentally inject into a critical process, you kill it.</p>
+</div>
+
+<div class="card">
+<h4>DONUT_OPT_EXIT_BLOCK</h4>
+<p>The loader simply returns. Control goes back to whoever called the shellcode. <strong>Best for:</strong> when you call Donut shellcode from your own code (e.g., a custom loader) and want execution to continue. <strong>Risk:</strong> the caller must handle cleanup.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Payload Type Summary</h2>
+
+<table>
+<tr><th>Type</th><th>Handler</th><th>COM Required</th><th>CLR Required</th><th>Arguments</th></tr>
+<tr><td><strong>Native EXE</strong></td><td><code>RunPE()</code></td><td>No</td><td>No</td><td>Via PEB CommandLine</td></tr>
+<tr><td><strong>Native DLL</strong></td><td><code>RunPE()</code></td><td>No</td><td>No</td><td>Via export function param</td></tr>
+<tr><td><strong>.NET EXE</strong></td><td><code>RunDotNET()</code></td><td>Yes (CLR is COM)</td><td>Yes</td><td>Via SAFEARRAY of strings</td></tr>
+<tr><td><strong>.NET DLL</strong></td><td><code>RunDotNET()</code></td><td>Yes</td><td>Yes</td><td>Via InvokeMember_3</td></tr>
+<tr><td><strong>VBScript</strong></td><td><code>RunScript()</code></td><td>Yes</td><td>No</td><td>Embedded in script</td></tr>
+<tr><td><strong>JScript</strong></td><td><code>RunScript()</code></td><td>Yes</td><td>No</td><td>Embedded in script</td></tr>
+<tr><td><strong>XSL</strong></td><td><code>RunScript()</code></td><td>Yes</td><td>No</td><td>Embedded in XSL</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<div class="quiz" id="q7">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>1. How does Donut execute VBScript payloads in-memory?</p>
+<label data-opt="0"><input type="radio" name="q7_1">By spawning wscript.exe with the script as an argument</label>
+<label data-opt="1"><input type="radio" name="q7_1">By writing the script to a temp file and executing it</label>
+<label data-opt="2"><input type="radio" name="q7_1">By creating an IActiveScript COM object and feeding script text to IActiveScriptParse</label>
+<label data-opt="3"><input type="radio" name="q7_1">By calling PowerShell to interpret the VBScript</label>
+<div class="explain">Donut creates the Windows Script Host engine via <code>CoCreateInstance</code> with the VBScript CLSID, obtains an <code>IActiveScriptParse</code> interface, and passes the script text directly to <code>ParseScriptText</code>. No files are written to disk, and no external processes are spawned.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>2. What is the recommended exit option when injecting into a long-lived host process?</p>
+<label data-opt="0"><input type="radio" name="q7_2">DONUT_OPT_EXIT_THREAD &mdash; only the payload thread terminates</label>
+<label data-opt="1"><input type="radio" name="q7_2">DONUT_OPT_EXIT_PROCESS &mdash; clean termination of the host</label>
+<label data-opt="2"><input type="radio" name="q7_2">DONUT_OPT_EXIT_BLOCK &mdash; let the host handle cleanup</label>
+<label data-opt="3"><input type="radio" name="q7_2">No exit option is needed</label>
+<div class="explain">EXIT_THREAD calls <code>ExitThread(0)</code>, terminating only the current thread while allowing the host process to continue running normally. This is safest for injection into processes like explorer.exe or svchost.exe that should not be killed.</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>3. How does Donut provide command-line arguments to native EXE payloads loaded in-memory?</p>
+<label data-opt="0"><input type="radio" name="q7_3">It creates a new process with the arguments</label>
+<label data-opt="1"><input type="radio" name="q7_3">It patches the PEB ProcessParameters CommandLine before calling the entry point</label>
+<label data-opt="2"><input type="radio" name="q7_3">It passes arguments as a function parameter to the entry point</label>
+<label data-opt="3"><input type="radio" name="q7_3">It writes arguments to an environment variable</label>
+<div class="explain">Since the EXE is loaded in-memory (not spawned as a new process), there is no real command line. Donut modifies the PEB&rsquo;s <code>ProcessParameters-&gt;CommandLine</code> UNICODE_STRING before calling the entry point. When the EXE&rsquo;s CRT startup calls <code>GetCommandLineW()</code>, it reads the injected arguments from the PEB.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('q7')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Previous: Encryption &amp; Anti-Detection</a>
+<a class="primary" href="module8.html">Next: Full Chain &amp; Detection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

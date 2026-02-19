@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: Process Creation Internals - ProcessGhosting Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A8;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#6366f1;--accent2:#4f46e5;--gradient:linear-gradient(135deg,#6366f1,#4f46e5)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ProcessGhosting</h2>
+<span>Ghost Process Evasion</span>
+</div>
+<a class="home-link" href="../ProcessGhosting_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span>1. Process Creation Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Tampering Overview</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. File States &amp; Delete-Pending</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Creating the Ghost File</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Section Mapping from Ghost</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Process &amp; Thread Creation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. AV/EDR Scan Timing</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Process Creation Internals</h1>
+<p class="subtitle">How Windows really creates processes &mdash; from file on disk to executing code in memory, through the lens of section objects.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the internal steps the Windows kernel takes to create a process: opening the executable file, creating an image section object from it, calling <code>NtCreateProcessEx</code> with that section, and why every process is fundamentally backed by a file-mapped section. This foundation is critical for understanding how Process Ghosting subverts the model.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The User-Mode View: CreateProcessW</h2>
+
+<p>When user-mode code calls <code>CreateProcessW</code>, it appears simple &mdash; pass an executable path and get a running process. But underneath, <code>kernel32!CreateProcessW</code> calls <code>kernel32!CreateProcessInternalW</code>, which orchestrates a complex sequence involving multiple NT-native system calls. The high-level user-mode API hides the real machinery:</p>
+
+<pre><code>// What most developers write:
+STARTUPINFO si = { sizeof(si) };
+PROCESS_INFORMATION pi = {};
+CreateProcessW(
+    L"C:\\Windows\\System32\\notepad.exe",
+    NULL, NULL, NULL, FALSE,
+    0, NULL, NULL, &si, &pi
+);
+
+// What actually happens inside the kernel involves:
+// 1. NtOpenFile        - open the executable
+// 2. NtCreateSection   - create an image section from it
+// 3. NtCreateProcessEx - create the process from the section
+// 4. NtCreateThreadEx  - create the initial thread
+// Plus: PEB setup, process parameters, csrss notification...</code></pre>
+
+<p>Understanding this decomposition is the key to understanding every PE tampering technique, because each technique manipulates a different step in this chain.</p>
+
+<!-- ============================================================ -->
+<h2>2. Step 1: Opening the Executable File</h2>
+
+<p>The first internal step is opening the target executable. The kernel calls <code>NtOpenFile</code> (or <code>NtCreateFile</code>) to obtain a file handle to the PE image. This handle must have <code>FILE_EXECUTE</code> access rights because the file will be mapped as an executable image.</p>
+
+<pre><code>// Conceptual kernel-side file open:
+HANDLE hFile;
+IO_STATUS_BLOCK iosb;
+OBJECT_ATTRIBUTES objAttr;
+UNICODE_STRING filePath;
+
+RtlInitUnicodeString(&filePath,
+    L"\\??\\C:\\Windows\\System32\\notepad.exe");
+InitializeObjectAttributes(&objAttr,
+    &filePath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+NtOpenFile(
+    &hFile,
+    FILE_READ_DATA | FILE_EXECUTE | SYNCHRONIZE,
+    &objAttr,
+    &iosb,
+    FILE_SHARE_READ,
+    FILE_SYNCHRONOUS_IO_NONALERT
+);</code></pre>
+
+<div class="card">
+<h4>Key Access Rights</h4>
+<table>
+<tr><th>Access Right</th><th>Purpose</th></tr>
+<tr><td><code>FILE_READ_DATA</code></td><td>Read PE headers and section data</td></tr>
+<tr><td><code>FILE_EXECUTE</code></td><td>Required for creating an image section (SEC_IMAGE)</td></tr>
+<tr><td><code>SYNCHRONIZE</code></td><td>Allow synchronous I/O operations</td></tr>
+<tr><td><code>FILE_SHARE_READ</code></td><td>Allow other processes to read the file concurrently</td></tr>
+</table>
+</div>
+
+<p>At this point, the kernel has a handle to the file on disk. The file is just data &mdash; PE headers, section data, relocations, imports. No code is executing yet.</p>
+
+<!-- ============================================================ -->
+<h2>3. Step 2: Creating the Image Section</h2>
+
+<p>The kernel next creates a <strong>section object</strong> from the file handle. A section object (also known as a memory-mapped file or file mapping) represents a region of memory that can be shared between processes. For executable images, the section type is <code>SEC_IMAGE</code>:</p>
+
+<pre><code>HANDLE hSection = NULL;
+
+// Create an image section from the file handle
+NTSTATUS status = NtCreateSection(
+    &hSection,
+    SECTION_ALL_ACCESS,
+    NULL,              // no object attributes
+    NULL,              // size determined by PE headers
+    PAGE_READONLY,     // initial page protection
+    SEC_IMAGE,         // IMAGE section - parsed as PE
+    hFile              // backed by this file
+);</code></pre>
+
+<div class="card green">
+<h4>SEC_IMAGE vs SEC_COMMIT</h4>
+<p><code>SEC_IMAGE</code> tells the kernel to parse the file as a PE image. The memory manager reads the PE headers, validates the format, and sets up virtual address mappings according to the PE section table (e.g., <code>.text</code> at one RVA, <code>.data</code> at another). This is fundamentally different from <code>SEC_COMMIT</code>, which maps raw file bytes without any PE parsing. Only <code>SEC_IMAGE</code> sections can be used to create processes.</p>
+</div>
+
+<p>When the kernel creates a <code>SEC_IMAGE</code> section, it performs PE validation, checks the machine type, parses the section table, and builds the <code>CONTROL_AREA</code> and <code>SUBSECTION</code> structures that describe how the image will be mapped into virtual memory. The resulting section object holds a reference to the underlying file object.</p>
+
+<table>
+<tr><th>Kernel Structure</th><th>Role</th></tr>
+<tr><td><code>SECTION_OBJECT</code></td><td>Top-level object representing the section</td></tr>
+<tr><td><code>CONTROL_AREA</code></td><td>Links the section to its backing file object and manages shared/private pages</td></tr>
+<tr><td><code>SUBSECTION</code></td><td>One per PE section (.text, .data, etc.) &mdash; defines RVA range, file offset, and protection</td></tr>
+<tr><td><code>FILE_OBJECT</code></td><td>The backing file &mdash; what the section was created from</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>4. Step 3: NtCreateProcessEx</h2>
+
+<p>With a section handle in hand, the kernel creates the process object. <code>NtCreateProcessEx</code> is the native API that does this. Unlike <code>NtCreateProcess</code> (the older variant), <code>NtCreateProcessEx</code> takes a section handle directly:</p>
+
+<pre><code>HANDLE hProcess = NULL;
+
+// Create a process from the image section
+NTSTATUS status = NtCreateProcessEx(
+    &hProcess,
+    PROCESS_ALL_ACCESS,
+    NULL,           // object attributes
+    NtCurrentProcess(), // parent process
+    0,              // flags
+    hSection,       // THE IMAGE SECTION
+    NULL,           // debug port
+    NULL,           // exception port
+    FALSE           // InJob
+);</code></pre>
+
+<div class="card highlight">
+<h4>The Critical Insight</h4>
+<p><code>NtCreateProcessEx</code> takes a <strong>section handle</strong>, not a file path. It does not open or read any file. It does not know or care where the section came from. It simply creates a process whose virtual address space is initialized from the section&rsquo;s mappings. This separation between &ldquo;creating the section from a file&rdquo; and &ldquo;creating a process from a section&rdquo; is the architectural seam that every PE tampering technique exploits.</p>
+</div>
+
+<p>When <code>NtCreateProcessEx</code> executes, the kernel:</p>
+<ol>
+<li>Allocates a new <code>EPROCESS</code> structure</li>
+<li>Creates a new virtual address space</li>
+<li>Maps the image section into the address space at the PE&rsquo;s preferred base (or a relocated address)</li>
+<li>Maps <code>ntdll.dll</code> into the process</li>
+<li>Creates the PEB (Process Environment Block)</li>
+<li>Sets the image base address and entry point in the PEB</li>
+</ol>
+
+<p>At this point, the process exists but has no threads &mdash; it is not executing. It is an empty vessel with memory mapped from the section.</p>
+
+<!-- ============================================================ -->
+<h2>5. Step 4: Thread Creation and PEB Setup</h2>
+
+<p>Before the process can run, it needs process parameters (command line, environment variables, current directory) and an initial thread:</p>
+
+<pre><code>// 1. Create process parameters
+PRTL_USER_PROCESS_PARAMETERS processParams = NULL;
+RtlCreateProcessParametersEx(
+    &processParams,
+    &imagePathUS,      // NtImagePath
+    NULL,              // DllPath
+    NULL,              // CurrentDirectory
+    &imagePathUS,      // CommandLine
+    NULL,              // Environment
+    NULL, NULL, NULL, NULL,
+    RTL_USER_PROC_PARAMS_NORMALIZED
+);
+
+// 2. Write parameters into the target process's memory
+// (VirtualAllocEx + WriteProcessMemory to copy params into target PEB)
+
+// 3. Create the initial thread
+HANDLE hThread = NULL;
+NtCreateThreadEx(
+    &hThread,
+    THREAD_ALL_ACCESS,
+    NULL,
+    hProcess,
+    (LPTHREAD_START_ROUTINE)entryPoint,  // PE entry point
+    NULL,           // parameter
+    FALSE,          // not suspended
+    0, 0, 0,        // stack sizes
+    NULL            // attribute list
+);</code></pre>
+
+<p>Once <code>NtCreateThreadEx</code> is called, the thread starts executing at the PE entry point. The process is now live. The Windows loader (<code>ntdll!LdrInitializeThunk</code>) runs first, processing the import table, loading DLLs, and eventually transferring control to the application entry point.</p>
+
+<!-- ============================================================ -->
+<h2>6. The File-Backed Section Requirement</h2>
+
+<p>A fundamental Windows design principle is that every process image is backed by a file on disk via a section object. This creates a chain of trust:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Process Creation Chain</h4>
+<div class="flow">
+<div class="flow box">File on Disk<br><small>notepad.exe</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Section Object<br><small>SEC_IMAGE</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Process Object<br><small>EPROCESS</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Thread<br><small>Execution</small></div>
+</div>
+</div>
+
+<p>Security tools rely on this chain. They expect to be able to trace from a running process back to its image file on disk and scan that file. <code>NtQueryInformationProcess</code> with <code>ProcessImageFileName</code> returns the path the kernel stored during section creation. If the file on disk matches what is in memory, the process is legitimate.</p>
+
+<div class="card warn">
+<h4>What If the Chain Is Broken?</h4>
+<p>Every PE tampering technique works by breaking some link in this chain. What if the section&rsquo;s content does not match the file? What if the file no longer exists? What if the file was modified after the section was created? These questions drive the entire family of techniques: Hollowing, Doppelg&auml;nging, Herpaderping, and Ghosting.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Kernel Structures Overview</h2>
+
+<table>
+<tr><th>Structure</th><th>Created By</th><th>Contains</th></tr>
+<tr><td><code>EPROCESS</code></td><td><code>NtCreateProcessEx</code></td><td>Process metadata, token, handle table, VAD tree, image filename</td></tr>
+<tr><td><code>PEB</code></td><td>Kernel (during process creation)</td><td>Image base, loader data, process parameters, heap info</td></tr>
+<tr><td><code>SECTION_OBJECT</code></td><td><code>NtCreateSection</code></td><td>Reference to CONTROL_AREA, segment, size</td></tr>
+<tr><td><code>CONTROL_AREA</code></td><td>Memory manager</td><td>Reference count, file object pointer, subsection chain</td></tr>
+<tr><td><code>FILE_OBJECT</code></td><td><code>NtCreateFile</code>/<code>NtOpenFile</code></td><td>File name, device object, current byte offset, flags, section object pointers</td></tr>
+<tr><td><code>RTL_USER_PROCESS_PARAMETERS</code></td><td><code>RtlCreateProcessParametersEx</code></td><td>Command line, image path, environment block, current directory</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>8. Why This Matters for Ghosting</h2>
+
+<p>Process Ghosting exploits the fact that <code>NtCreateProcessEx</code> only needs a section handle. The technique manipulates the <strong>file state</strong> between creating the section and creating the process. Specifically:</p>
+
+<div class="card">
+<h4>The Ghosting Insight</h4>
+<ol>
+<li>Create a file and write malicious PE content to it</li>
+<li>Put the file into the <strong>delete-pending</strong> state (it is still open, still readable via the handle, but marked for deletion)</li>
+<li>Create a <code>SEC_IMAGE</code> section from the delete-pending file &mdash; this works because the file handle is still valid</li>
+<li>Close the file handle &mdash; the file is now deleted from disk</li>
+<li>Create a process from the section &mdash; the process runs, but its backing file no longer exists</li>
+</ol>
+<p>When AV tries to scan the file at any of its normal inspection points, the file is either in the delete-pending state (cannot be opened by other processes) or already deleted. The process runs from a <strong>ghost</strong> &mdash; a section backed by a file that no longer exists on the filesystem.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What does NtCreateProcessEx take to create a new process?</p>
+<div class="quiz-btn" data-choice="A">A) A file path to the executable on disk</div>
+<div class="quiz-btn" data-choice="B">B) A section handle created from the executable image</div>
+<div class="quiz-btn" data-choice="C">C) A memory buffer containing raw PE bytes</div>
+<div class="quiz-btn" data-choice="D">D) A PID of an existing process to clone</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: What flag must be passed to NtCreateSection to create an executable image section?</p>
+<div class="quiz-btn" data-choice="A">A) SEC_COMMIT</div>
+<div class="quiz-btn" data-choice="B">B) SEC_RESERVE</div>
+<div class="quiz-btn" data-choice="C">C) SEC_IMAGE</div>
+<div class="quiz-btn" data-choice="D">D) SEC_NOCACHE</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What is the state of a process immediately after NtCreateProcessEx but before NtCreateThreadEx?</p>
+<div class="quiz-btn" data-choice="A">A) The process exists with mapped memory but has no threads and is not executing</div>
+<div class="quiz-btn" data-choice="B">B) The process is running in a suspended state</div>
+<div class="quiz-btn" data-choice="C">C) The process has not yet been created in the kernel</div>
+<div class="quiz-btn" data-choice="D">D) The process is executing its entry point in a paused debugger</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: PE Tampering Techniques Overview &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

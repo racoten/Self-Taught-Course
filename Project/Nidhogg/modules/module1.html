@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: Kernel vs User-Mode Evasion - Nidhogg Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F409;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#dc2626;--accent2:#b91c1c;--gradient:linear-gradient(135deg,#dc2626,#b91c1c)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Nidhogg Course</h2>
+<span>Kernel Rootkit Masterclass</span>
+</div>
+<a class="home-link" href="../Nidhogg_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span>1. Kernel vs User-Mode</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Driver Basics</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Process &amp; Thread</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. File &amp; Registry</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. ETW Disabling</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Callbacks &amp; Notifications</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Memory Evasion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Kernel vs User-Mode Evasion</h1>
+<p class="subtitle">Why ring 0 access is the ultimate evasion primitive and the cost of getting there.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the architectural separation between user mode (ring 3) and kernel mode (ring 0) on Windows, why kernel-level rootkits like Nidhogg can evade virtually all user-mode security products, what Driver Signature Enforcement (DSE) is, and the realistic attack paths for loading unsigned drivers.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The x86 Privilege Ring Model</h2>
+
+<p>Intel and AMD processors implement a hardware privilege system with four rings (0 through 3). Windows uses only two of these:</p>
+
+<table>
+<tr><th>Ring</th><th>Name</th><th>Runs What</th><th>Access Level</th></tr>
+<tr><td><strong>Ring 0</strong></td><td>Kernel Mode</td><td>ntoskrnl.exe, HAL, kernel drivers (.sys files)</td><td>Full hardware access, all memory, all instructions</td></tr>
+<tr><td><strong>Ring 3</strong></td><td>User Mode</td><td>Applications, services, DLLs, user-mode EDR agents</td><td>Restricted: no direct hardware, isolated address space, filtered syscalls</td></tr>
+</table>
+
+<p>The transition between ring 3 and ring 0 happens through <strong>system calls</strong> (the <code>syscall</code> instruction on x64). When a user-mode application calls a Windows API like <code>NtOpenProcess</code>, execution transfers to the kernel through the SSDT (System Service Descriptor Table), runs in ring 0, and returns the result.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Ring Transition via Syscall</h4>
+<div class="flow">
+<div class="flow box">User-Mode App<br><small>Ring 3</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">syscall<br><small>CPU trap</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">KiSystemCall64<br><small>Ring 0 entry</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Nt* Handler<br><small>Kernel routine</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Why User-Mode Evasion Is a Losing Battle</h2>
+
+<p>Most offensive tools (Cobalt Strike, Meterpreter, custom loaders) operate in user mode. They must evade user-mode EDR hooks, API monitoring, ETW tracing, and memory scanning &mdash; all from the same privilege level. This creates an inherent disadvantage:</p>
+
+<table>
+<tr><th>Evasion Challenge</th><th>User-Mode (Ring 3)</th><th>Kernel-Mode (Ring 0)</th></tr>
+<tr><td><strong>API Hooking</strong></td><td>Must unhook ntdll.dll, risk detection by hook integrity checks</td><td>Can prevent hooks from being installed, or silently bypass them</td></tr>
+<tr><td><strong>ETW Telemetry</strong></td><td>Can patch <code>EtwEventWrite</code> in own process, but EDR gets kernel-level ETW</td><td>Can disable ETW providers at the source in kernel memory</td></tr>
+<tr><td><strong>Process Enumeration</strong></td><td>Cannot hide from <code>NtQuerySystemInformation</code></td><td>Can unlink EPROCESS from ActiveProcessLinks, invisible to all user-mode queries</td></tr>
+<tr><td><strong>Memory Scanning</strong></td><td>Cannot prevent EDR kernel driver from reading process memory</td><td>Can manipulate VAD entries and PTEs to hide memory regions</td></tr>
+<tr><td><strong>File Protection</strong></td><td>ACLs can be overridden by SYSTEM/admin</td><td>Can intercept IRP_MJ_CREATE at the filesystem level, denying all access</td></tr>
+</table>
+
+<div class="card green">
+<h4>The Core Asymmetry</h4>
+<p>A kernel driver runs at the <strong>same privilege level</strong> as the EDR kernel driver. It can read, modify, or nullify anything the EDR does. User-mode tools can never reach up to touch kernel data structures. This asymmetry is why kernel rootkits remain the most powerful evasion mechanism on Windows.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. What a Kernel Rootkit Can Do</h2>
+
+<p>Nidhogg demonstrates the full range of capabilities available to a kernel-mode rootkit. Each capability maps to a specific kernel mechanism:</p>
+
+<div class="card">
+<h4>Nidhogg Capability Map</h4>
+<table>
+<tr><th>Capability</th><th>Kernel Mechanism</th><th>Module</th></tr>
+<tr><td>Hide processes</td><td>DKOM: unlink EPROCESS from ActiveProcessLinks</td><td>3</td></tr>
+<tr><td>Protect processes from termination</td><td>ObRegisterCallbacks: strip PROCESS_TERMINATE from handles</td><td>3, 6</td></tr>
+<tr><td>Hide/protect files</td><td>IRP major function hooking on filesystem driver</td><td>4</td></tr>
+<tr><td>Protect registry keys</td><td>CmRegisterCallbackEx: block registry operations</td><td>4</td></tr>
+<tr><td>Blind EDR telemetry</td><td>Disable ETW trace providers in kernel memory</td><td>5</td></tr>
+<tr><td>Remove EDR callbacks</td><td>Locate and null callback arrays (PsSetCreateProcessNotifyRoutine, etc.)</td><td>6</td></tr>
+<tr><td>Evade memory scanners</td><td>VAD manipulation (PTE manipulation is a general kernel technique, not a core Nidhogg feature)</td><td>7</td></tr>
+<tr><td>Elevate process tokens</td><td>Direct token pointer replacement in EPROCESS</td><td>3</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. The Kernel Address Space</h2>
+
+<p>On 64-bit Windows, the virtual address space is divided cleanly between user mode and kernel mode:</p>
+
+<pre><span class="lang-tag">Text</span>Virtual Address Space (x64 Windows)
+=============================================
+0x0000000000000000 - 0x00007FFFFFFFFFFF   User space   (128 TB)
+  - Per-process, isolated
+  - Accessible from ring 3
+  - Contains: EXE, DLLs, heap, stack, TEB/PEB
+
+0xFFFF800000000000 - 0xFFFFFFFFFFFFFFFF   Kernel space (128 TB)
+  - Shared across all processes
+  - Accessible ONLY from ring 0
+  - Contains: ntoskrnl, HAL, kernel drivers,
+    pool allocations, system PTEs, EPROCESS/ETHREAD</pre>
+
+<p>Key insight: kernel address space is <strong>shared across all processes</strong>. When Nidhogg's driver modifies an EPROCESS structure, that change is visible system-wide because every process maps the same kernel memory. There is no per-process isolation in kernel space.</p>
+
+<!-- ============================================================ -->
+<h2>5. Driver Signature Enforcement (DSE)</h2>
+
+<p>Microsoft introduced Driver Signature Enforcement to prevent unauthorized kernel code from loading. Starting with Windows Vista x64, all kernel drivers must be signed with a valid certificate:</p>
+
+<table>
+<tr><th>Signing Level</th><th>Requirement</th><th>Who Can Get It</th></tr>
+<tr><td><strong>WHQL</strong></td><td>Microsoft Hardware Quality Labs certification</td><td>Hardware vendors through Microsoft's portal</td></tr>
+<tr><td><strong>Attestation</strong></td><td>EV code signing certificate + Microsoft attestation signature</td><td>Developers with EV certificates (purchased from CAs)</td></tr>
+<tr><td><strong>Test Signing</strong></td><td>Self-signed with test certificate (requires test mode boot)</td><td>Anyone (but system must boot with <code>TESTSIGNING ON</code>)</td></tr>
+</table>
+
+<p>DSE is enforced by the Code Integrity (CI) module (<code>ci.dll</code>). When <code>NtLoadDriver</code> is called, CI validates the driver's Authenticode signature against the minimum signing level before allowing the image to load into kernel space.</p>
+
+<pre><span class="lang-tag">C</span>// Simplified view of what CI checks during driver load
+// ci!CiValidateImageHeader is called from ntoskrnl
+NTSTATUS CiValidateImageHeader(
+    PVOID ImageBase,
+    ULONG ImageSize,
+    ULONG ImageSigningLevel,  // Minimum required level
+    // ... additional parameters
+);
+// Returns STATUS_INVALID_IMAGE_HASH if signature check fails</pre>
+
+<!-- ============================================================ -->
+<h2>6. Bypassing DSE: Attack Paths</h2>
+
+<p>Despite DSE, attackers have several paths to load unsigned kernel drivers. These are the realistic vectors that red teams use:</p>
+
+<div class="card warn">
+<h4>BYOVD &mdash; Bring Your Own Vulnerable Driver</h4>
+<p>Load a legitimately signed but <strong>vulnerable</strong> driver (e.g., one with an arbitrary read/write primitive), then exploit it to map unsigned code into kernel memory. The signed driver passes DSE; the payload never goes through <code>NtLoadDriver</code>. Tools like <strong>kdmapper</strong> automate this using drivers such as Intel's <code>iqvw64e.sys</code>.</p>
+</div>
+
+<table>
+<tr><th>Bypass Method</th><th>How It Works</th><th>Detectability</th></tr>
+<tr><td><strong>BYOVD (kdmapper)</strong></td><td>Exploit a signed vulnerable driver to manually map unsigned code</td><td>Moderate: vulnerable driver loads are logged, Microsoft maintains a blocklist</td></tr>
+<tr><td><strong>Test Signing Mode</strong></td><td>Boot with <code>bcdedit /set testsigning on</code></td><td>High: watermark on desktop, <code>NtQuerySystemInformation</code> exposes it</td></tr>
+<tr><td><strong>Leaked/Stolen Certificates</strong></td><td>Sign with a compromised legitimate code signing cert</td><td>Low initially, high once cert is revoked and added to CRL</td></tr>
+<tr><td><strong>Boot Configuration Abuse</strong></td><td>Modify BCD to disable integrity checks during boot</td><td>High: requires admin + reboot, Secure Boot blocks this</td></tr>
+<tr><td><strong>HyperV/VBS Weaknesses</strong></td><td>Exploit pre-VBS systems that lack HVCI enforcement</td><td>Varies: older Windows 10 builds without HVCI are vulnerable</td></tr>
+</table>
+
+<div class="card">
+<h4>Nidhogg and DSE</h4>
+<p>Nidhogg itself is distributed as source code. To use it operationally, the red team must compile it and find a way to load it. The project does not ship a DSE bypass &mdash; that is left to the operator. During development and testing, test signing mode or kdmapper are common choices. In a real engagement, BYOVD is the most practical path.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. HVCI and Kernel Code Integrity</h2>
+
+<p>Hypervisor-protected Code Integrity (HVCI), part of Virtualization-Based Security (VBS), adds a second layer of defense beyond DSE:</p>
+
+<pre><span class="lang-tag">Text</span>Without HVCI:
+  Ring 0 code can allocate RWX kernel memory and execute arbitrary code
+
+With HVCI:
+  The hypervisor (ring -1) enforces W^X in kernel space
+  - Pages can be writable OR executable, never both
+  - New kernel code pages must be validated by Secure Kernel
+  - Even a kernel driver cannot simply allocate and run shellcode</pre>
+
+<p>HVCI significantly raises the bar for kernel rootkits. On systems with HVCI enabled, manually mapped drivers (like kdmapper output) may fail because the hypervisor blocks execution of unsigned kernel pages. However, many enterprise environments still lack HVCI, and older Windows 10 builds do not enable it by default.</p>
+
+<!-- ============================================================ -->
+<h2>8. PatchGuard (Kernel Patch Protection)</h2>
+
+<p>PatchGuard (KPP) is a kernel integrity monitoring system that periodically checks critical kernel structures for unauthorized modifications:</p>
+
+<div class="card">
+<h4>What PatchGuard Monitors</h4>
+<ul>
+<li>SSDT (System Service Descriptor Table) &mdash; syscall hooks</li>
+<li>IDT (Interrupt Descriptor Table) &mdash; interrupt handler hooks</li>
+<li>GDT (Global Descriptor Table) &mdash; segment descriptor modifications</li>
+<li>Critical kernel code sections &mdash; inline hooks in ntoskrnl</li>
+<li>Processor MSRs &mdash; LSTAR (syscall entry point) modifications</li>
+<li>Certain callback arrays &mdash; some notification routine tables</li>
+</ul>
+</div>
+
+<p>When PatchGuard detects a modification, it triggers <code>CRITICAL_STRUCTURE_CORRUPTION</code> (bug check 0x109), crashing the system with a blue screen. This means Nidhogg must carefully avoid techniques that PatchGuard monitors. For example, Nidhogg uses DKOM (modifying linked list pointers) rather than SSDT hooking, because SSDT modifications are reliably detected by PatchGuard. However, DKOM is <strong>not guaranteed to be PatchGuard-safe</strong>: PatchGuard's monitoring scope varies between Windows builds and can include checks on kernel data structures like EPROCESS linked lists. Nidhogg's own documentation acknowledges that PatchGuard can potentially detect DKOM modifications. In practice, DKOM is less likely to be caught than SSDT hooking, but it is not undetectable.</p>
+
+<!-- ============================================================ -->
+<h2>9. Nidhogg Architecture Overview</h2>
+
+<p>Nidhogg is structured as two components that communicate via IOCTLs:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Nidhogg Two-Component Architecture</h4>
+<div class="flow">
+<div class="flow box">NidhoggClient.exe<br><small>User-mode C++ client<br>Ring 3</small></div>
+<div class="flow arrow">&rarr; IOCTL &rarr;</div>
+<div class="flow box">Nidhogg.sys<br><small>Kernel driver<br>Ring 0</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Kernel Structures<br><small>EPROCESS, callbacks,<br>ETW, IRP hooks</small></div>
+</div>
+</div>
+
+<p>The user-mode client sends commands (hide process, protect file, disable ETW, etc.) through <code>DeviceIoControl</code> calls. The kernel driver receives these as I/O Request Packets (IRPs) with IOCTL codes, executes the requested operation using kernel APIs and data structure manipulation, and returns the result. This architecture is covered in detail in Module 2 (driver basics) and Module 8 (full IOCTL table).</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Why can a kernel-mode rootkit evade user-mode EDR agents?</p>
+<div class="quiz-btn" data-choice="A">A) Kernel drivers run faster than user-mode processes</div>
+<div class="quiz-btn" data-choice="B">B) Ring 0 code has full access to all system memory and can modify kernel structures that ring 3 code cannot see or alter</div>
+<div class="quiz-btn" data-choice="C">C) EDR agents do not monitor kernel drivers at all</div>
+<div class="quiz-btn" data-choice="D">D) Kernel mode disables all security software automatically</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: What is BYOVD?</p>
+<div class="quiz-btn" data-choice="A">A) A method to sign drivers with a stolen certificate</div>
+<div class="quiz-btn" data-choice="B">B) A technique to disable PatchGuard at boot time</div>
+<div class="quiz-btn" data-choice="C">C) Loading a legitimately signed but vulnerable driver and exploiting it to map unsigned kernel code</div>
+<div class="quiz-btn" data-choice="D">D) A Windows API for loading test-signed drivers</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: Why does Nidhogg use DKOM instead of SSDT hooking to hide processes?</p>
+<div class="quiz-btn" data-choice="A">A) PatchGuard reliably monitors the SSDT and would trigger a BSOD; DKOM modifications to EPROCESS linked lists are less consistently monitored, though still not guaranteed to be PatchGuard-safe</div>
+<div class="quiz-btn" data-choice="B">B) SSDT hooking is not possible on 64-bit Windows</div>
+<div class="quiz-btn" data-choice="C">C) DKOM is faster than SSDT hooking</div>
+<div class="quiz-btn" data-choice="D">D) SSDT hooking requires a user-mode component</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: Windows Kernel Driver Basics &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShellGhost - Single-Instruction Memory Evasion Masterclass</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F47B;</text></svg>">
+<style>
+:root {
+  --bg: #080b12;
+  --surface: #0f1320;
+  --surface2: #161b2e;
+  --border: #1e2740;
+  --text: #e2e8f0;
+  --dim: #64748b;
+  --accent: #64748b;
+  --accent2: #475569;
+  --gradient: linear-gradient(135deg, #64748b, #475569);
+  --code-font: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; overflow-x: hidden; }
+::selection { background: var(--accent); color: var(--bg); }
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+.bg-grid {
+  position: fixed; inset: 0;
+  background-image: linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
+  background-size: 60px 60px; pointer-events: none; z-index: 0;
+}
+.bg-glow { position: fixed; width: 500px; height: 500px; border-radius: 50%; filter: blur(150px); opacity: .08; pointer-events: none; z-index: 0; }
+.bg-glow.g1 { background: #64748b; top: -200px; right: -100px; }
+.bg-glow.g2 { background: #475569; bottom: -200px; left: -100px; }
+
+.back-link { position: relative; z-index: 1; display: inline-block; padding: 20px 30px; color: var(--dim); text-decoration: none; font-size: .85rem; transition: color .2s; }
+.back-link:hover { color: var(--accent); }
+
+header { position: relative; z-index: 1; text-align: center; padding: 20px 20px 10px; }
+header h1 { font-size: 2.4rem; font-weight: 800; background: var(--gradient); background-size: 300% 300%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: gradientShift 8s ease infinite; }
+@keyframes gradientShift { 0%,100%{background-position:0% 50%} 50%{background-position:100% 50%} }
+header .tagline { color: var(--dim); font-size: .95rem; margin-top: 8px; font-family: var(--code-font); }
+header .separator { width: 80px; height: 3px; background: var(--gradient); margin: 24px auto 0; border-radius: 2px; }
+
+.course-meta { position: relative; z-index: 1; display: flex; justify-content: center; gap: 30px; padding: 24px 20px; flex-wrap: wrap; }
+.meta-badge { text-align: center; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 24px; min-width: 120px; }
+.meta-badge .val { font-size: 1.4rem; font-weight: 800; font-family: var(--code-font); background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.meta-badge .lbl { font-size: .7rem; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
+
+.desc { position: relative; z-index: 1; max-width: 700px; margin: 20px auto; padding: 0 30px; text-align: center; color: #94a3b8; font-size: .92rem; line-height: 1.7; }
+
+.modules-grid { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; max-width: 1000px; margin: 30px auto; padding: 0 30px 60px; }
+
+.module-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 24px; text-decoration: none; color: inherit; display: block; transition: transform .3s, border-color .3s, box-shadow .3s; position: relative; overflow: hidden; }
+.module-card:hover { transform: translateY(-4px); border-color: var(--accent); box-shadow: 0 12px 40px -10px rgba(100, 116, 139, .15); }
+.module-card .num { position: absolute; top: 16px; right: 20px; font-size: 2rem; font-weight: 900; font-family: var(--code-font); opacity: .08; color: var(--accent); }
+.module-card .diff { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: .68rem; font-weight: 700; margin-bottom: 12px; text-transform: uppercase; letter-spacing: .5px; }
+.module-card .diff.easy { background: #10b98125; color: #10b981; }
+.module-card .diff.med { background: #f59e0b25; color: #f59e0b; }
+.module-card .diff.hard { background: #ef444425; color: #ef4444; }
+.module-card h3 { font-size: 1.1rem; margin-bottom: 8px; color: var(--text); }
+.module-card p { font-size: .82rem; color: var(--dim); line-height: 1.5; margin: 0; }
+
+.refs { position: relative; z-index: 1; max-width: 1000px; margin: 0 auto 40px; padding: 0 30px; }
+.refs-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px; }
+.refs-card h3 { color: var(--accent); font-size: 1.1rem; margin-bottom: 15px; }
+.refs-card ul { list-style: none; padding: 0; margin: 0; }
+.refs-card li { padding: 6px 0; font-size: .85rem; color: #94a3b8; }
+.refs-card li strong { color: var(--text); }
+.refs-card li code { background: var(--surface2); padding: 2px 8px; border-radius: 4px; font-family: var(--code-font); font-size: .8em; color: var(--accent); }
+
+footer { position: relative; z-index: 1; text-align: center; padding: 20px; color: var(--dim); font-size: .75rem; font-family: var(--code-font); border-top: 1px solid var(--border); max-width: 1000px; margin: 0 auto; }
+
+@media (max-width: 500px) {
+  header h1 { font-size: 1.6rem; }
+  .modules-grid { grid-template-columns: 1fr; padding: 0 16px 40px; }
+  .course-meta { gap: 12px; }
+  .meta-badge { padding: 12px 16px; min-width: 90px; }
+}
+</style>
+</head>
+<body>
+
+<div class="bg-grid"></div>
+<div class="bg-glow g1"></div>
+<div class="bg-glow g2"></div>
+
+<a href="../../index.html" class="back-link">&larr; Back to Dashboard</a>
+
+<header>
+  <h1>ShellGhost</h1>
+  <p class="tagline">// Single-Instruction Memory Evasion Masterclass</p>
+  <div class="separator"></div>
+</header>
+
+<div class="course-meta">
+  <div class="meta-badge"><div class="val">8</div><div class="lbl">Modules</div></div>
+  <div class="meta-badge"><div class="val">C</div><div class="lbl">Language</div></div>
+  <div class="meta-badge"><div class="val">x64</div><div class="lbl">Architecture</div></div>
+  <div class="meta-badge"><div class="val">3</div><div class="lbl">Difficulty Tiers</div></div>
+</div>
+
+<p class="desc">Master the art of making shellcode invisible to memory scanners. Learn how ShellGhost by <strong>lem0nSec</strong> combines Vectored Exception Handling with software breakpoints (INT3) to execute shellcode one instruction at a time &mdash; ensuring that the full payload is never decrypted in memory simultaneously. A deep dive into VEH, shellcode mapping preprocessing, SystemFunction032 (RC4) per-instruction encryption, and RW/RX memory toggling.</p>
+
+<div class="modules-grid">
+
+  <a href="modules/module1.html" class="module-card">
+    <span class="num">01</span>
+    <span class="diff easy">Beginner</span>
+    <h3>Memory Scanner Evasion Goals</h3>
+    <p>Why full decryption is risky, the concept of minimal decryption surface, threat models for in-memory shellcode, and the problem ShellGhost solves.</p>
+  </a>
+
+  <a href="modules/module2.html" class="module-card">
+    <span class="num">02</span>
+    <span class="diff easy">Beginner</span>
+    <h3>Software Breakpoints &amp; INT3</h3>
+    <p>The 0xCC opcode, how debuggers use INT3, EXCEPTION_BREAKPOINT (0x80000003), exception dispatch flow from CPU to user-mode handler.</p>
+  </a>
+
+  <a href="modules/module3.html" class="module-card">
+    <span class="num">03</span>
+    <span class="diff easy">Beginner</span>
+    <h3>Vectored Exception Handling Deep Dive</h3>
+    <p>AddVectoredExceptionHandler, handler registration and priority, EXCEPTION_POINTERS, CONTEXT structure manipulation, and VEH vs SEH.</p>
+  </a>
+
+  <a href="modules/module4.html" class="module-card">
+    <span class="num">04</span>
+    <span class="diff med">Intermediate</span>
+    <h3>The ShellGhost Concept</h3>
+    <p>Replace each instruction with 0xCC, on breakpoint: re-encrypt previous instruction, decrypt current instruction, execute, advance. The one-exception-per-instruction model.</p>
+  </a>
+
+  <a href="modules/module5.html" class="module-card">
+    <span class="num">05</span>
+    <span class="diff med">Intermediate</span>
+    <h3>SystemFunction032 &amp; Shellcode Mapping</h3>
+    <p>How ShellGhost_mapping.py pre-processes shellcode into per-instruction CRYPT_BYTES_QUOTA structs, and how SystemFunction032 handles RC4 encryption/decryption.</p>
+  </a>
+
+  <a href="modules/module6.html" class="module-card">
+    <span class="num">06</span>
+    <span class="diff med">Intermediate</span>
+    <h3>The VEH Handler Implementation</h3>
+    <p>Reading ContextRecord-&gt;Rip, re-encrypting the previous instruction, decrypting the current instruction via SystemFunction032, RW/RX toggling with VirtualProtect, and CONTEXT manipulation.</p>
+  </a>
+
+  <a href="modules/module7.html" class="module-card">
+    <span class="num">07</span>
+    <span class="diff hard">Advanced</span>
+    <h3>Background: x86 Trap Flag &amp; Single-Stepping</h3>
+    <p>EFLAGS TF bit (bit 8), EXCEPTION_SINGLE_STEP (0x80000004), how debuggers use single-step &mdash; general x86 knowledge for context (not used by ShellGhost).</p>
+  </a>
+
+  <a href="modules/module8.html" class="module-card">
+    <span class="num">08</span>
+    <span class="diff hard">Advanced</span>
+    <h3>Full Chain, Performance &amp; Detection</h3>
+    <p>Complete execution flow walkthrough, performance impact analysis, detection vectors, VEH registration monitoring, and comparison with other memory evasion techniques.</p>
+  </a>
+
+</div>
+
+<div class="refs">
+  <div class="refs-card">
+    <h3>References &amp; Resources</h3>
+    <ul>
+      <li><strong>ShellGhost Repository</strong> &mdash; <code>github.com/lem0nSec/ShellGhost</code></li>
+      <li><strong>lem0nSec Blog</strong> &mdash; <code>lem0nsec.github.io</code></li>
+      <li><strong>INT3 / Breakpoint Opcode</strong> &mdash; <code>Intel SDM Vol. 2, INT 3 (0xCC) instruction reference</code></li>
+      <li><strong>Vectored Exception Handling (MSDN)</strong> &mdash; <code>AddVectoredExceptionHandler function documentation</code></li>
+      <li><strong>EXCEPTION_POINTERS (MSDN)</strong> &mdash; <code>EXCEPTION_POINTERS structure reference</code></li>
+      <li><strong>CONTEXT Structure (MSDN)</strong> &mdash; <code>CONTEXT structure, EFlags field documentation</code></li>
+      <li><strong>SystemFunction032</strong> &mdash; <code>advapi32.dll RC4 encryption/decryption API</code></li>
+      <li><strong>RC4 Stream Cipher</strong> &mdash; <code>RFC 7465 / Rivest Cipher 4 specification</code></li>
+      <li><strong>Windows Exception Dispatching</strong> &mdash; <code>KiUserExceptionDispatcher internals</code></li>
+    </ul>
+  </div>
+</div>
+
+<footer>
+  <p>shellghost-course // built for learning, not for deployment</p>
+</footer>
+
+</body>
+</html>

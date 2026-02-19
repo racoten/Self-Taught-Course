@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: Process Injection Landscape - PoolParty Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F3CA;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f59e0b;--accent2:#d97706;--gradient:linear-gradient(135deg,#f59e0b,#d97706)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>PoolParty Course</h2>
+<span>Thread Pool Injection Masterclass</span>
+</div>
+<a class="home-link" href="../PoolParty_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span>1. Process Injection Landscape</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Thread Pool Architecture</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Thread Pool Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Worker Factory &amp; TP_WORK</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Wait, I/O &amp; ALPC</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Job &amp; Direct Variants</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. TP_TIMER Insertion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Process Injection Landscape</h1>
+<p class="subtitle">Classic injection techniques, why they fail against modern EDRs, and the motivation behind PoolParty&rsquo;s thread pool approach.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the traditional process injection techniques (DLL injection, shellcode injection, APC injection), the specific Windows API call patterns that EDRs hook and monitor, why these techniques are increasingly detected, and how PoolParty reframes the injection problem by targeting the Windows Thread Pool as an execution primitive.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. What Is Process Injection?</h2>
+
+<p>Process injection is the act of executing arbitrary code within the address space of a separate, running process. Attackers use it to:</p>
+
+<ul>
+<li><strong>Evade detection</strong> &mdash; code runs under a legitimate process name (e.g., <code>svchost.exe</code>, <code>explorer.exe</code>)</li>
+<li><strong>Bypass security boundaries</strong> &mdash; inherit the target process&rsquo;s tokens, privileges, and network access</li>
+<li><strong>Persist stealthily</strong> &mdash; no new process created, no suspicious command lines logged</li>
+<li><strong>Access process-specific resources</strong> &mdash; read credentials from LSASS, manipulate browser memory</li>
+</ul>
+
+<p>MITRE ATT&amp;CK catalogs process injection under <strong>T1055</strong>, with over a dozen sub-techniques. Despite decades of research, injection remains a cornerstone of offensive tradecraft because executing code in another process is fundamentally useful.</p>
+
+<!-- ============================================================ -->
+<h2>2. Classic Injection Techniques</h2>
+
+<h3>2.1 DLL Injection via CreateRemoteThread</h3>
+
+<p>The oldest and most well-known technique. The attacker writes the path of a malicious DLL into the target process and creates a remote thread that calls <code>LoadLibraryA</code>:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Classic DLL Injection - highly detected
+HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPid);
+
+// Allocate memory in target for DLL path
+LPVOID remoteBuf = VirtualAllocEx(hProcess, NULL, dllPathLen,
+                                   MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+// Write DLL path into target process
+WriteProcessMemory(hProcess, remoteBuf, dllPath, dllPathLen, NULL);
+
+// Create remote thread calling LoadLibraryA with our DLL path
+HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
+    (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleA("kernel32.dll"),
+                                           "LoadLibraryA"),
+    remoteBuf, 0, NULL);</code></pre>
+
+<h3>2.2 Shellcode Injection via VirtualAllocEx + WriteProcessMemory</h3>
+
+<p>Instead of a DLL path, raw shellcode is written to allocated memory with executable permissions:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Shellcode injection - allocate RWX, write, execute
+LPVOID remoteBuf = VirtualAllocEx(hProcess, NULL, shellcodeLen,
+                                   MEM_COMMIT | MEM_RESERVE,
+                                   PAGE_EXECUTE_READWRITE);
+
+WriteProcessMemory(hProcess, remoteBuf, shellcode, shellcodeLen, NULL);
+
+CreateRemoteThread(hProcess, NULL, 0,
+    (LPTHREAD_START_ROUTINE)remoteBuf, NULL, 0, NULL);</code></pre>
+
+<h3>2.3 APC Injection</h3>
+
+<p>Asynchronous Procedure Calls queue code to execute in the context of a specific thread. The target thread must enter an alertable wait state for the APC to fire:</p>
+
+<pre><span class="lang-tag">C++</span><code>// APC injection - queue shellcode as APC to alertable thread
+LPVOID remoteBuf = VirtualAllocEx(hProcess, NULL, shellcodeLen,
+                                   MEM_COMMIT | MEM_RESERVE,
+                                   PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProcess, remoteBuf, shellcode, shellcodeLen, NULL);
+
+// Queue APC to each thread in the target process
+QueueUserAPC((PAPCFUNC)remoteBuf, hThread, 0);</code></pre>
+
+<h3>2.4 Other Variants</h3>
+
+<table>
+<tr><th>Technique</th><th>Execution Trigger</th><th>Key APIs</th></tr>
+<tr><td><strong>Process Hollowing</strong></td><td>Replace suspended process image</td><td><code>NtUnmapViewOfSection</code>, <code>SetThreadContext</code></td></tr>
+<tr><td><strong>Thread Hijacking</strong></td><td>Modify RIP/EIP of existing thread</td><td><code>SuspendThread</code>, <code>SetThreadContext</code>, <code>ResumeThread</code></td></tr>
+<tr><td><strong>Atom Bombing</strong></td><td>Abuse global atom table + APC</td><td><code>GlobalAddAtom</code>, <code>NtQueueApcThread</code></td></tr>
+<tr><td><strong>Early Bird</strong></td><td>APC to newly created suspended process</td><td><code>CreateProcess(SUSPENDED)</code>, <code>QueueUserAPC</code></td></tr>
+<tr><td><strong>Callback Injection</strong></td><td>Abuse API callbacks (e.g., EnumWindows)</td><td><code>EnumWindows</code>, <code>EnumDesktops</code>, etc.</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. The API Call Pattern Problem</h2>
+
+<p>Every classic injection technique follows the same fundamental three-step pattern that EDRs exploit for detection:</p>
+
+<div class="diagram">
+<h4>Universal Injection Pattern</h4>
+<div class="flow">
+<div class="flow box r">1. Allocate<br><small>VirtualAllocEx</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box y">2. Write<br><small>WriteProcessMemory</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">3. Execute<br><small>CreateRemoteThread<br>QueueUserAPC<br>SetThreadContext</small></div>
+</div>
+</div>
+
+<p>This pattern &mdash; <strong>allocate, write, execute</strong> &mdash; is the Achilles&rsquo; heel of all traditional injection. EDRs monitor every step:</p>
+
+<table>
+<tr><th>Step</th><th>Hooked APIs</th><th>What EDR Detects</th></tr>
+<tr><td><strong>Allocate</strong></td><td><code>NtAllocateVirtualMemory</code></td><td>Cross-process memory allocation, RWX permissions requested</td></tr>
+<tr><td><strong>Write</strong></td><td><code>NtWriteVirtualMemory</code></td><td>Cross-process memory writes, shellcode byte patterns</td></tr>
+<tr><td><strong>Execute</strong></td><td><code>NtCreateThreadEx</code>, <code>NtQueueApcThread</code>, <code>NtSetContextThread</code></td><td>Remote thread creation, suspicious thread start addresses, APC targeting</td></tr>
+</table>
+
+<div class="card warn">
+<h4>The Execution Trigger Is the Weakest Link</h4>
+<p>Allocating memory and writing bytes are relatively common operations. The <strong>execution trigger</strong> &mdash; the API call that causes the injected code to actually run &mdash; is what EDRs focus on most heavily. <code>CreateRemoteThread</code>, <code>QueueUserAPC</code>, and <code>SetThreadContext</code> targeting a remote process are high-fidelity indicators of injection. PoolParty&rsquo;s insight is to find execution triggers that EDRs do not monitor.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. How EDRs Hook These APIs</h2>
+
+<p>Modern EDRs use multiple hooking layers to intercept injection-related API calls:</p>
+
+<h3>4.1 User-Mode Hooks (ntdll.dll)</h3>
+
+<p>EDRs patch the prologue of <code>ntdll.dll</code> functions with a <code>JMP</code> to their monitoring DLL. When your code calls <code>NtAllocateVirtualMemory</code>, execution is redirected to the EDR first:</p>
+
+<pre><span class="lang-tag">ASM</span><code>; Original ntdll!NtAllocateVirtualMemory
+mov r10, rcx
+mov eax, 18h              ; syscall number
+syscall
+ret
+
+; After EDR hooking
+jmp edr_monitor.dll+0x1234  ; redirected to EDR
+nop
+nop
+syscall                     ; never reached via normal path
+ret</code></pre>
+
+<h3>4.2 Kernel Callbacks</h3>
+
+<p>Windows provides kernel-mode callback mechanisms that EDR drivers register for:</p>
+
+<ul>
+<li><strong>PsSetCreateProcessNotifyRoutine</strong> &mdash; notified on process creation</li>
+<li><strong>PsSetCreateThreadNotifyRoutine</strong> &mdash; notified on thread creation (catches <code>CreateRemoteThread</code>)</li>
+<li><strong>ObRegisterCallbacks</strong> &mdash; intercepts handle operations (catches <code>OpenProcess</code>)</li>
+<li><strong>ETW TI (Threat Intelligence)</strong> &mdash; kernel telemetry on memory operations</li>
+</ul>
+
+<h3>4.3 ETW (Event Tracing for Windows)</h3>
+
+<p>The <code>Microsoft-Windows-Threat-Intelligence</code> ETW provider reports on cross-process memory operations directly from the kernel, bypassing any user-mode unhooking attempts.</p>
+
+<!-- ============================================================ -->
+<h2>5. Why Traditional Techniques Are Failing</h2>
+
+<p>The detection landscape has matured to the point where classic injection is reliably caught:</p>
+
+<table>
+<tr><th>Evasion Attempt</th><th>Why It No Longer Works</th></tr>
+<tr><td><strong>Direct syscalls</strong> (bypass ntdll hooks)</td><td>Kernel callbacks and ETW TI still report the operation</td></tr>
+<tr><td><strong>Indirect syscalls</strong> (jump to ntdll syscall instruction)</td><td>Thread call stack analysis reveals non-ntdll callers</td></tr>
+<tr><td><strong>Unhooking ntdll</strong> (overwrite with clean copy)</td><td>ETW TI operates from kernel, unaffected by user-mode changes</td></tr>
+<tr><td><strong>Using NtMapViewOfSection</strong> instead of Write</td><td>Mapped sections still detected via VAD (Virtual Address Descriptor) analysis</td></tr>
+<tr><td><strong>Callback-based execution</strong></td><td>EDRs now monitor the specific callbacks (e.g., hooking <code>KiUserApcDispatcher</code>)</td></tr>
+</table>
+
+<div class="card green">
+<h4>The Core Insight</h4>
+<p>All classic techniques are detected because they require a <strong>known execution trigger API</strong>. PoolParty sidesteps this entirely by using the Windows Thread Pool as the execution primitive &mdash; the target process&rsquo;s own thread pool worker threads execute the injected code as part of their normal callback dispatch, with no suspicious API call required for the execution step.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. PoolParty&rsquo;s Approach</h2>
+
+<p>Alon Leviev&rsquo;s research (SafeBreach Labs, Black Hat EU 2023) identified a fundamentally different injection surface: the <strong>Windows Thread Pool</strong>. Instead of creating a remote thread or queuing an APC, PoolParty injects work items into the target process&rsquo;s thread pool. The thread pool&rsquo;s own worker threads then execute the callback &mdash; no <code>CreateRemoteThread</code>, no <code>QueueUserAPC</code>, no <code>SetThreadContext</code>.</p>
+
+<div class="diagram">
+<h4>PoolParty vs Classic Injection</h4>
+<div class="flow">
+<div class="flow box">Classic<br><small>Alloc &rarr; Write &rarr; CreateRemoteThread</small></div>
+<div class="flow arrow">vs</div>
+<div class="flow box hl">PoolParty<br><small>Alloc &rarr; Write &rarr; Insert work item into thread pool</small></div>
+</div>
+</div>
+
+<p>The 8 PoolParty variants each target a different thread pool entry point:</p>
+
+<table>
+<tr><th>Variant</th><th>Target Structure</th><th>Mechanism</th></tr>
+<tr><td><strong>1</strong></td><td>Worker Factory StartRoutine</td><td>Overwrite start routine via <code>NtSetInformationWorkerFactory</code></td></tr>
+<tr><td><strong>2</strong></td><td>TP_WORK</td><td>Insert crafted work item into target&rsquo;s thread pool</td></tr>
+<tr><td><strong>3</strong></td><td>TP_WAIT</td><td>Insert wait item into target&rsquo;s thread pool</td></tr>
+<tr><td><strong>4</strong></td><td>TP_IO</td><td>Insert I/O completion item into target&rsquo;s thread pool</td></tr>
+<tr><td><strong>5</strong></td><td>TP_ALPC</td><td>Insert ALPC item into target&rsquo;s thread pool</td></tr>
+<tr><td><strong>6</strong></td><td>TP_JOB</td><td>Insert job item into target&rsquo;s thread pool</td></tr>
+<tr><td><strong>7</strong></td><td>TP_DIRECT</td><td>Insert direct item via <code>NtSetIoCompletionEx</code></td></tr>
+<tr><td><strong>8</strong></td><td>TP_TIMER</td><td>Insert timer item into target&rsquo;s thread pool</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>7. Course Roadmap</h2>
+
+<div class="card">
+<h4>What Comes Next</h4>
+<table>
+<tr><th>Module</th><th>Topic</th><th>Focus</th></tr>
+<tr><td>1 (this)</td><td>Process Injection Landscape</td><td>Why classic techniques fail</td></tr>
+<tr><td>2</td><td>Thread Pool Architecture</td><td>TP_POOL, work items, IOCP fundamentals</td></tr>
+<tr><td>3</td><td>Thread Pool Internals</td><td>TppWorkerThread, callback dispatch, kernel side</td></tr>
+<tr><td>4</td><td>Worker Factory &amp; TP_WORK</td><td>Variants 1&ndash;2: StartRoutine hijack and TP_WORK insertion</td></tr>
+<tr><td>5</td><td>Wait, I/O &amp; ALPC</td><td>Variants 3&ndash;5: TP_WAIT, TP_IO, and TP_ALPC</td></tr>
+<tr><td>6</td><td>Job &amp; Direct Variants</td><td>Variants 6&ndash;7: TP_JOB and TP_DIRECT</td></tr>
+<tr><td>7</td><td>TP_TIMER Insertion</td><td>Variant 8: Timer-based callback injection</td></tr>
+<tr><td>8</td><td>Full Chain &amp; Detection</td><td>EDR results, detection strategies, IOCP monitoring</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What is the three-step pattern that EDRs use to detect classic process injection?</p>
+<div class="quiz-btn" data-choice="A">A) Open, Read, Close</div>
+<div class="quiz-btn" data-choice="B">B) Allocate, Write, Execute</div>
+<div class="quiz-btn" data-choice="C">C) Hook, Patch, Resume</div>
+<div class="quiz-btn" data-choice="D">D) Suspend, Inject, Release</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: Why do direct syscalls no longer fully evade EDR detection?</p>
+<div class="quiz-btn" data-choice="A">A) Syscalls are disabled on modern Windows</div>
+<div class="quiz-btn" data-choice="B">B) EDRs block all syscall instructions</div>
+<div class="quiz-btn" data-choice="C">C) Kernel callbacks and ETW TI still report the operations</div>
+<div class="quiz-btn" data-choice="D">D) Direct syscalls crash the target process</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q3: What makes PoolParty fundamentally different from classic injection techniques?</p>
+<div class="quiz-btn" data-choice="A">A) It uses kernel-mode code for injection</div>
+<div class="quiz-btn" data-choice="B">B) It injects into the kernel thread pool</div>
+<div class="quiz-btn" data-choice="C">C) It does not require memory allocation</div>
+<div class="quiz-btn" data-choice="D">D) It uses the target's own thread pool workers as the execution trigger instead of monitored APIs</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: Thread Pool Architecture &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

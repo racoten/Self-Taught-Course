@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: The Encryption Layer - Shoggoth Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F419;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#a855f7;--accent2:#7c3aed;--gradient:linear-gradient(135deg,#a855f7,#7c3aed)}</style>
+</head>
+<body>
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+<nav>
+<div class="logo">
+<h2>Shoggoth Course</h2>
+<span>Polymorphic Engine Masterclass</span>
+</div>
+<a class="home-link" href="../Shoggoth_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Signatures &amp; Polymorphism</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Polymorphic Engine Concepts</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. asmjit: Runtime Codegen</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Shoggoth Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module5.html"><span>5. The Encryption Layer</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Decoder Stub Generation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Junk Code &amp; Anti-Analysis</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 5: The Encryption Layer</h1>
+<p class="subtitle">Deep dive into Shoggoth&rsquo;s two-stage encryption: RC4 stream cipher and the random block cipher with chained arithmetic and bitwise operations.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how Shoggoth&rsquo;s encryption works at the byte level: the RC4 Key Scheduling Algorithm (KSA) and Pseudo-Random Generation Algorithm (PRGA), the random block cipher&rsquo;s operation selection from the XOR/ADD/SUB/ROL/ROR/NOT/NEG/INC/DEC pool, multi-operation chaining on 8-byte blocks, and how random keys are generated for each run.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Stage 1: RC4 Stream Cipher</h2>
+
+<p>The first encryption stage uses <strong>RC4</strong> (Rivest Cipher 4), a stream cipher that generates a pseudo-random keystream from a variable-length key. RC4 was chosen for Shoggoth for practical reasons: it produces output of exactly the same length as the input (no padding needed), its implementation is compact (important for the decoder stub size), and it provides good byte-level diffusion.</p>
+
+<h3>1.1 Key Scheduling Algorithm (KSA)</h3>
+
+<p>The KSA initializes the internal state array S[256] using the encryption key. Every element of S is swapped based on the key bytes, creating a key-dependent permutation:</p>
+
+<pre><span class="lang-tag">C++</span><code>// RC4 Key Scheduling Algorithm
+void rc4_ksa(uint8_t S[256], const uint8_t* key, size_t keyLen) {
+    // Initialize identity permutation
+    for (int i = 0; i < 256; i++) {
+        S[i] = (uint8_t)i;
+    }
+
+    // Key-dependent permutation
+    uint8_t j = 0;
+    for (int i = 0; i < 256; i++) {
+        j = j + S[i] + key[i % keyLen];  // mod wraps key
+        // Swap S[i] and S[j]
+        uint8_t temp = S[i];
+        S[i] = S[j];
+        S[j] = temp;
+    }
+}</code></pre>
+
+<h3>1.2 Pseudo-Random Generation Algorithm (PRGA)</h3>
+
+<p>After KSA, the PRGA generates one keystream byte per iteration by further permuting S. Each keystream byte is XORed with a plaintext byte to produce ciphertext:</p>
+
+<pre><span class="lang-tag">C++</span><code>// RC4 PRGA - encrypt/decrypt (same operation)
+void rc4_crypt(uint8_t S[256], uint8_t* data, size_t dataLen) {
+    uint8_t i = 0, j = 0;
+    for (size_t n = 0; n < dataLen; n++) {
+        i = i + 1;
+        j = j + S[i];
+        // Swap S[i] and S[j]
+        uint8_t temp = S[i];
+        S[i] = S[j];
+        S[j] = temp;
+        // Generate keystream byte and XOR with data
+        uint8_t k = S[(uint8_t)(S[i] + S[j])];
+        data[n] ^= k;
+    }
+}</code></pre>
+
+<div class="card green">
+<h4>RC4 Is Symmetric</h4>
+<p>RC4 encryption and decryption are identical operations: XOR with the keystream. Running the PRGA with the same key on the ciphertext recovers the plaintext. This is why the decoder stub does not need separate encrypt/decrypt logic for this stage &mdash; the same code works in both directions.</p>
+</div>
+
+<h3>1.3 Random Key Generation</h3>
+
+<p>By default, Shoggoth generates a random RC4 key for each encryption run using the C++ random number generator. The key length and content vary between runs, ensuring each output uses a different keystream. The key is embedded within the decoder stub so it is available at runtime for decryption.</p>
+
+<pre><span class="lang-tag">C++</span><code>// Conceptual: random RC4 key generation
+std::mt19937 rng(seed);  // seeded randomly or with --seed value
+std::uniform_int_distribution&lt;int&gt; byteDist(0, 255);
+std::uniform_int_distribution&lt;int&gt; lenDist(8, 32);  // key length range
+
+size_t keyLen = lenDist(rng);
+std::vector&lt;uint8_t&gt; rc4Key(keyLen);
+for (size_t i = 0; i &lt; keyLen; i++) {
+    rc4Key[i] = (uint8_t)byteDist(rng);
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>2. Stage 2: Random Block Cipher</h2>
+
+<p>The second encryption stage is where Shoggoth&rsquo;s polymorphic nature is most evident in the encryption itself. Rather than using a fixed algorithm, Shoggoth <strong>randomly constructs</strong> a block cipher by selecting operations from a pool and chaining them together.</p>
+
+<h3>2.1 The Operation Pool</h3>
+
+<p>Shoggoth selects from the following operations, each operating on 8-byte (QWORD) blocks:</p>
+
+<table>
+<tr><th>Operation</th><th>Encoding Action</th><th>Decoding (Inverse) Action</th><th>Requires Key?</th></tr>
+<tr><td><code>XOR</code></td><td><code>block ^= key</code></td><td><code>block ^= key</code></td><td>Yes (random 8-byte key)</td></tr>
+<tr><td><code>ADD</code></td><td><code>block += key</code></td><td><code>block -= key</code></td><td>Yes (random 8-byte key)</td></tr>
+<tr><td><code>SUB</code></td><td><code>block -= key</code></td><td><code>block += key</code></td><td>Yes (random 8-byte key)</td></tr>
+<tr><td><code>ROL</code></td><td><code>block = rotl(block, n)</code></td><td><code>block = rotr(block, n)</code></td><td>Yes (rotation count 1&ndash;63)</td></tr>
+<tr><td><code>ROR</code></td><td><code>block = rotr(block, n)</code></td><td><code>block = rotl(block, n)</code></td><td>Yes (rotation count 1&ndash;63)</td></tr>
+<tr><td><code>NOT</code></td><td><code>block = ~block</code></td><td><code>block = ~block</code></td><td>No (self-inverse)</td></tr>
+<tr><td><code>NEG</code></td><td><code>block = -block</code></td><td><code>block = -block</code></td><td>No (self-inverse)</td></tr>
+<tr><td><code>INC</code></td><td><code>block += 1</code></td><td><code>block -= 1</code></td><td>No</td></tr>
+<tr><td><code>DEC</code></td><td><code>block -= 1</code></td><td><code>block += 1</code></td><td>No</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Inverse Operations Are Critical</h4>
+<p>Every encryption operation must have a known inverse that the decoder applies. If encryption applies ADD with key K, the decoder must apply SUB with the same K. If encryption applies ROL by N bits, the decoder must apply ROR by N bits. The operations NOT and NEG are their own inverses. XOR is also self-inverse. Getting the inverse wrong means the payload will not decrypt correctly.</p>
+</div>
+
+<h3>2.2 Chain Construction</h3>
+
+<p>For each encryption run, Shoggoth randomly selects a <strong>chain</strong> of operations. A chain might look like: <code>XOR(k1) &rarr; ADD(k2) &rarr; ROL(n1) &rarr; NOT &rarr; SUB(k3)</code>. Each operation in the chain is applied sequentially to every 8-byte block of the payload:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Conceptual: building a random operation chain
+enum OpType { OP_XOR, OP_ADD, OP_SUB, OP_ROL, OP_ROR, OP_NOT, OP_NEG, OP_INC, OP_DEC };
+
+struct Operation {
+    OpType type;
+    uint64_t key;    // for XOR/ADD/SUB: 8-byte key; for ROL/ROR: rotation count
+};
+
+// Randomly select 3-5 operations for this chain
+std::uniform_int_distribution&lt;int&gt; chainLen(3, 5);
+std::uniform_int_distribution&lt;int&gt; opDist(0, 8);  // 9 operation types
+int numOps = chainLen(rng);
+
+std::vector&lt;Operation&gt; chain;
+for (int i = 0; i &lt; numOps; i++) {
+    Operation op;
+    op.type = (OpType)opDist(rng);
+    if (op.type == OP_XOR || op.type == OP_ADD || op.type == OP_SUB) {
+        op.key = randomU64(rng);      // random 8-byte key
+    } else if (op.type == OP_ROL || op.type == OP_ROR) {
+        op.key = (rng() % 63) + 1;   // rotation: 1-63 bits
+    } else {
+        op.key = 0;  // NOT, NEG, INC, DEC need no key
+    }
+    chain.push_back(op);
+}</code></pre>
+
+<h3>2.3 Applying the Chain</h3>
+
+<p>The encryption processes the payload in 8-byte chunks. For each chunk, the entire operation chain is applied in order. If the payload length is not a multiple of 8, the final partial block is handled by only encrypting the available bytes (or padding is applied).</p>
+
+<pre><span class="lang-tag">C++</span><code>// Conceptual: applying the encryption chain to 8-byte blocks
+void encryptPayload(uint8_t* data, size_t len, const std::vector&lt;Operation&gt;&amp; chain) {
+    size_t numBlocks = len / 8;
+    uint64_t* blocks = (uint64_t*)data;
+
+    for (size_t b = 0; b &lt; numBlocks; b++) {
+        for (const auto&amp; op : chain) {
+            switch (op.type) {
+                case OP_XOR: blocks[b] ^= op.key; break;
+                case OP_ADD: blocks[b] += op.key; break;
+                case OP_SUB: blocks[b] -= op.key; break;
+                case OP_ROL: blocks[b] = _rotl64(blocks[b], (int)op.key); break;
+                case OP_ROR: blocks[b] = _rotr64(blocks[b], (int)op.key); break;
+                case OP_NOT: blocks[b] = ~blocks[b]; break;
+                case OP_NEG: blocks[b] = (uint64_t)(-(int64_t)blocks[b]); break;
+                case OP_INC: blocks[b] += 1; break;
+                case OP_DEC: blocks[b] -= 1; break;
+            }
+        }
+    }
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>3. Decryption: Reversing the Chain</h2>
+
+<p>The decoder stub must reverse the encryption by applying the <strong>inverse operations in reverse order</strong>. If the encryption chain was <code>XOR(k1) &rarr; ADD(k2) &rarr; ROL(n1)</code>, the decryption chain is <code>ROR(n1) &rarr; SUB(k2) &rarr; XOR(k1)</code>:</p>
+
+<div class="diagram">
+<h4>Encryption vs Decryption Chain Order</h4>
+<div class="flow">
+<div class="box">Encrypt: XOR(k1)</div>
+<div class="arrow">&rarr;</div>
+<div class="box">ADD(k2)</div>
+<div class="arrow">&rarr;</div>
+<div class="box">ROL(5)</div>
+</div>
+<div style="text-align:center;color:var(--dim);padding:8px 0;font-size:.85rem">Decryption reverses both order and operations:</div>
+<div class="flow">
+<div class="box g">Decrypt: ROR(5)</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">SUB(k2)</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">XOR(k1)</div>
+</div>
+</div>
+
+<p>This reversal is computed at generation time. Shoggoth builds the encryption chain, applies it to the payload, then constructs the inverse chain and passes it to the asmjit stub generator. The decoder stub encodes these inverse operations as x86-64 instructions operating on QWORD values.</p>
+
+<!-- ============================================================ -->
+<h2>4. Why Two Stages?</h2>
+
+<p>Using two fundamentally different encryption stages provides defense in depth against analysis:</p>
+
+<table>
+<tr><th>Property</th><th>RC4 (Stage 1)</th><th>Block Cipher (Stage 2)</th><th>Combined Effect</th></tr>
+<tr><td><strong>Granularity</strong></td><td>Byte-level stream cipher</td><td>8-byte block operations</td><td>Both byte-level and block-level diffusion</td></tr>
+<tr><td><strong>Key structure</strong></td><td>Variable-length key, 256-byte S-box</td><td>Multiple independent keys, one per operation</td><td>Key space is effectively unbounded</td></tr>
+<tr><td><strong>Decoder complexity</strong></td><td>Full KSA + PRGA loop (more instructions)</td><td>Simple per-block operations (fewer instructions)</td><td>Two different stub patterns to signature</td></tr>
+<tr><td><strong>Polymorphism</strong></td><td>Different key, different registers</td><td>Different operations, different keys, different registers</td><td>Both the algorithm and the implementation vary</td></tr>
+</table>
+
+<div class="card green">
+<h4>Algorithm-Level Polymorphism</h4>
+<p>Stage 2 is uniquely polymorphic at the <em>algorithm level</em>, not just the implementation level. Two encryption runs may use completely different operation chains (e.g., XOR+ADD+ROL vs SUB+NOT+ROR+XOR). This means the decoder stubs perform genuinely different computations, not just the same computation with different registers. This is significantly harder to detect than simple register randomization.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Key Embedding</h2>
+
+<p>All encryption keys (RC4 key bytes, block cipher operation keys, rotation counts) must be available to the decoder at runtime. Shoggoth embeds them directly in the decoder stub as immediate values or as data blocks following the code:</p>
+
+<pre><span class="lang-tag">ASM</span><code>; Example: RC4 key embedded as data block after decoder code
+; The decoder uses RIP-relative addressing to locate it
+decoder_start:
+    lea  r8, [rip + rc4_key_data]   ; r8 = pointer to key
+    mov  r9d, KEY_LENGTH            ; r9 = key length
+    ; ... RC4 KSA and PRGA using r8/r9 ...
+    jmp  decrypted_payload
+
+rc4_key_data:
+    db 0xA3, 0x7F, 0x12, 0xBB, ...  ; random key bytes
+
+; Block cipher keys embedded as immediates:
+    mov  rax, 0xDEADBEEFCAFEBABE    ; XOR key as immediate
+    xor  qword [rbx], rax            ; apply XOR to block</code></pre>
+
+<p>Since the keys change every run, the embedded values are different in every output. Combined with register randomization and junk code, this means the data sections of the decoder are also variable, contributing to the overall polymorphism.</p>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz5">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>Q1: If the encryption chain is <code>ADD(k1) &rarr; XOR(k2) &rarr; NOT</code>, what is the correct decryption chain?</p>
+<label data-opt="0"><input type="radio" name="q1"> ADD(k1) &rarr; XOR(k2) &rarr; NOT</label>
+<label data-opt="1"><input type="radio" name="q1"> SUB(k1) &rarr; XOR(k2) &rarr; NOT</label>
+<label data-opt="2"><input type="radio" name="q1"> NOT &rarr; XOR(k2) &rarr; SUB(k1)</label>
+<label data-opt="3"><input type="radio" name="q1"> NOT &rarr; SUB(k2) &rarr; XOR(k1)</label>
+<div class="explain">Decryption reverses both the order and each operation. NOT is self-inverse, XOR is self-inverse, and ADD&rsquo;s inverse is SUB. Working backwards: first undo the last encryption step (NOT &rarr; NOT), then undo XOR(k2) with XOR(k2), then undo ADD(k1) with SUB(k1). Result: NOT &rarr; XOR(k2) &rarr; SUB(k1).</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>Q2: Why is RC4 convenient for a polymorphic encoder&rsquo;s decoder stub?</p>
+<label data-opt="0"><input type="radio" name="q2"> Encryption and decryption are the same operation (XOR with keystream), so the decoder stub is identical to the encryptor</label>
+<label data-opt="1"><input type="radio" name="q2"> RC4 produces shorter ciphertext than the plaintext, saving space</label>
+<label data-opt="2"><input type="radio" name="q2"> RC4 requires no key, simplifying the decoder</label>
+<label data-opt="3"><input type="radio" name="q2"> RC4 is unbreakable by modern cryptanalysis</label>
+<div class="explain">RC4 is a stream cipher where encryption and decryption are identical: generate the keystream using KSA+PRGA and XOR it with the data. This means the decoder stub uses the exact same algorithm as the encryptor &mdash; no separate &ldquo;inverse&rdquo; implementation is needed, keeping the decoder compact.</div>
+</div>
+
+<div class="quiz-q" data-correct="3">
+<p>Q3: What makes Stage 2 polymorphic at the <em>algorithm level</em> rather than just the implementation level?</p>
+<label data-opt="0"><input type="radio" name="q3"> It uses a stronger encryption algorithm than RC4</label>
+<label data-opt="1"><input type="radio" name="q3"> It generates larger output files</label>
+<label data-opt="2"><input type="radio" name="q3"> It uses more CPU registers than Stage 1</label>
+<label data-opt="3"><input type="radio" name="q3"> The actual sequence of operations changes between runs (e.g., XOR+ADD+ROL vs SUB+NOT+ROR), so each output performs genuinely different computations</label>
+<div class="explain">Implementation-level polymorphism changes <em>how</em> the same computation is expressed (different registers, different instruction encodings). Algorithm-level polymorphism changes <em>what computation</em> is performed. Stage 2 randomly selects which operations to chain, so two outputs may use entirely different mathematical transformations, not just the same transformation expressed differently.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz5')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Prev: Shoggoth Architecture</a>
+<a class="primary" href="module6.html">Next: Decoder Stub Generation &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

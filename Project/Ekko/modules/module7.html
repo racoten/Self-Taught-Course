@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: Stack & Return Address Handling - Ekko Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x23F1;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#8b5cf6;--accent2:#6d28d9;--gradient:linear-gradient(135deg,#8b5cf6,#6d28d9)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Ekko Course</h2>
+<span>Sleep Obfuscation Masterclass</span>
+</div>
+<a class="home-link" href="../Ekko_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Why Sleep Obfuscation Matters</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Timer Queues &amp; Waitable Timers</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. RC4 Encryption in Evasion</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. ROP Gadgets &amp; NtContinue</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Ekko Timer Chain</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Context Manipulation</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module7.html"><span>7. Stack &amp; Return Address Handling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain, Detection &amp; Variants</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: Stack &amp; Return Address Handling</h1>
+<p class="subtitle">Making the call stack look legitimate when execution is anything but normal.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Explore the advanced stack handling challenges in Ekko and similar sleep obfuscation techniques: what happens when NtContinue-invoked functions return, why the call stack matters for detection, how gadget selection affects stack legitimacy, and techniques for constructing clean return paths that fool call stack inspection tools.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Return Address Problem</h2>
+
+<p>When NtContinue sets RIP to a target function (like VirtualProtect), the function executes normally. But at the end, it executes a <code>RET</code> instruction. <code>RET</code> pops 8 bytes from the stack (at [RSP]) and jumps to that address. The question is: <strong>what is at [RSP]?</strong></p>
+
+<pre><span class="lang-tag">Text</span>Normal CALL flow:
+  CALL VirtualProtect  -->  pushes return address, jumps to function
+  ...                       function executes
+  RET                  -->  pops return address, jumps back to caller
+
+NtContinue flow (Ekko):
+  NtContinue sets RIP = VirtualProtect, RSP -= 8
+  ...                       function executes
+  RET                  -->  pops [RSP] ... which is whatever was
+                            at that stack location from the
+                            baseline context capture</pre>
+
+<p>In Ekko's PoC, the value at [RSP] after the <code>Rsp -= 8</code> adjustment is <strong>not controlled</strong>. It is whatever data happened to be at that location on the timer thread's stack when the context was captured. This means the RET from each API call returns to an unpredictable address.</p>
+
+<div class="card warn">
+<h4>Known Flaw in the PoC</h4>
+<p>This is one of the "known flaws" that Cracked5pider mentions in Ekko's README. The uncontrolled return address means that after each API call completes and executes RET, execution jumps to an arbitrary stack location. The technique still works because the timer thread's infrastructure eventually regains control and services the next timer, but the intermediate state is undefined. In a production implant, this could cause instability, crashes, or detection.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Why the Call Stack Matters for Detection</h2>
+
+<p>Modern EDR products and threat hunting tools inspect the <strong>call stack</strong> (backtrace) of threads to identify suspicious behavior. A legitimate thread's call stack shows a clean chain of return addresses, each pointing into known, signed modules:</p>
+
+<pre><span class="lang-tag">Text</span>Legitimate call stack:
+  ntdll!NtWaitForSingleObject+0x14
+  KERNELBASE!WaitForSingleObjectEx+0x8e
+  kernel32!WaitForSingleObject+0x12
+  myapp!main+0x45
+  kernel32!BaseThreadInitThunk+0x14
+  ntdll!RtlUserThreadStart+0x21
+
+Suspicious call stack (Ekko PoC):
+  ntdll!NtWaitForSingleObject+0x14
+  KERNELBASE!WaitForSingleObjectEx+0x8e
+  0x00007FF612340058  &lt;-- unbacked memory (beacon code!)
+  ???                  &lt;-- unknown return address</pre>
+
+<div class="card highlight">
+<h4>Call Stack Unwinding</h4>
+<p>Stack unwinding tools (like <code>Hunt-Sleeping-Beacons</code>) walk the stack by following the chain of saved RBP values or using unwind metadata (.pdata/.xdata sections) in loaded modules. If a return address points into unbacked memory (memory not backed by a file on disk), it is flagged as suspicious. Ekko's PoC does not address this, leaving return addresses that may point into the implant's memory region or other non-standard locations.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Stack Alignment Deep Dive</h2>
+
+<p>The x64 ABI is strict about stack alignment. Let us trace through what happens with different RSP values to understand the <code>Rsp -= 8</code> adjustment in precise detail:</p>
+
+<table>
+<tr><th>Scenario</th><th>RSP Value</th><th>Alignment</th><th>Result</th></tr>
+<tr><td>Captured RSP</td><td><code>0x...F000</code></td><td>16-byte aligned</td><td>Matches "before CALL" state</td></tr>
+<tr><td>After Rsp -= 8</td><td><code>0x...EFF8</code></td><td>16-byte aligned - 8</td><td>Matches "after CALL pushed return addr"</td></tr>
+<tr><td>Function entry</td><td><code>0x...EFF8</code></td><td>16-byte aligned - 8</td><td>Correct alignment for function</td></tr>
+<tr><td>After function's SUB RSP, XX</td><td><code>0x...EFn0</code></td><td>16-byte aligned</td><td>Local variables properly aligned</td></tr>
+</table>
+
+<p>If Ekko did <strong>not</strong> subtract 8, the function would see RSP at 16-byte alignment (the "before CALL" state), which is wrong. Functions like VirtualProtect contain <code>MOVAPS</code> instructions that operate on 16-byte-aligned stack addresses computed relative to RSP. If RSP is off by 8 bytes, these instructions generate an alignment fault (exception 0x11, STATUS_DATATYPE_MISALIGNMENT), crashing the timer thread.</p>
+
+<pre><span class="lang-tag">Text</span>Without Rsp -= 8:
+  RSP = 0x...F000  (16-aligned)
+  Function does: SUB RSP, 0x28
+  RSP = 0x...EFD8  (NOT 16-aligned!)
+  MOVAPS [RSP+0x20], XMM6  -->  writes to 0x...EFF8 (ok)
+  MOVAPS [RSP+0x10], XMM7  -->  writes to 0x...EFE8 (ok)
+  MOVAPS [RSP], XMM8       -->  writes to 0x...EFD8 (misaligned!)
+  CRASH: #GP or #AC exception
+
+With Rsp -= 8:
+  RSP = 0x...EFF8  (16-aligned - 8)
+  Function does: SUB RSP, 0x28
+  RSP = 0x...EFD0  (16-aligned!)
+  All MOVAPS operations target properly aligned addresses.
+  No crash.</pre>
+
+<!-- ============================================================ -->
+<h2>4. Gadget Selection for Clean Returns</h2>
+
+<p>To fix the return address problem, an improved implementation would place a controlled value at [RSP] before each NtContinue context switch. This value would be a "gadget" &mdash; an address in a legitimate DLL that performs a useful action (or does nothing) and returns cleanly:</p>
+
+<pre><span class="lang-tag">C</span>// Improved approach: control the return address
+// Find a "RET" gadget in ntdll (just returns immediately)
+PVOID retGadget = FindGadget(hNtdll, "\xC3", 1);
+
+// Write the gadget address as the return address
+// by placing it at the RSP location in the context
+*(DWORD64*)(RopProtRW.Rsp) = (DWORD64)retGadget;
+
+// Now when VirtualProtect does RET, it jumps to the
+// gadget (a single RET instruction in ntdll), which
+// returns cleanly into the timer infrastructure</pre>
+
+<div class="card green">
+<h4>Common Gadget Types</h4>
+<ul>
+<li><strong><code>RET</code> gadget (0xC3)</strong> &mdash; Simply returns, passing control to the next address on the stack. Useful for "doing nothing" in a clean way.</li>
+<li><strong><code>ADD RSP, XX; RET</code></strong> &mdash; Cleans up stack space and returns. Useful for skipping over shadow space or extra arguments.</li>
+<li><strong><code>JMP [RBX]</code> / <code>JMP RAX</code></strong> &mdash; Indirect jump gadgets for trampolining through a register-controlled target. Used by FOLIAGE/AceLdr for more complex chains.</li>
+<li><strong><code>POP RCX; RET</code></strong> &mdash; Loads a value from the stack into a register and returns. Classical ROP building block.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Constructing a Legitimate-Looking Stack</h2>
+
+<p>For maximal stealth, the call stack during the sleep window should look like a normal thread that happens to be waiting. Detection tools like Hunt-Sleeping-Beacons look for threads in a wait state whose call stack contains unbacked memory addresses. The ideal sleeping call stack would be:</p>
+
+<pre><span class="lang-tag">Text</span>Ideal stealth call stack during sleep:
+  ntdll!NtWaitForSingleObject+0x14     (the sleep wait)
+  ntdll!RtlRegisterWait+0x??           (timer infrastructure)
+  ntdll!TppTimerExpiration+0x??        (thread pool timer)
+  ntdll!TppWorkerThread+0x??           (thread pool worker)
+  kernel32!BaseThreadInitThunk+0x14    (thread start)
+  ntdll!RtlUserThreadStart+0x21       (NT thread entry)
+
+Every address is in a signed, disk-backed system DLL.
+No addresses in unbacked/private memory.</pre>
+
+<p>Achieving this requires not just controlling the return address but also constructing fake stack frames with proper frame pointers (RBP chain) and unwind metadata that matches the fabricated call stack. This is significantly more complex than Ekko's PoC and is a feature of more advanced implementations.</p>
+
+<!-- ============================================================ -->
+<h2>6. Stack Spoofing Techniques</h2>
+
+<p>Several techniques have been developed to create legitimate-looking call stacks:</p>
+
+<table>
+<tr><th>Technique</th><th>Mechanism</th><th>Complexity</th><th>Used By</th></tr>
+<tr><td><strong>Frame Pointer Overwrite</strong></td><td>Set RBP to create a chain of frames pointing into legitimate DLLs</td><td>Medium</td><td>Various custom implants</td></tr>
+<tr><td><strong>Synthetic Stack Frames</strong></td><td>Write complete fake frames on the stack with return addresses, saved RBP, and shadow space matching real function prologues</td><td>High</td><td>Advanced sleep obfuscation</td></tr>
+<tr><td><strong>Thread Stack Spoofing</strong></td><td>Replace the entire thread stack with a fabricated one before sleeping, restore after wakeup</td><td>Very High</td><td>Research implementations</td></tr>
+<tr><td><strong>Unwind Metadata Alignment</strong></td><td>Ensure return addresses align with .pdata entries so stack unwinders produce valid results</td><td>High</td><td>Advanced tooling</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Ekko's PoC Does Not Spoof Stacks</h4>
+<p>Ekko's published proof-of-concept does not implement any stack spoofing. The call stack during sleep will contain addresses from the timer thread's real execution path, which likely includes one or more addresses pointing into the implant's (now encrypted) memory region. This is a detectable artifact. A production implementation should add stack frame construction to hide these addresses.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. The Shadow Space Requirement</h2>
+
+<p>Beyond the return address, Windows API functions expect 32 bytes of "shadow space" above the return address. In a normal call, the caller allocates this. In Ekko's NtContinue-driven approach, this space must exist on the stack:</p>
+
+<pre><span class="lang-tag">Text</span>Expected stack layout at function entry:
+
+High addresses
+  ...
+  [RSP + 0x20]  shadow[3] (R9 home)
+  [RSP + 0x18]  shadow[2] (R8 home)
+  [RSP + 0x10]  shadow[1] (RDX home)
+  [RSP + 0x08]  shadow[0] (RCX home)
+  [RSP + 0x00]  return address
+Low addresses (RSP points here)</pre>
+
+<p>Since the captured RSP points into the timer thread's existing stack, the 32 bytes above the adjusted RSP already contain <strong>whatever data was on the timer thread's stack</strong>. The shadow space is used by callees to optionally store parameters, and many functions write to it. This means Ekko's timer callbacks may corrupt 32 bytes of the timer thread's stack above each adjusted RSP. In the PoC, this does not cause problems because the timer thread's own state is managed by the kernel and reset between callback invocations.</p>
+
+<!-- ============================================================ -->
+<h2>8. Improving Ekko: Controlled Stack Layout</h2>
+
+<p>An improved version of Ekko could allocate a dedicated stack buffer and control its contents precisely:</p>
+
+<pre><span class="lang-tag">C</span>// Improved approach: dedicated stack for NtContinue operations
+BYTE FakeStack[0x1000] = { 0 };  // 4KB stack buffer
+DWORD64 stackTop = (DWORD64)&FakeStack[0x1000];
+
+// Align to 16 bytes
+stackTop &= ~0xF;
+
+// For each context, use the controlled stack:
+// Place return address at stackTop - 8
+*(DWORD64*)(stackTop - 8) = (DWORD64)retGadget;
+
+// Set RSP to stackTop - 8 (simulating post-CALL state)
+RopProtRW.Rsp = stackTop - 8;
+
+// Shadow space at stackTop, stackTop+8, stackTop+16, stackTop+24
+// is all zeroed - safe for callee to write
+
+// Now:
+// 1. RSP is properly aligned (16-byte aligned - 8)
+// 2. Return address is a controlled gadget in ntdll
+// 3. Shadow space is clean and writable
+// 4. No corruption of the timer thread's real stack</pre>
+
+<div class="card green">
+<h4>Benefits of a Controlled Stack</h4>
+<ul>
+<li><strong>Predictable return</strong> &mdash; Each function returns to a known gadget</li>
+<li><strong>No stack corruption</strong> &mdash; Shadow space writes go to a dedicated buffer</li>
+<li><strong>Stackable frames</strong> &mdash; Multiple frames can be constructed for a legitimate-looking backtrace</li>
+<li><strong>Debugger-safe</strong> &mdash; Stack unwinding produces controlled results</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. Call Stack Inspection Tools</h2>
+
+<p>Understanding what defenders look for helps build better stack handling. Key tools that inspect sleeping thread stacks:</p>
+
+<table>
+<tr><th>Tool</th><th>Technique</th><th>What It Flags</th></tr>
+<tr><td><strong>Hunt-Sleeping-Beacons</strong></td><td>Enumerates threads in wait state, walks call stack via <code>StackWalk64</code></td><td>Return addresses in unbacked (private) memory, anomalous frame chains</td></tr>
+<tr><td><strong>BeaconEye</strong></td><td>Scans process memory for Cobalt Strike configuration structures</td><td>CS config patterns (not stack-specific but complementary)</td></tr>
+<tr><td><strong>Patriot</strong></td><td>Inspects sleeping thread contexts via <code>NtGetContextThread</code></td><td>RIP pointing into unbacked memory while thread is sleeping</td></tr>
+<tr><td><strong>Moneta</strong></td><td>Scans for anomalous memory regions with unusual permissions</td><td>RWX pages, unbacked executable memory (even if encrypted)</td></tr>
+</table>
+
+<p>Against these tools, Ekko's PoC is vulnerable to all four detection methods because it does not spoof the thread context (Patriot), does not clean the call stack (Hunt-Sleeping-Beacons), leaves the PE headers encrypted but still in a distinctive pattern (BeaconEye pre-sleep), and uses a known timer-queue pattern (Moneta). Advanced implementations must address each of these vectors.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: What is the primary stack-related flaw in Ekko's proof-of-concept?</p>
+<div class="quiz-btn" data-choice="A">A) The stack is too small for the CONTEXT structures</div>
+<div class="quiz-btn" data-choice="B">B) RSP is not aligned to 16 bytes</div>
+<div class="quiz-btn" data-choice="C">C) The return address at [RSP] is not controlled, so RET after each API call jumps to an unpredictable location</div>
+<div class="quiz-btn" data-choice="D">D) The shadow space is not allocated</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q2: Why do detection tools inspect the call stack of sleeping threads?</p>
+<div class="quiz-btn" data-choice="A">A) To check if the thread is using too much CPU</div>
+<div class="quiz-btn" data-choice="B">B) Return addresses pointing into unbacked/private memory indicate the thread was executing injected code before sleeping</div>
+<div class="quiz-btn" data-choice="C">C) To verify that all DLLs are properly loaded</div>
+<div class="quiz-btn" data-choice="D">D) To measure the thread's stack depth for performance analysis</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What would happen if Ekko did NOT perform the Rsp -= 8 adjustment?</p>
+<div class="quiz-btn" data-choice="A">A) Target functions would see misaligned RSP, causing MOVAPS instructions to fault with an alignment exception</div>
+<div class="quiz-btn" data-choice="B">B) The encryption key would be overwritten</div>
+<div class="quiz-btn" data-choice="C">C) NtContinue would refuse to load the context</div>
+<div class="quiz-btn" data-choice="D">D) The event would be signaled prematurely</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Prev: Context Manipulation</a>
+<a class="primary" href="module8.html">Next: Full Chain, Detection &amp; Variants &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

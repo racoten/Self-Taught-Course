@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: asmjit - Runtime Code Generation - Shoggoth Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F419;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#a855f7;--accent2:#7c3aed;--gradient:linear-gradient(135deg,#a855f7,#7c3aed)}</style>
+</head>
+<body>
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+<nav>
+<div class="logo">
+<h2>Shoggoth Course</h2>
+<span>Polymorphic Engine Masterclass</span>
+</div>
+<a class="home-link" href="../Shoggoth_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Signatures &amp; Polymorphism</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Polymorphic Engine Concepts</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module3.html"><span>3. asmjit: Runtime Codegen</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Shoggoth Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Encryption Layer</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Decoder Stub Generation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Junk Code &amp; Anti-Analysis</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: asmjit &mdash; Runtime Code Generation</h1>
+<p class="subtitle">Understanding the JIT assembly library that powers Shoggoth&rsquo;s dynamic instruction emission and why it is ideal for polymorphic stub generation.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Learn what asmjit is, how its core classes (<code>CodeHolder</code>, <code>x86::Assembler</code>, <code>JitRuntime</code>) work, understand the difference between the Assembler and Builder/Compiler interfaces, and see how Shoggoth leverages asmjit to emit randomized x86-64 machine code at runtime.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. What Is asmjit?</h2>
+
+<p><strong>asmjit</strong> is an open-source C++ library for runtime machine code generation. It allows programs to construct x86 and x86-64 assembly instructions programmatically and emit them as executable machine code in memory. Unlike a traditional assembler (NASM, MASM) that runs at build time, asmjit operates at <em>runtime</em> &mdash; your C++ program decides what instructions to generate while it is executing.</p>
+
+<p>This runtime generation capability is exactly what a polymorphic engine needs. Instead of selecting from pre-built decoder stubs (which would be signaturable), the engine uses asmjit to construct a fresh decoder every time, choosing different registers, instructions, and layouts based on random decisions.</p>
+
+<table>
+<tr><th>Feature</th><th>Traditional Assembler (NASM)</th><th>asmjit</th></tr>
+<tr><td><strong>When code is generated</strong></td><td>Build time (compile/link)</td><td>Runtime (during program execution)</td></tr>
+<tr><td><strong>Output</strong></td><td>Object files (.o/.obj)</td><td>Machine code in memory or byte buffer</td></tr>
+<tr><td><strong>Dynamic decisions</strong></td><td>No (macro-level only)</td><td>Yes (any C++ logic can drive instruction selection)</td></tr>
+<tr><td><strong>Register selection</strong></td><td>Hardcoded by the programmer</td><td>Can be parameterized &mdash; choose registers at runtime</td></tr>
+<tr><td><strong>Use case</strong></td><td>Static code, OS kernels, drivers</td><td>JIT compilers, dynamic code gen, polymorphic engines</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. Core Architecture</h2>
+
+<p>asmjit is organized around a few key classes that form a pipeline: you create a code container, attach an emitter to it, emit instructions, and then either extract the raw bytes or make the code executable.</p>
+
+<div class="diagram">
+<h4>asmjit Code Generation Pipeline</h4>
+<div class="flow">
+<div class="box hl">CodeHolder<br><small>Code container &amp; sections</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">x86::Assembler<br><small>Instruction emitter</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Machine Code<br><small>Raw bytes in CodeHolder</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">JitRuntime / Export<br><small>Execute or extract bytes</small></div>
+</div>
+</div>
+
+<h3>2.1 CodeHolder</h3>
+
+<p>The <code>CodeHolder</code> is the central container that stores generated machine code, manages code sections (like .text), handles relocations, and tracks labels. You initialize it with an <code>Environment</code> that specifies the target architecture:</p>
+
+<pre><span class="lang-tag">C++</span><code>#include &lt;asmjit/asmjit.h&gt;
+using namespace asmjit;
+
+// Create a CodeHolder targeting x86-64
+CodeHolder code;
+Environment env = Environment::host(); // or explicitly: Arch::kX64
+code.init(env);</code></pre>
+
+<h3>2.2 x86::Assembler</h3>
+
+<p>The <code>x86::Assembler</code> is the low-level instruction emitter. You attach it to a CodeHolder and call methods corresponding to x86 instructions. Each method call appends the encoded instruction bytes to the CodeHolder&rsquo;s internal buffer:</p>
+
+<pre><span class="lang-tag">C++</span><code>x86::Assembler a(&amp;code);
+
+// Emit instructions - these become raw machine code bytes
+a.push(x86::rbp);
+a.mov(x86::rbp, x86::rsp);
+a.xor_(x86::rax, x86::rax);     // Note: xor_ because 'xor' is a C++ keyword
+a.mov(x86::rax, 42);
+a.pop(x86::rbp);
+a.ret();</code></pre>
+
+<div class="card green">
+<h4>Note on Naming Conventions</h4>
+<p>asmjit appends an underscore to instruction names that conflict with C++ keywords: <code>xor_</code>, <code>and_</code>, <code>or_</code>, <code>not_</code>. The rest use their standard mnemonics: <code>mov</code>, <code>add</code>, <code>sub</code>, <code>push</code>, <code>pop</code>, <code>rol</code>, <code>ror</code>, <code>inc</code>, <code>dec</code>, <code>jmp</code>, <code>je</code>, <code>jne</code>, etc.</p>
+</div>
+
+<h3>2.3 JitRuntime</h3>
+
+<p><code>JitRuntime</code> allocates executable memory (using <code>VirtualAlloc</code> on Windows with <code>PAGE_EXECUTE_READWRITE</code> permissions), copies the generated machine code into it, and returns a function pointer you can call directly:</p>
+
+<pre><span class="lang-tag">C++</span><code>JitRuntime rt;
+
+// Allocate executable memory and copy code
+typedef int (*Func)();
+Func fn;
+Error err = rt.add(&amp;fn, &amp;code);
+if (err) { /* handle error */ }
+
+// Call the generated code!
+int result = fn();  // result == 42
+
+// Release when done
+rt.release(fn);</code></pre>
+
+<!-- ============================================================ -->
+<h2>3. Labels and Branches</h2>
+
+<p>Loops and conditional branches are essential for decoder stubs. asmjit provides a <code>Label</code> type for managing branch targets. Labels can be <strong>forward-referenced</strong> &mdash; you can jump to a label before binding it, and asmjit will patch the offset when the label is bound later:</p>
+
+<pre><span class="lang-tag">C++</span><code>x86::Assembler a(&amp;code);
+Label loopStart = a.newLabel();
+Label loopEnd = a.newLabel();
+
+// Setup: rcx = count, rsi = data pointer
+a.mov(x86::rcx, payloadSize);
+a.lea(x86::rsi, x86::ptr(x86::rip));  // RIP-relative for PIC
+
+a.bind(loopStart);              // loopStart:
+a.xor_(x86::byte_ptr(x86::rsi), 0xAB);  // XOR decrypt byte
+a.inc(x86::rsi);                // advance pointer
+a.dec(x86::rcx);                // decrement counter
+a.jnz(loopStart);              // loop if not zero
+
+a.bind(loopEnd);                // loopEnd:
+// ... transfer control to decrypted payload</code></pre>
+
+<p>This label mechanism is critical for Shoggoth. The decoder stub contains a decryption loop whose body varies between generations, but the loop structure (branch back to start, exit when done) is managed through labels. asmjit computes the correct relative offsets automatically, even as junk instructions change the loop body size.</p>
+
+<!-- ============================================================ -->
+<h2>4. Register Parameterization</h2>
+
+<p>One of the most powerful features for polymorphic generation is that asmjit register operands are <em>values</em>, not syntax. You can store registers in variables and use them interchangeably:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Register pool for randomization
+x86::Gp availableRegs[] = {
+    x86::rax, x86::rbx, x86::rcx, x86::rdx,
+    x86::rsi, x86::rdi, x86::r8,  x86::r9,
+    x86::r10, x86::r11, x86::r12, x86::r13,
+    x86::r14, x86::r15
+    // RSP excluded - must not be clobbered
+};
+
+// Randomly select registers for decoder roles
+std::shuffle(availableRegs, availableRegs + 14, rng);
+
+x86::Gp regPointer = availableRegs[0];  // data pointer
+x86::Gp regCounter = availableRegs[1];  // loop counter
+x86::Gp regKey     = availableRegs[2];  // encryption key
+x86::Gp regTemp    = availableRegs[3];  // scratch register
+
+// Use them in code generation - different registers each time!
+a.mov(regCounter, payloadSize);
+a.lea(regPointer, x86::ptr(x86::rip, offset));
+a.mov(regKey, encryptionKey);
+
+Label loop = a.newLabel();
+a.bind(loop);
+a.xor_(x86::byte_ptr(regPointer), regKey);
+a.inc(regPointer);
+a.dec(regCounter);
+a.jnz(loop);</code></pre>
+
+<p>The same logical decoder &mdash; load counter, load pointer, decrypt byte, advance, loop &mdash; produces completely different machine code depending on which registers are selected. The opcodes differ because x86-64 encodes the register number into the ModR/M byte and REX prefix.</p>
+
+<!-- ============================================================ -->
+<h2>5. Memory Operands</h2>
+
+<p>asmjit provides a rich memory operand system through <code>x86::Mem</code> and the <code>x86::ptr</code> / <code>x86::byte_ptr</code> / <code>x86::qword_ptr</code> helpers. These are essential for building decoder stubs that read and write the encrypted payload:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Direct memory access with various addressing modes
+a.mov(x86::rax, x86::qword_ptr(x86::rsi));           // [rsi]
+a.xor_(x86::byte_ptr(x86::rsi, x86::rcx), 0x41);     // [rsi + rcx]
+a.mov(x86::rax, x86::qword_ptr(x86::rbx, x86::rcx, 3, 16)); // [rbx + rcx*8 + 16]
+
+// RIP-relative addressing (essential for PIC)
+a.lea(x86::rax, x86::ptr(x86::rip, someLabel));       // lea rax, [rip + offset]</code></pre>
+
+<div class="card warn">
+<h4>Position-Independence Requirement</h4>
+<p>Since Shoggoth&rsquo;s output must be position-independent (executable from any memory address), all data references in the decoder stub use <strong>RIP-relative addressing</strong>. The <code>x86::ptr(x86::rip, label)</code> pattern generates <code>lea reg, [rip + offset]</code> instructions that work regardless of where the code is loaded. Absolute addresses are never used.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Extracting Raw Machine Code</h2>
+
+<p>While <code>JitRuntime</code> is useful for testing (making generated code directly executable), Shoggoth needs to extract the raw bytes to write to an output file. The <code>CodeHolder</code> provides access to the generated code through its section buffer:</p>
+
+<pre><span class="lang-tag">C++</span><code>// After all instructions are emitted...
+CodeHolder code;
+code.init(Environment::host());
+x86::Assembler a(&amp;code);
+
+// ... emit instructions ...
+
+// Access the generated code section
+Section* textSection = code.textSection();
+size_t codeSize = textSection-&gt;bufferSize();
+const uint8_t* codeBytes = textSection-&gt;buffer();
+
+// Copy to output buffer
+std::vector&lt;uint8_t&gt; output(codeBytes, codeBytes + codeSize);
+
+// Now 'output' contains the raw machine code bytes
+// that can be written to a file or prepended to an encrypted payload</code></pre>
+
+<p>This is how Shoggoth captures the decoder stub: it generates the instructions using <code>x86::Assembler</code>, extracts the raw bytes from the <code>CodeHolder</code>, and concatenates them with the encrypted payload to form the final PIC output.</p>
+
+<!-- ============================================================ -->
+<h2>7. Why asmjit Is Perfect for Polymorphic Engines</h2>
+
+<p>Combining all these features, asmjit provides the ideal infrastructure for a polymorphic engine:</p>
+
+<table>
+<tr><th>Requirement</th><th>How asmjit Satisfies It</th></tr>
+<tr><td><strong>Dynamic instruction selection</strong></td><td>C++ control flow chooses which instructions to emit at runtime</td></tr>
+<tr><td><strong>Register randomization</strong></td><td>Registers are values, not syntax &mdash; store in variables, shuffle, and use</td></tr>
+<tr><td><strong>Correct encoding</strong></td><td>Automatic REX prefix, ModR/M, SIB, displacement handling</td></tr>
+<tr><td><strong>Forward references</strong></td><td>Labels resolve automatically, even with variable-size junk code between branches</td></tr>
+<tr><td><strong>PIC generation</strong></td><td>RIP-relative addressing support for position-independent output</td></tr>
+<tr><td><strong>Raw byte extraction</strong></td><td>CodeHolder section buffer provides direct access to machine code bytes</td></tr>
+<tr><td><strong>No runtime dependency</strong></td><td>Generated code is self-contained &mdash; no asmjit library needed at execution time</td></tr>
+</table>
+
+<div class="card green">
+<h4>Build-Time vs Run-Time</h4>
+<p>asmjit is a <strong>build-time dependency</strong> of Shoggoth (the encryptor tool), not a runtime dependency of the output. The final encrypted PIC blob contains only raw machine code &mdash; no C++ library code, no asmjit headers, no runtime. This is a critical distinction: asmjit helps <em>generate</em> the decoder stub, but the generated stub is pure standalone x86-64 machine code.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz3">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>Q1: What is the role of <code>CodeHolder</code> in asmjit?</p>
+<label data-opt="0"><input type="radio" name="q1"> It executes the generated machine code directly</label>
+<label data-opt="1"><input type="radio" name="q1"> It compiles C++ source code into assembly</label>
+<label data-opt="2"><input type="radio" name="q1"> It is the container that stores generated machine code, manages sections, handles relocations, and tracks labels</label>
+<label data-opt="3"><input type="radio" name="q1"> It allocates RWX memory for JIT execution</label>
+<div class="explain"><code>CodeHolder</code> is the central container in asmjit. It holds the generated machine code bytes in sections (like .text), manages label-to-offset mappings for branch resolution, and handles relocations. <code>JitRuntime</code> (not CodeHolder) handles executable memory allocation.</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>Q2: Why is register parameterization valuable for a polymorphic engine?</p>
+<label data-opt="0"><input type="radio" name="q2"> It makes the generated code run faster by using optimal registers</label>
+<label data-opt="1"><input type="radio" name="q2"> It allows the engine to randomly select which registers the decoder uses, producing different machine code bytes each time</label>
+<label data-opt="2"><input type="radio" name="q2"> It prevents register exhaustion on systems with fewer GPRs</label>
+<label data-opt="3"><input type="radio" name="q2"> It enables the decoder to use SIMD registers for encryption</label>
+<div class="explain">In asmjit, registers are runtime values that can be stored in variables. By randomly selecting which registers serve as the loop counter, data pointer, key register, etc., the same logical decoder produces different opcodes (since register numbers are encoded into the instruction bytes). This eliminates the register-specific byte patterns that signatures rely on.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>Q3: Why does Shoggoth&rsquo;s decoder stub use RIP-relative addressing?</p>
+<label data-opt="0"><input type="radio" name="q3"> Because the output must be position-independent &mdash; executable from any memory address without fixups</label>
+<label data-opt="1"><input type="radio" name="q3"> Because RIP-relative addressing is faster than absolute addressing</label>
+<label data-opt="2"><input type="radio" name="q3"> Because Windows requires all code to use RIP-relative addressing</label>
+<label data-opt="3"><input type="radio" name="q3"> Because asmjit only supports RIP-relative addressing</label>
+<div class="explain">Shoggoth generates position-independent code (PIC) that can be loaded and executed at any memory address. RIP-relative addressing (<code>lea reg, [rip + offset]</code>) calculates data addresses relative to the current instruction pointer, so the code works regardless of its absolute position in memory. Absolute addresses would break if the code is loaded at a different base address.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz3')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Prev: Polymorphic Concepts</a>
+<a class="primary" href="module4.html">Next: Shoggoth Architecture &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

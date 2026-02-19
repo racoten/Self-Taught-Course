@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Full Chain, Detection & Variants - Ekko Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x23F1;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#8b5cf6;--accent2:#6d28d9;--gradient:linear-gradient(135deg,#8b5cf6,#6d28d9)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Ekko Course</h2>
+<span>Sleep Obfuscation Masterclass</span>
+</div>
+<a class="home-link" href="../Ekko_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Why Sleep Obfuscation Matters</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Timer Queues &amp; Waitable Timers</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. RC4 Encryption in Evasion</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. ROP Gadgets &amp; NtContinue</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Ekko Timer Chain</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Context Manipulation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Stack &amp; Return Address Handling</span><span class="diff d3">d3</span></a>
+<a class="mod-link active" href="module8.html"><span>8. Full Chain, Detection &amp; Variants</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Full Chain, Detection &amp; Variants</h1>
+<p class="subtitle">Comparing sleep obfuscation approaches, detection engineering, and the evolution of the technique.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Compare Ekko against other sleep obfuscation implementations (Cronos, DeathSleep, FOLIAGE), understand the specific detection vectors for each approach, review defensive tools (BeaconEye, Hunt-Sleeping-Beacons, Patriot), and analyze how the technique has evolved since its initial disclosure.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Sleep Obfuscation Family</h2>
+
+<p>Multiple open-source implementations of sleep obfuscation have been released, each taking a different approach to the core problem of encrypting an implant's memory while it sleeps. Understanding their differences illuminates the design tradeoffs in this technique.</p>
+
+<table>
+<tr><th>Tool</th><th>Author</th><th>Scheduling Mechanism</th><th>Execution Primitive</th><th>Encryption</th><th>Heap Encryption</th><th>Context Spoofing</th></tr>
+<tr><td><strong>Ekko</strong></td><td>Cracked5pider</td><td>CreateTimerQueueTimer</td><td>NtContinue</td><td>RC4 (SystemFunction032)</td><td>No</td><td>No</td></tr>
+<tr><td><strong>Cronos</strong></td><td>Idov31</td><td>Waitable Timers (CreateWaitableTimer)</td><td>NtContinue</td><td>RC4 (SystemFunction032)</td><td>No</td><td>No</td></tr>
+<tr><td><strong>DeathSleep</strong></td><td>janoglezcampos</td><td>Thread termination &amp; recreation</td><td>Thread kill + recreate with saved context</td><td>RC4 (SystemFunction032)</td><td>No</td><td>Yes (no thread to inspect)</td></tr>
+<tr><td><strong>FOLIAGE</strong></td><td>SecIdiot</td><td>NtQueueApcThread</td><td>APC dispatch</td><td>RC4 (SystemFunction032)</td><td>Yes</td><td>Yes (Patriot evasion)</td></tr>
+<tr><td><strong>KrakenMask</strong></td><td>Cracked5pider</td><td>Various (evolved Ekko)</td><td>NtContinue</td><td>RC4</td><td>Yes</td><td>Yes</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. Ekko vs. Cronos</h2>
+
+<p><strong>Cronos</strong> by Idov31 uses the same NtContinue-based execution model as Ekko but replaces <code>CreateTimerQueueTimer</code> with <strong>waitable timers</strong> (<code>CreateWaitableTimer</code> / <code>SetWaitableTimer</code>). Cronos creates waitable timer objects for scheduling the sleep obfuscation operations:</p>
+
+<pre><span class="lang-tag">C</span>// Cronos approach (simplified):
+HANDLE hTimer = CreateWaitableTimer(
+    NULL,    // Security attributes
+    TRUE,    // Manual reset
+    NULL     // Timer name
+);
+
+// Set the timer to fire after a delay
+LARGE_INTEGER dueTime;
+dueTime.QuadPart = -10000LL * delay_ms;  // Negative = relative
+SetWaitableTimer(hTimer, &dueTime, 0, NtContinue, &CtxProtRW, FALSE);</pre>
+
+<div class="card">
+<h4>Key Differences from Ekko</h4>
+<ul>
+<li><strong>Waitable timers vs. timer queue</strong> &mdash; Cronos uses waitable timer objects (<code>CreateWaitableTimer</code>) rather than Ekko's timer queue API. Waitable timers deliver their callbacks as APCs to the thread that set the timer, providing a different execution model.</li>
+<li><strong>Timer sequencing</strong> &mdash; Cronos uses waitable timers with APC completion routines, which requires the thread to be in an alertable wait state for the callbacks to fire.</li>
+<li><strong>API surface</strong> &mdash; <code>CreateWaitableTimer</code> / <code>SetWaitableTimer</code> is a different API entry point, which may have different monitoring coverage by EDR products compared to <code>CreateTimerQueueTimer</code>.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Ekko vs. DeathSleep</h2>
+
+<p><strong>DeathSleep</strong> by janoglezcampos takes a fundamentally different approach. Instead of using callbacks and NtContinue, it <strong>terminates the main thread entirely</strong> and recreates it after the sleep period. The key insight is that a dead thread leaves no context to inspect &mdash; there is no sleeping thread for detection tools to analyze:</p>
+
+<pre><span class="lang-tag">C</span>// DeathSleep approach (conceptual):
+// 1. Main thread saves its own context and state
+// 2. Main thread creates a helper thread with the saved state
+// 3. Main thread terminates itself (the thread is killed, not suspended)
+// 4. Helper thread:
+//    a. VirtualProtect(main_image, RW)
+//    b. Encrypt(main_image)
+//    c. Sleeps for the requested duration
+//    d. Decrypt(main_image)
+//    e. VirtualProtect(main_image, RX)
+//    f. Creates a new thread with the saved context
+//       (effectively recreating the original thread)
+// 5. New thread resumes execution where the old one left off</pre>
+
+<div class="card highlight">
+<h4>Advantages of DeathSleep</h4>
+<ul>
+<li><strong>No sleeping thread to inspect</strong> &mdash; Because the main thread is terminated (not suspended), tools like Patriot that inspect sleeping thread contexts find nothing &mdash; the thread simply does not exist during the sleep window</li>
+<li><strong>Clean separation</strong> &mdash; The helper thread's code is distinct from the main thread's, avoiding the self-encryption paradox naturally</li>
+<li><strong>No timer artifacts</strong> &mdash; No timer queue or waitable timer objects to detect</li>
+</ul>
+</div>
+
+<div class="card warn">
+<h4>Disadvantages of DeathSleep</h4>
+<ul>
+<li><strong>Thread creation/destruction churn</strong> &mdash; Repeatedly terminating and recreating threads is a detectable artifact. Thread lifecycle monitoring can flag this unusual pattern.</li>
+<li><strong>Helper thread's stack</strong> &mdash; The helper thread's call stack will show calls to VirtualProtect and thread creation APIs in sequence &mdash; a very unusual pattern.</li>
+<li><strong>Complexity</strong> &mdash; Managing thread termination and recreation, including preserving the full execution state across the thread boundary, adds significant complexity and potential for subtle bugs.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Ekko vs. FOLIAGE</h2>
+
+<p><strong>FOLIAGE</strong> by SecIdiot is the most comprehensive implementation, using a chain of <strong>Asynchronous Procedure Calls (APCs)</strong> queued to the current thread:</p>
+
+<pre><span class="lang-tag">C</span>// FOLIAGE approach (conceptual):
+// 1. Generate fresh RC4 key
+// 2. Encrypt the private heap (separately from the code)
+// 3. Queue 10 APCs to the current thread:
+//    APC 0: Wait (setup timer)
+//    APC 1: NtGetContextThread (capture)
+//    APC 2: NtSetContextThread (spoof RIP to ntdll)
+//    APC 3: NtProtectVirtualMemory (RX -> RW)
+//    APC 4: SystemFunction032 (encrypt code)
+//    APC 5: NtWaitForSingleObject (actual sleep)
+//    APC 6: SystemFunction032 (decrypt code)
+//    APC 7: NtProtectVirtualMemory (RW -> RX)
+//    APC 8: NtSetContextThread (restore context)
+//    APC 9: NtSetEvent (signal done)
+// 4. Enter alertable wait (NtWaitForSingleObject with alertable=TRUE)
+// 5. APCs drain in FIFO order during the alertable wait</pre>
+
+<div class="card green">
+<h4>FOLIAGE Advantages Over Ekko</h4>
+<ul>
+<li><strong>Heap encryption</strong> &mdash; FOLIAGE encrypts the private heap separately, hiding strings, configuration data, and runtime state that live outside the code region</li>
+<li><strong>Context spoofing</strong> &mdash; APCs 1-2 and 8 capture, spoof, and restore the thread context, defeating Patriot</li>
+<li><strong>APC ordering guarantee</strong> &mdash; APCs drain in strict FIFO order, eliminating timer sequencing concerns</li>
+<li><strong>Single thread</strong> &mdash; Everything happens on the current thread using APCs, no timer threads or helper threads</li>
+<li><strong>Fresh key per cycle</strong> &mdash; Uses RtlGenRandom for each sleep, not a hardcoded key</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Detection Vectors for Ekko</h2>
+
+<p>Understanding how defenders detect Ekko helps both offensive operators improve their implementations and defensive engineers build better detections:</p>
+
+<table>
+<tr><th>Detection Vector</th><th>Tool / Technique</th><th>What It Catches</th><th>Ekko PoC Vulnerable?</th></tr>
+<tr><td><strong>Timer Queue Callback = NtContinue</strong></td><td>API monitoring, ETW</td><td>CreateTimerQueueTimer with NtContinue as callback is extremely unusual</td><td>Yes</td></tr>
+<tr><td><strong>Sleeping Thread Stack Walk</strong></td><td>Hunt-Sleeping-Beacons</td><td>Return addresses in unbacked memory on sleeping threads</td><td>Yes</td></tr>
+<tr><td><strong>Thread Context Inspection</strong></td><td>Patriot</td><td>RIP pointing to unbacked memory on sleeping threads</td><td>Yes (no context spoofing)</td></tr>
+<tr><td><strong>Memory Permission Transitions</strong></td><td>ETW, VirtualProtect monitoring</td><td>RX/RWX -> RW -> RWX cycles on the same region</td><td>Yes</td></tr>
+<tr><td><strong>SystemFunction032 on Image Region</strong></td><td>API monitoring</td><td>RC4 encrypting the process's own image is abnormal</td><td>Yes</td></tr>
+<tr><td><strong>Beacon Config Scanning</strong></td><td>BeaconEye</td><td>CS config patterns visible before first sleep</td><td>Yes (pre-sleep)</td></tr>
+<tr><td><strong>Timer Queue Object Enumeration</strong></td><td>Kernel analysis</td><td>Timer queues with multiple one-shot timers pointing to NtContinue</td><td>Yes</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>6. Hunt-Sleeping-Beacons Deep Dive</h2>
+
+<p><strong>Hunt-Sleeping-Beacons</strong> by thefLink is the primary open-source tool targeting sleep obfuscation techniques. It operates by:</p>
+
+<div class="card">
+<h4>Detection Algorithm</h4>
+<ol>
+<li><strong>Enumerate all threads</strong> in all processes</li>
+<li><strong>Identify sleeping threads</strong> &mdash; threads in a wait state (WaitForSingleObject, NtWaitForSingleObject, NtDelayExecution, etc.)</li>
+<li><strong>Walk the call stack</strong> using <code>StackWalk64</code> for each sleeping thread</li>
+<li><strong>Check each return address</strong> against loaded modules &mdash; if a return address falls outside any known module's address range, it is in "unbacked" memory</li>
+<li><strong>Flag suspicious threads</strong> &mdash; sleeping threads with unbacked return addresses are reported</li>
+</ol>
+</div>
+
+<p>Against Ekko's PoC, Hunt-Sleeping-Beacons will detect the sleeping thread because:</p>
+<ul>
+<li>The main thread is waiting on an event (detected as sleeping)</li>
+<li>The main thread's call stack contains return addresses from EkkoObf, which is in the implant's (unbacked) image region</li>
+<li>Even though the code is encrypted during sleep, the return addresses on the main thread's stack still point there</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>7. Evasion Improvements Over the PoC</h2>
+
+<p>A production-grade implementation based on Ekko's technique would need these enhancements:</p>
+
+<div class="card highlight">
+<h4>Required Improvements for Production Use</h4>
+<table>
+<tr><th>Improvement</th><th>Purpose</th><th>Difficulty</th></tr>
+<tr><td>Random key per cycle</td><td>Prevent key reuse across sleep cycles</td><td>Easy</td></tr>
+<tr><td>Context spoofing</td><td>Set RIP to ntdll during sleep to defeat Patriot</td><td>Medium</td></tr>
+<tr><td>Heap encryption</td><td>Hide strings, config, and runtime data</td><td>Medium</td></tr>
+<tr><td>Stack frame spoofing</td><td>Construct legitimate-looking call stack during sleep</td><td>Hard</td></tr>
+<tr><td>Controlled return addresses</td><td>Place gadget addresses at [RSP] for clean returns</td><td>Medium</td></tr>
+<tr><td>Restore to RX not RWX</td><td>Avoid suspicious RWX memory after wakeup</td><td>Easy</td></tr>
+<tr><td>Syscall-based API calls</td><td>Bypass userland API hooks on VirtualProtect etc.</td><td>Medium</td></tr>
+<tr><td>Timer queue cleanup</td><td>Ensure no timer artifacts remain after the cycle</td><td>Easy</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. The Evolution: KrakenMask</h2>
+
+<p><strong>KrakenMask</strong>, also by Cracked5pider, represents the evolution of Ekko into a more complete sleep masking solution. While the full implementation details differ, KrakenMask addresses many of the PoC's shortcomings:</p>
+
+<div class="card green">
+<h4>KrakenMask Improvements</h4>
+<ul>
+<li><strong>Heap encryption</strong> &mdash; Encrypts the implant's private heap in addition to the code region</li>
+<li><strong>Context spoofing</strong> &mdash; Manipulates the sleeping thread's context to appear legitimate</li>
+<li><strong>Multiple scheduling backends</strong> &mdash; Supports timer queues, thread pool timers, and other mechanisms</li>
+<li><strong>Improved stack handling</strong> &mdash; Better control over return addresses and stack frame construction</li>
+<li><strong>Integration-ready</strong> &mdash; Designed as a library component for C2 frameworks rather than a standalone PoC</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. The Complete Ekko Chain &mdash; Final Review</h2>
+
+<p>Let us review the complete Ekko execution from start to finish with all the knowledge from this course:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Complete Ekko Execution Flow</h4>
+<div class="flow">
+<div class="flow box">1. Setup<br><small>CreateEvent, CreateTimerQueue<br>Resolve NtContinue, SysFunc032<br>Get ImageBase, ImageSize</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">2. Capture<br><small>Timer 0: RtlCaptureContext<br>on timer thread<br>Wait 50ms</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">3. Build Contexts<br><small>Clone baseline x6<br>Set RIP, args, RSP-=8<br>for each operation</small></div>
+</div>
+<div class="flow" style="margin-top:12px;">
+<div class="flow box">4. Queue Timers<br><small>6 timers, 100ms apart<br>Callback=NtContinue<br>Param=CONTEXT*</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">5. Wait<br><small>Main thread blocks on<br>WaitForSingleObject<br>(hEvent, INFINITE)</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">6. Timer Chain<br><small>RW &rarr; Encrypt &rarr; Sleep<br>Decrypt &rarr; RWX &rarr; Signal</small></div>
+</div>
+<div class="flow" style="margin-top:12px;">
+<div class="flow box">7. Resume<br><small>SetEvent wakes main<br>thread, EkkoObf returns<br>Beacon resumes normally</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">8. Cleanup<br><small>DeleteTimerQueue<br>Free resources</small></div>
+</div>
+</div>
+
+<p>During step 6, between the encrypt and decrypt operations, the implant's entire image is RC4-encrypted in non-executable memory. This is the stealth window. A memory scanner running during this period sees only encrypted data in RW pages &mdash; no code signatures, no configuration patterns, no executable memory.</p>
+
+<!-- ============================================================ -->
+<h2>10. Defensive Recommendations</h2>
+
+<p>For blue team engineers and detection developers, these are the highest-value detection opportunities:</p>
+
+<div class="card warn">
+<h4>Detection Engineering Priorities</h4>
+<ul>
+<li><strong>Monitor CreateTimerQueueTimer</strong> for callbacks pointing to NtContinue. This is the most distinctive indicator &mdash; no legitimate software uses NtContinue as a timer callback.</li>
+<li><strong>ETW for VirtualProtect transitions</strong> &mdash; Track memory regions that cycle between RX/RWX and RW. Repeated permission toggling on the same region is abnormal.</li>
+<li><strong>Sleeping thread stack walks</strong> &mdash; Periodically enumerate sleeping threads and check return addresses against loaded module ranges. Unbacked addresses are suspicious.</li>
+<li><strong>Thread context auditing</strong> &mdash; For threads in wait states, check if RIP points into unbacked memory. This catches implementations without context spoofing.</li>
+<li><strong>Timer queue object inspection</strong> &mdash; Enumerate timer queue objects in the kernel and check for queues containing multiple timers with NtContinue callbacks.</li>
+<li><strong>Behavioral correlation</strong> &mdash; The pattern of CreateTimerQueue + multiple CreateTimerQueueTimer(NtContinue) + WaitForSingleObject(event) is distinctive even without individual API monitoring.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>11. Summary: Sleep Obfuscation Landscape</h2>
+
+<div class="card green">
+<h4>Key Takeaways from This Course</h4>
+<ul>
+<li><strong>The problem</strong>: Implants spend 99%+ of their time sleeping with code exposed in memory</li>
+<li><strong>The solution</strong>: Encrypt the image and change permissions before sleep, reverse after wakeup</li>
+<li><strong>The paradox</strong>: Cannot encrypt yourself while executing from the encrypted region</li>
+<li><strong>Ekko's approach</strong>: Timer queue callbacks with NtContinue to execute system DLL functions that operate on the implant's memory from outside</li>
+<li><strong>The chain</strong>: VirtualProtect(RW) &rarr; RC4 Encrypt &rarr; Sleep &rarr; RC4 Decrypt &rarr; VirtualProtect(RWX) &rarr; Signal Event</li>
+<li><strong>Known flaws</strong>: Uncontrolled return addresses, no stack spoofing, no context spoofing, no heap encryption, hardcoded key</li>
+<li><strong>Detection</strong>: NtContinue as timer callback, unbacked stack addresses, VirtualProtect permission cycling</li>
+<li><strong>Evolution</strong>: FOLIAGE (APC-based, heap + context spoofing), DeathSleep (thread termination + recreation), KrakenMask (production Ekko)</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="D">
+<p>Q1: Which sleep obfuscation tool encrypts the private heap in addition to the code region?</p>
+<div class="quiz-btn" data-choice="A">A) Ekko</div>
+<div class="quiz-btn" data-choice="B">B) Cronos</div>
+<div class="quiz-btn" data-choice="C">C) DeathSleep</div>
+<div class="quiz-btn" data-choice="D">D) FOLIAGE</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q2: What is the most distinctive detection indicator for Ekko?</p>
+<div class="quiz-btn" data-choice="A">A) The process loading advapi32.dll</div>
+<div class="quiz-btn" data-choice="B">B) CreateTimerQueueTimer with NtContinue as the callback function</div>
+<div class="quiz-btn" data-choice="C">C) A thread calling WaitForSingleObject</div>
+<div class="quiz-btn" data-choice="D">D) The process having a .text section</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: How does DeathSleep differ fundamentally from Ekko and Cronos?</p>
+<div class="quiz-btn" data-choice="A">A) It uses AES instead of RC4</div>
+<div class="quiz-btn" data-choice="B">B) It does not encrypt the image during sleep</div>
+<div class="quiz-btn" data-choice="C">C) It terminates the main thread during sleep and recreates it afterward, rather than using NtContinue callbacks</div>
+<div class="quiz-btn" data-choice="D">D) It works only on 32-bit systems</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Prev: Stack &amp; Return Address Handling</a>
+<a class="primary" href="../Ekko_index.html">Back to Course Home &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

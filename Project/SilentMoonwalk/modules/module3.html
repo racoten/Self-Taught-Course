@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: ROP Fundamentals - SilentMoonwalk Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F319;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#06b6d4;--accent2:#0891b2;--gradient:linear-gradient(135deg,#06b6d4,#0891b2)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>SilentMoonwalk Course</h2><span>Call Stack Spoofing Masterclass</span></div>
+  <a class="home-link" href="../SilentMoonwalk_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Stack Telemetry</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> x64 Stack Frames</a>
+  <a class="mod-link active" href="module3.html"><span class="diff d1">3</span> ROP Fundamentals</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> Desync Theory</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Gadget Discovery</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Synthetic Frames</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Full Spoof Engine</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Detection &amp; Counters</a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: ROP Fundamentals</h1>
+<p class="subtitle">Turning legitimate code fragments into an arbitrary execution engine.</p>
+
+<div class="card highlight">
+<h4>Why ROP Matters for Stack Spoofing</h4>
+<p>SilentMoonwalk doesn't just fake a call stack &mdash; it uses <strong>Return-Oriented Programming (ROP)</strong> to actually execute a chain of legitimate code fragments that set up the spoofed stack, make the target API call, and then restore everything. Understanding ROP is essential because the entire spoofing mechanism is driven by a carefully constructed ROP chain.</p>
+</div>
+
+<h2>What Is Return-Oriented Programming?</h2>
+<p>ROP is a code-reuse technique. Instead of injecting new executable code, you chain together small sequences of instructions that already exist in loaded modules (DLLs). Each sequence ends with a <code>RET</code> instruction, which pops the next address from the stack and jumps to it. By controlling the stack, you control execution flow.</p>
+
+<p>Each of these small instruction sequences is called a <strong>gadget</strong>:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; Example gadgets found in ntdll.dll:
+
+; Gadget 1: Pop a value into RCX, then return
+pop rcx
+ret
+
+; Gadget 2: Pop a value into RDX, then return
+pop rdx
+ret
+
+; Gadget 3: Move a value and return
+mov rax, rcx
+ret
+
+; Gadget 4: Add to RSP and return (stack pivot)
+add rsp, 0x28
+ret</code></pre>
+
+<h2>How a ROP Chain Works</h2>
+<p>A ROP chain is a sequence of addresses laid out on the stack. When the first gadget's <code>RET</code> executes, it pops the next address from the stack and jumps there. That gadget executes, hits its own <code>RET</code>, pops the next address, and so on:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">ROP Chain Execution Flow</h4>
+<div class="flow" style="flex-direction:column;gap:2px;align-items:stretch;max-width:550px;margin:0 auto">
+<div class="box" style="width:100%;font-size:.8rem">RSP &darr; (stack grows down, execution goes up)</div>
+<div class="box hl" style="width:100%">[RSP+0x00] &rarr; addr of "pop rcx; ret" &larr; 1st gadget</div>
+<div class="box y" style="width:100%">[RSP+0x08] &rarr; 0x0000000000001000 &larr; value popped into RCX</div>
+<div class="box hl" style="width:100%">[RSP+0x10] &rarr; addr of "pop rdx; ret" &larr; 2nd gadget</div>
+<div class="box y" style="width:100%">[RSP+0x18] &rarr; 0x0000000000003000 &larr; value popped into RDX</div>
+<div class="box hl" style="width:100%">[RSP+0x20] &rarr; addr of "pop r8; ret" &larr; 3rd gadget</div>
+<div class="box y" style="width:100%">[RSP+0x28] &rarr; 0x0000000000000040 &larr; value popped into R8</div>
+<div class="box g" style="width:100%">[RSP+0x30] &rarr; addr of target function &larr; final call</div>
+</div>
+</div>
+
+<pre><code><span class="lang-tag">C++</span>// Conceptual: building a ROP chain to call VirtualProtect(addr, size, RWX, &old)
+// Each entry on the stack is either a gadget address or a data value
+
+struct ROPChain {
+    PVOID gadget_pop_rcx;    // pop rcx; ret  --> loads 1st arg
+    PVOID arg1_address;      // RCX = address to protect
+    PVOID gadget_pop_rdx;    // pop rdx; ret  --> loads 2nd arg
+    PVOID arg2_size;         // RDX = size
+    PVOID gadget_pop_r8;     // pop r8; ret   --> loads 3rd arg
+    PVOID arg3_protect;      // R8  = PAGE_EXECUTE_READWRITE
+    PVOID gadget_pop_r9;     // pop r9; ret   --> loads 4th arg
+    PVOID arg4_old_protect;  // R9  = pointer to receive old protection
+    PVOID target_function;   // Address of VirtualProtect
+};</code></pre>
+
+<h2>Gadget Types Relevant to SilentMoonwalk</h2>
+<p>SilentMoonwalk uses specific gadget patterns, not for traditional exploit purposes, but to manipulate the stack during the spoofing process:</p>
+
+<table>
+<tr><th>Gadget Pattern</th><th>Purpose in SilentMoonwalk</th><th>Example Source</th></tr>
+<tr><td><code>JMP [RBX]</code></td><td>Indirect jump to function pointer stored in RBX. Used as a trampoline to call the target API through a register rather than a CALL instruction (avoiding pushing a return address).</td><td>ntdll.dll, kernel32.dll</td></tr>
+<tr><td><code>ADD RSP, N; RET</code></td><td>Stack pivot gadget. Adjusts RSP to skip over synthetic frame data and land on the next gadget address. Critical for frame size matching.</td><td>ntdll.dll</td></tr>
+<tr><td><code>POP RCX; RET</code></td><td>Loads a value from the stack into RCX (first argument register). Used to set up function parameters.</td><td>ntdll.dll, kernel32.dll</td></tr>
+<tr><td><code>POP RDX; RET</code></td><td>Loads second argument. Used in conjunction with POP RCX for multi-parameter calls.</td><td>ntdll.dll</td></tr>
+<tr><td><code>RET</code> (bare)</td><td>Simple stack pivot. Pops next address and jumps. Used to chain between frames.</td><td>Anywhere</td></tr>
+</table>
+
+<div class="card warn">
+<h4>ROP in Evasion vs ROP in Exploitation</h4>
+<p>In traditional exploitation, ROP chains are used to bypass DEP (Data Execution Prevention) by chaining existing code to achieve arbitrary code execution. In SilentMoonwalk, the purpose is fundamentally different: ROP is used to <strong>manipulate the stack layout</strong> so that when an EDR or the OS unwinds the stack, it sees a clean, legitimate-looking call chain. The ROP chain is the mechanism that bridges the gap between the real execution state and the fake stack the EDR sees.</p>
+</div>
+
+<h2>The JMP [RBX] Trampoline</h2>
+<p>One of the most important gadgets for stack spoofing is <code>JMP [RBX]</code> (or <code>JMP QWORD PTR [RBX]</code>). This instruction jumps to the address stored at the memory location pointed to by RBX. Why is this crucial?</p>
+
+<p>Normally, when you <code>CALL</code> a function, the CPU pushes a return address onto the stack. But we're trying to control exactly what's on the stack. A <code>JMP</code> does NOT push anything &mdash; it transfers control without modifying the stack. By using JMP [RBX], SilentMoonwalk can:</p>
+
+<ol>
+<li>Set up RBX to point to the target function's address</li>
+<li>Pre-arrange the stack with the desired fake return address</li>
+<li>Execute JMP [RBX] to transfer to the target API</li>
+<li>When the API executes RET, it returns to the fake return address</li>
+</ol>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; How JMP [RBX] works as a trampoline:
+
+; Setup (done by earlier gadgets in the chain):
+;   RBX = pointer to memory containing address of NtWaitForSingleObject
+;   RSP points to a carefully crafted fake return address
+
+; The gadget:
+jmp qword ptr [rbx]    ; Jumps to NtWaitForSingleObject
+                        ; Does NOT push return address
+                        ; Stack remains exactly as we arranged it
+
+; When NtWaitForSingleObject hits RET:
+;   It pops our fake return address from the stack
+;   Execution continues where WE decided, not where CALL would have set up</code></pre>
+
+<h2>Stack Pivoting</h2>
+<p>A <strong>stack pivot</strong> is a technique to redirect RSP to a different memory region, effectively changing where the CPU looks for the next return address. In SilentMoonwalk, <code>ADD RSP, N; RET</code> gadgets serve as controlled stack pivots that advance RSP by a precise amount to skip over frame data:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; Stack pivot with ADD RSP, 0x38; RET
+; Before: RSP = 0x7FF000100
+;   [RSP+0x00] = (frame data - skipped)
+;   [RSP+0x08] = (frame data - skipped)
+;   [RSP+0x10] = (frame data - skipped)
+;   [RSP+0x18] = (frame data - skipped)
+;   [RSP+0x20] = (frame data - skipped)
+;   [RSP+0x28] = (frame data - skipped)
+;   [RSP+0x30] = (frame data - skipped)
+;   [RSP+0x38] = address_of_next_gadget  <-- RET pops this
+
+add rsp, 0x38   ; RSP becomes 0x7FF000138
+ret              ; Pops [0x7FF000138] = address_of_next_gadget
+                 ; RSP becomes 0x7FF000140</code></pre>
+
+<div class="card">
+<h4>The Key Insight</h4>
+<p>The <code>ADD RSP, N</code> value in a gadget determines the <strong>frame size</strong> that this gadget implicitly creates. When RtlVirtualUnwind processes the function containing this gadget, the function's UNWIND_INFO will describe an allocation of size N (via UWOP_ALLOC_SMALL or UWOP_ALLOC_LARGE). SilentMoonwalk finds gadgets where the ADD RSP value matches the function's declared unwind allocation, ensuring the stack walk produces consistent results.</p>
+</div>
+
+<h2>ROP Chain Construction for Evasion</h2>
+<p>Building a ROP chain for stack spoofing differs from exploitation in several ways:</p>
+
+<table>
+<tr><th>Aspect</th><th>Exploit ROP</th><th>SilentMoonwalk ROP</th></tr>
+<tr><td>Goal</td><td>Achieve code execution</td><td>Create a fake call stack</td></tr>
+<tr><td>Gadget source</td><td>Any module</td><td>Prefer ntdll/kernel32 (always loaded, trusted)</td></tr>
+<tr><td>Gadget constraints</td><td>Minimal side effects</td><td>Must have valid RUNTIME_FUNCTION + matching unwind codes</td></tr>
+<tr><td>Stack layout</td><td>Just needs to chain correctly</td><td>Must be a valid unwinding chain for RtlVirtualUnwind</td></tr>
+<tr><td>Execution after</td><td>Payload runs</td><td>Execution returns cleanly to real code</td></tr>
+</table>
+
+<h2>Chaining It All Together</h2>
+<p>In SilentMoonwalk's approach, the ROP chain serves as the <strong>execution backbone</strong>. The spoofed stack is simultaneously a valid ROP chain (for actual execution) and a valid unwind chain (for EDR inspection). This dual nature is the core innovation &mdash; the same stack layout serves two masters:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Dual Purpose Stack</h4>
+<div style="display:flex;gap:30px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:#06b6d4;font-weight:700;margin-bottom:10px">Execution View (ROP)</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box hl" style="width:100%">Gadget 1: Setup registers</div>
+<div class="box hl" style="width:100%">Gadget 2: Stack pivot (ADD RSP)</div>
+<div class="box hl" style="width:100%">Gadget 3: JMP [RBX] trampoline</div>
+<div class="box g" style="width:100%">Target API executes</div>
+<div class="box hl" style="width:100%">Cleanup gadgets</div>
+</div>
+</div>
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:#0891b2;font-weight:700;margin-bottom:10px">Unwind View (EDR)</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box g" style="width:100%">Frame: ntdll!SomeFunction+0x1A</div>
+<div class="box g" style="width:100%">Frame: kernel32!AnotherFunc+0x33</div>
+<div class="box g" style="width:100%">Frame: kernelbase!SomethingElse+0x7</div>
+<div class="box g" style="width:100%">Frame: kernel32!BaseThreadInitThunk</div>
+<div class="box g" style="width:100%">Frame: ntdll!RtlUserThreadStart</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="quiz" id="quiz3">
+<h4>Pop Quiz: ROP Fundamentals</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: Why does SilentMoonwalk use JMP [RBX] instead of CALL to invoke the target API?</p>
+<label data-opt="0"><input type="radio" name="q3_0"> Because CALL is slower than JMP</label>
+<label data-opt="1"><input type="radio" name="q3_0"> Because JMP does not push a return address, allowing full control over what's on the stack</label>
+<label data-opt="2"><input type="radio" name="q3_0"> Because JMP can bypass DEP</label>
+<label data-opt="3"><input type="radio" name="q3_0"> Because CALL requires kernel privileges</label>
+<div class="explain">CALL pushes the return address onto the stack automatically. JMP transfers control without modifying RSP, so SilentMoonwalk can pre-place a fake return address on the stack before jumping to the API. When the API executes RET, it returns to the controlled fake address.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: What is a "stack pivot" in ROP terminology?</p>
+<label data-opt="0"><input type="radio" name="q3_1"> Encrypting the stack contents</label>
+<label data-opt="1"><input type="radio" name="q3_1"> Changing the stack's memory protections</label>
+<label data-opt="2"><input type="radio" name="q3_1"> Redirecting RSP to a different memory location using gadgets like ADD RSP, N; RET</label>
+<label data-opt="3"><input type="radio" name="q3_1"> Creating a second stack for a new thread</label>
+<div class="explain">A stack pivot changes where RSP points, effectively moving the "stack" to attacker-controlled memory. In SilentMoonwalk, ADD RSP, N gadgets advance RSP by precise amounts to traverse the synthetic frame layout.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: How does SilentMoonwalk's use of ROP differ from traditional exploit ROP?</p>
+<label data-opt="0"><input type="radio" name="q3_2"> The gadgets must reside in functions with valid RUNTIME_FUNCTION entries and matching unwind codes</label>
+<label data-opt="1"><input type="radio" name="q3_2"> SilentMoonwalk only uses gadgets from shellcode</label>
+<label data-opt="2"><input type="radio" name="q3_2"> SilentMoonwalk ROP chains are shorter</label>
+<label data-opt="3"><input type="radio" name="q3_2"> There is no difference</label>
+<div class="explain">In exploit ROP, gadgets just need to chain correctly for execution. In SilentMoonwalk, each gadget must be inside a function with valid unwind metadata so that when RtlVirtualUnwind processes the stack, the frame sizes and register saves match the actual stack layout. The chain must be valid for both execution AND unwinding.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz3')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Previous: x64 Stack Frames</a>
+<a class="primary" href="module4.html">Next: Desynchronization Theory &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

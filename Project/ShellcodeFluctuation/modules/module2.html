@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: XOR Encryption for Memory Evasion - ShellcodeFluctuation Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A0;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#10b981;--accent2:#059669;--gradient:linear-gradient(135deg,#10b981,#059669)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>ShellcodeFluctuation</h2><span>Memory Fluctuation Masterclass</span></div>
+  <a class="home-link" href="../ShellcodeFluctuation_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span>1. Memory Scanning Threat Model</span><span class="diff d1">d1</span></a>
+  <a class="mod-link active" href="module2.html"><span>2. XOR Encryption for Memory</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module3.html"><span>3. VirtualProtect &amp; Pages</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module4.html"><span>4. Sleep Function Hooking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module5.html"><span>5. The Fluctuation Algorithm</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module6.html"><span>6. Shellcode Region Tracking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module7.html"><span>7. Thread Stack Spoofing</span><span class="diff d3">d3</span></a>
+  <a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: XOR Encryption for Memory Evasion</h1>
+<p class="subtitle">Why XOR is the ideal cipher for in-place memory toggling, how XOR32 works, and its performance characteristics.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the properties of XOR that make it uniquely suited for in-memory encryption, the difference between single-byte and multi-byte XOR keys, how ShellcodeFluctuation generates and applies a 32-bit XOR key, and why performance matters for stealth.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Why XOR for In-Memory Encryption?</h2>
+
+<p>ShellcodeFluctuation uses XOR encryption rather than AES, RC4, or other ciphers. This is not laziness &mdash; XOR has specific properties that make it ideal for this use case:</p>
+
+<table>
+<tr><th>Property</th><th>Why It Matters</th></tr>
+<tr><td><strong>Self-inverse (involution)</strong></td><td><code>A ^ K ^ K = A</code> &mdash; the same function encrypts and decrypts. No need for separate encrypt/decrypt code paths</td></tr>
+<tr><td><strong>In-place operation</strong></td><td>XOR modifies data directly without requiring a separate output buffer. No additional memory allocation needed</td></tr>
+<tr><td><strong>No state</strong></td><td>Each byte is processed independently &mdash; no initialization vectors, no cipher state, no block chaining</td></tr>
+<tr><td><strong>Single instruction</strong></td><td>XOR compiles to a single x86 instruction per operation. Minimal CPU overhead</td></tr>
+<tr><td><strong>No imports</strong></td><td>No cryptographic library dependencies. The encryption engine is a few lines of code</td></tr>
+<tr><td><strong>Zero expansion</strong></td><td>Output is exactly the same size as input &mdash; no padding, no headers, no ciphertext expansion</td></tr>
+</table>
+
+<div class="card green">
+<h4>The Key Insight: Toggling</h4>
+<p>ShellcodeFluctuation needs to rapidly toggle memory between encrypted and decrypted states hundreds of times during an implant's lifetime. XOR's self-inverse property means the exact same code path handles both directions &mdash; calling the function once encrypts, calling it again decrypts. This simplicity reduces the code surface area and eliminates an entire class of bugs.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Single-Byte vs Multi-Byte XOR</h2>
+
+<p>The key length dramatically affects the security of XOR encryption. Understanding this distinction explains why ShellcodeFluctuation uses a 32-bit (4-byte) key.</p>
+
+<h3>2.1 Single-Byte XOR (8-bit key)</h3>
+
+<pre><code class="language-cpp">// Single-byte XOR - trivially breakable
+void xor_single(BYTE* data, SIZE_T len, BYTE key) {
+    for (SIZE_T i = 0; i < len; i++) {
+        data[i] ^= key;
+    }
+}
+// Only 256 possible keys - brute force in microseconds
+// BeaconEye does exactly this to find Beacon configs</code></pre>
+
+<p>With only 256 possible keys, any tool can try all of them in microseconds. This is how BeaconEye defeats Cobalt Strike's built-in configuration obfuscation &mdash; it simply tries every single-byte XOR key against each memory region and checks if the result matches a Beacon config signature.</p>
+
+<h3>2.2 Multi-Byte XOR (XOR32)</h3>
+
+<pre><code class="language-cpp">// ShellcodeFluctuation uses XOR32 - a 4-byte key
+// This is the actual approach from the repository
+void xor32(BYTE* data, SIZE_T len, DWORD key) {
+    // Process 4 bytes at a time for performance
+    DWORD* ptr = (DWORD*)data;
+    SIZE_T dwordCount = len / sizeof(DWORD);
+
+    for (SIZE_T i = 0; i < dwordCount; i++) {
+        ptr[i] ^= key;
+    }
+
+    // Handle remaining bytes (0-3 trailing bytes)
+    BYTE* keyBytes = (BYTE*)&key;
+    SIZE_T remainder = len % sizeof(DWORD);
+    BYTE* tail = data + (dwordCount * sizeof(DWORD));
+
+    for (SIZE_T i = 0; i < remainder; i++) {
+        tail[i] ^= keyBytes[i];
+    }
+}</code></pre>
+
+<table>
+<tr><th>Key Size</th><th>Keyspace</th><th>Brute Force Time</th><th>Sufficient for Sleep Evasion?</th></tr>
+<tr><td>1 byte (8-bit)</td><td>256</td><td>Microseconds</td><td>No &mdash; BeaconEye breaks it instantly</td></tr>
+<tr><td>4 bytes (32-bit)</td><td>~4.3 billion</td><td>Minutes to hours</td><td>Yes &mdash; impractical for real-time scanning</td></tr>
+<tr><td>8 bytes (64-bit)</td><td>~1.8 x 10^19</td><td>Years</td><td>Overkill for this use case</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Security Context</h4>
+<p>XOR32 is not cryptographically secure &mdash; it is vulnerable to known-plaintext attacks if an attacker knows what part of the shellcode looks like (e.g., a known MZ header at offset 0). However, for the threat model of ShellcodeFluctuation, it does not need to be. The goal is to defeat <strong>automated real-time scanners</strong>, not withstand dedicated cryptanalysis. The shellcode is only encrypted during the sleep window, and the key changes each time the implant loads.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Key Generation</h2>
+
+<p>ShellcodeFluctuation generates the XOR key at runtime, ensuring each execution uses a different key. This prevents static signatures based on known ciphertext:</p>
+
+<pre><code class="language-cpp">// Key generation approach
+DWORD generateXorKey() {
+    DWORD key = 0;
+
+    // Use a random seed - could be from:
+    // - GetTickCount()
+    // - __rdtsc() (CPU timestamp counter)
+    // - RtlRandomEx()
+    // - CryptGenRandom() / BCryptGenRandom()
+
+    // Simple but effective for this threat model:
+    srand(GetTickCount());
+    key = (rand() << 16) | rand();
+
+    // Avoid degenerate keys
+    if (key == 0) key = 0xDEADBEEF;
+
+    return key;
+}</code></pre>
+
+<div class="card">
+<h4>Why Not a Hardcoded Key?</h4>
+<p>A hardcoded key would mean every execution produces the same ciphertext. A defender who reverses the tool once could compute the expected encrypted bytes and write a YARA rule matching them. Runtime-generated keys ensure the ciphertext is different every time, defeating static signature approaches.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. The XOR Toggle Pattern</h2>
+
+<p>Because XOR is self-inverse, ShellcodeFluctuation uses the exact same function for both encryption and decryption. Here is the conceptual toggle pattern:</p>
+
+<pre><code class="language-cpp">// The toggle pattern - same call encrypts OR decrypts
+DWORD xorKey = generateXorKey();  // Generated once at startup
+
+// Before sleep: encrypt (plaintext -> ciphertext)
+xor32(shellcodeBase, shellcodeSize, xorKey);
+// shellcode region now contains encrypted gibberish
+
+// ... sleep occurs ...
+
+// After wake: decrypt (ciphertext -> plaintext)
+xor32(shellcodeBase, shellcodeSize, xorKey);
+// shellcode region now contains executable code again</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">XOR Toggle Cycle</h4>
+<div class="flow">
+<div class="flow box">Plaintext<br><small>Executable shellcode</small></div>
+<div class="flow arrow">XOR(key) &rarr;</div>
+<div class="flow box">Ciphertext<br><small>Encrypted gibberish</small></div>
+<div class="flow arrow">XOR(key) &rarr;</div>
+<div class="flow box">Plaintext<br><small>Executable shellcode</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Performance Considerations</h2>
+
+<p>Speed matters for stealth. The encryption/decryption operation happens on every sleep cycle &mdash; for a beacon sleeping every 60 seconds, that is once per minute. If the XOR operation is slow, it creates a measurable delay between when <code>Sleep</code> is called and when actual sleeping begins.</p>
+
+<pre><code class="language-cpp">// Performance analysis for typical shellcode sizes
+//
+// Cobalt Strike Beacon:    ~300 KB shellcode
+// Meterpreter stage:       ~200 KB shellcode
+// Sliver implant:          ~10-15 MB (larger, Go-based)
+//
+// XOR32 throughput on modern x86-64:
+//   - Processes 4 bytes per iteration
+//   - ~1 cycle per DWORD XOR (pipelined)
+//   - At 3 GHz: ~3 billion DWORDs/sec = ~12 GB/sec
+//
+// For 300 KB Beacon:
+//   - 300,000 / 4 = 75,000 iterations
+//   - 75,000 / 3,000,000,000 = 0.000025 seconds = 25 microseconds
+//
+// Conclusion: XOR32 encryption of typical shellcode takes
+// ~25 microseconds - completely negligible</code></pre>
+
+<table>
+<tr><th>Shellcode Size</th><th>XOR32 Time (approx.)</th><th>Overhead per Cycle</th></tr>
+<tr><td>100 KB</td><td>~8 us</td><td>Negligible</td></tr>
+<tr><td>300 KB (Beacon)</td><td>~25 us</td><td>Negligible</td></tr>
+<tr><td>1 MB</td><td>~83 us</td><td>Negligible</td></tr>
+<tr><td>10 MB (Sliver)</td><td>~830 us</td><td>Still under 1ms</td></tr>
+</table>
+
+<div class="card green">
+<h4>Comparison with AES and RC4</h4>
+<p>AES-256-CBC processes data at ~1-3 GB/sec in software (without AES-NI) and ~10+ GB/sec with AES-NI hardware acceleration. RC4 (used by Ekko via <code>SystemFunction032</code>) runs at ~2-5 GB/sec. XOR32 at ~12 GB/sec is the fastest option and requires zero library imports. For the threat model of sleep-time encryption, the speed difference between AES and XOR is irrelevant, but the zero-import advantage of XOR is significant.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Memory Alignment Considerations</h2>
+
+<p>The XOR32 implementation processes data in 4-byte (DWORD) chunks. This works correctly when the data pointer is DWORD-aligned, which is guaranteed by <code>VirtualAlloc</code> (it returns page-aligned addresses, which are always DWORD-aligned). However, the trailing bytes must be handled separately:</p>
+
+<pre><code class="language-cpp">// Alignment-safe XOR32 implementation
+void xor32Safe(BYTE* data, SIZE_T len, DWORD key) {
+    BYTE keyBytes[4];
+    memcpy(keyBytes, &key, 4);
+
+    // Process bulk as DWORDs (safe because VirtualAlloc
+    // returns page-aligned = 4K-aligned addresses)
+    SIZE_T i = 0;
+    for (; i + 3 < len; i += 4) {
+        *(DWORD*)(data + i) ^= key;
+    }
+
+    // Handle 0-3 remaining bytes
+    for (; i < len; i++) {
+        data[i] ^= keyBytes[i % 4];
+    }
+}</code></pre>
+
+<p>The trailing-byte handling ensures that shellcode regions whose size is not a multiple of 4 are still correctly encrypted and decrypted. Since XOR is applied byte-by-byte for the remainder using the corresponding key byte, the self-inverse property is preserved.</p>
+
+<!-- ============================================================ -->
+<h2>7. Visualizing XOR on Shellcode</h2>
+
+<div class="card">
+<h4>Before and After XOR32 Encryption</h4>
+<pre><code class="language-text">// Original shellcode (Beacon stub) - recognizable patterns:
+FC 48 83 E4 F0 E8 C0 00  00 00 41 51 41 50 52 51
+56 48 31 D2 65 48 8B 52  60 48 8B 52 18 48 8B 52
+
+// After XOR32 with key 0xA7B3C9D5 - appears random:
+5B FB 4A 31 57 5B 09 D5  A7 B3 88 A4 E6 E3 9B 84
+F1 FB F8 07 C2 FB 42 87  C7 FB 42 87 BF FB 42 87
+
+// XOR again with same key - original restored:
+FC 48 83 E4 F0 E8 C0 00  00 00 41 51 41 50 52 51
+56 48 31 D2 65 48 8B 52  60 48 8B 52 18 48 8B 52</code></pre>
+</div>
+
+<p>The original bytes contain recognizable patterns (the <code>FC 48 83 E4 F0 E8</code> sequence is a well-known Cobalt Strike shellcode prologue). After XOR32, the bytes appear random and match no known signatures.</p>
+
+<!-- ============================================================ -->
+<h2>8. Why Not AES or RC4?</h2>
+
+<p>While stronger ciphers exist, they introduce unnecessary complexity for this threat model:</p>
+
+<table>
+<tr><th>Factor</th><th>XOR32</th><th>RC4 (SystemFunction032)</th><th>AES-256</th></tr>
+<tr><td><strong>Imports needed</strong></td><td>None</td><td><code>advapi32!SystemFunction032</code></td><td><code>bcrypt.dll</code> or <code>advapi32.dll</code></td></tr>
+<tr><td><strong>Code size</strong></td><td>~10 lines</td><td>~5 lines + DLL load</td><td>~50+ lines + DLL load</td></tr>
+<tr><td><strong>In-place operation</strong></td><td>Native</td><td>Native (RC4 is stream cipher)</td><td>Requires mode (CTR/CBC) for in-place</td></tr>
+<tr><td><strong>Key/IV setup</strong></td><td>None</td><td>Key schedule per call</td><td>Key expansion + IV management</td></tr>
+<tr><td><strong>Detectability of import</strong></td><td>No import to detect</td><td><code>SystemFunction032</code> in IAT is an IOC</td><td>Crypto API usage may be flagged</td></tr>
+<tr><td><strong>Sufficient for sleep evasion?</strong></td><td>Yes</td><td>Yes (overkill)</td><td>Yes (massive overkill)</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>Ekko's Choice vs Fluctuation's Choice</h4>
+<p>Ekko uses RC4 via <code>SystemFunction032</code> because it chains operations through timer callbacks and needs a Windows API function it can pass as a callback. ShellcodeFluctuation uses XOR32 because it runs its own code in the <code>MySleep</code> hook handler, where it can directly call any custom function. The architectural difference drives the cipher choice.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="A">
+<p>Q1: Why is XOR's self-inverse property critical for ShellcodeFluctuation?</p>
+<div class="quiz-btn" data-choice="A">A) The same function and key encrypt and decrypt, eliminating separate code paths</div>
+<div class="quiz-btn" data-choice="B">B) It makes XOR cryptographically unbreakable</div>
+<div class="quiz-btn" data-choice="C">C) It allows XOR to work without a key</div>
+<div class="quiz-btn" data-choice="D">D) It enables parallel processing across multiple CPU cores</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: Why does ShellcodeFluctuation use a 32-bit XOR key instead of a single-byte key?</p>
+<div class="quiz-btn" data-choice="A">A) Single-byte XOR is slower than 32-bit XOR</div>
+<div class="quiz-btn" data-choice="B">B) 32-bit keys produce smaller ciphertext</div>
+<div class="quiz-btn" data-choice="C">C) A single-byte key has only 256 possibilities, which scanners like BeaconEye brute-force instantly</div>
+<div class="quiz-btn" data-choice="D">D) Windows requires 32-bit aligned encryption</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q3: How long does XOR32 encryption of a typical 300 KB Cobalt Strike Beacon take?</p>
+<div class="quiz-btn" data-choice="A">A) About 100 milliseconds</div>
+<div class="quiz-btn" data-choice="B">B) About 25 microseconds</div>
+<div class="quiz-btn" data-choice="C">C) About 5 seconds</div>
+<div class="quiz-btn" data-choice="D">D) About 1 millisecond</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Prev: Memory Scanning Threat Model</a>
+<a class="primary" href="module3.html">Next: VirtualProtect &amp; Page Permissions &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

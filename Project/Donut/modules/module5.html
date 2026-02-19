@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: The Donut Loader - Donut Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F369;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#ec4899;--accent2:#db2777;--gradient:linear-gradient(135deg,#ec4899,#db2777)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Donut Course</h2>
+<span>PE-to-Shellcode Masterclass</span>
+</div>
+<a class="home-link" href="../Donut_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. The PE-to-Shellcode Problem</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Loader Fundamentals</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module3.html"><span>3. .NET CLR Hosting</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module4.html"><span>4. Module Architecture</span><span class="diff d2">I</span></a>
+<a class="mod-link active" href="module5.html"><span>5. The Donut Loader</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Anti-Detection</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module7.html"><span>7. Advanced Payload Types</span><span class="diff d3">A</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">A</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 5: The Donut Loader</h1>
+<p class="subtitle">Inside the position-independent shellcode loader: PEB walking, API resolution, decryption, decompression, and module-type dispatch.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Trace the complete execution flow of Donut&rsquo;s PIC loader from the moment shellcode begins executing. Understand how it finds its own data via RIP-relative addressing, resolves Windows APIs by walking the PEB and hashing export names, decrypts the instance and module, and dispatches to the correct payload handler.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Position-Independent Code Constraints</h2>
+
+<p>Donut&rsquo;s loader must execute from any address in memory with zero external dependencies at startup. This means:</p>
+
+<ul>
+<li><strong>No global variables</strong> &mdash; all state is on the stack or in the <code>DONUT_INSTANCE</code> structure</li>
+<li><strong>No import table</strong> &mdash; every API must be resolved at runtime via PEB walking</li>
+<li><strong>No absolute addresses</strong> &mdash; all data references use offsets from the current instruction pointer</li>
+<li><strong>No string literals</strong> in the conventional sense &mdash; API names are stored as hashes, not plaintext</li>
+</ul>
+
+<p>The loader is written in C and compiled with special flags to produce PIC output. The Donut build system compiles <code>loader.c</code> and its dependencies into a raw code blob that is position-independent.</p>
+
+<!-- ============================================================ -->
+<h2>2. Loader Entry Point</h2>
+
+<p>When the shellcode begins executing, the first thing the loader must do is find the <code>DONUT_INSTANCE</code> structure that follows the code. It uses a technique to determine its own address in memory:</p>
+
+<pre><span class="lang-tag">C</span>// The loader entry point in loader.c
+// On x64, we can use RIP-relative addressing
+// The DONUT_INSTANCE is appended immediately after the loader code
+
+// Step 1: Determine our base address
+// The instance offset is embedded as a constant during generation
+PDONUT_INSTANCE inst = (PDONUT_INSTANCE)(
+    (BYTE*)_ReturnAddress() + instance_offset
+);
+
+// On x86, a call/pop trick is used:
+//   call $+5      ; push next instruction address
+//   pop  eax      ; eax = current EIP
+//   add  eax, offset  ; eax = address of DONUT_INSTANCE</pre>
+
+<p>Once the loader has a pointer to <code>DONUT_INSTANCE</code>, it has access to all configuration data, API hashes, and encryption keys.</p>
+
+<!-- ============================================================ -->
+<h2>3. PEB Walking for API Resolution</h2>
+
+<p>The core of PIC programming: finding loaded DLLs and their exports without calling any APIs. The Process Environment Block (PEB) contains a linked list of all loaded modules.</p>
+
+<pre><span class="lang-tag">C</span>// peb.c - Walk the PEB to find loaded DLLs and resolve exports
+
+// Step 1: Access the PEB via the TEB
+// x64: PEB is at gs:[0x60]
+// x86: PEB is at fs:[0x30]
+#if defined(_WIN64)
+    PPEB peb = (PPEB)__readgsqword(0x60);
+#else
+    PPEB peb = (PPEB)__readfsdword(0x30);
+#endif
+
+// Step 2: Get the loader data (list of loaded modules)
+PPEB_LDR_DATA ldr = peb-&gt;Ldr;
+
+// Step 3: Walk the InMemoryOrderModuleList
+// This doubly-linked list contains every loaded DLL
+PLIST_ENTRY head = &amp;ldr-&gt;InMemoryOrderModuleList;
+PLIST_ENTRY entry = head-&gt;Flink;
+
+while (entry != head) {
+    PLDR_DATA_TABLE_ENTRY mod = CONTAINING_RECORD(
+        entry, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks
+    );
+
+    // mod-&gt;BaseDllName is the DLL name (e.g., "kernel32.dll")
+    // mod-&gt;DllBase is the base address of the loaded DLL
+    // Now we can parse this DLL's export table...
+
+    entry = entry-&gt;Flink;
+}</pre>
+
+<div class="diagram">
+<h4>PEB Walking Chain</h4>
+<div class="flow">
+<div class="box hl">TEB<br><small>gs:[0x60] (x64)<br>fs:[0x30] (x86)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">PEB<br><small>Process Environment Block</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">PEB_LDR_DATA<br><small>Loader data</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">InMemoryOrderList<br><small>Linked list of DLLs</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Export Table<br><small>Function addresses</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Hash-Based Export Resolution</h2>
+
+<p>For each loaded DLL, the loader walks its Export Address Table (EAT) and computes a hash of each exported function name. When a hash matches one in the <code>DONUT_INSTANCE.hash[]</code> array, the function address is stored in the <code>api</code> structure.</p>
+
+<pre><span class="lang-tag">C</span>// Resolve exports from a DLL by hashing function names
+VOID ResolveAPIs(PDONUT_INSTANCE inst, HMODULE dll) {
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)dll;
+    PIMAGE_NT_HEADERS nt  = (PIMAGE_NT_HEADERS)((BYTE*)dll + dos-&gt;e_lfanew);
+
+    PIMAGE_EXPORT_DIRECTORY exp = (PIMAGE_EXPORT_DIRECTORY)(
+        (BYTE*)dll + nt-&gt;OptionalHeader
+            .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress
+    );
+
+    DWORD *names    = (DWORD*)((BYTE*)dll + exp-&gt;AddressOfNames);
+    WORD  *ordinals = (WORD*) ((BYTE*)dll + exp-&gt;AddressOfNameOrdinals);
+    DWORD *funcs    = (DWORD*)((BYTE*)dll + exp-&gt;AddressOfFunctions);
+
+    for (DWORD i = 0; i &lt; exp-&gt;NumberOfNames; i++) {
+        char *name = (char*)((BYTE*)dll + names[i]);
+
+        // Compute hash of this export name
+        ULONGLONG hash = ComputeHash(name);
+
+        // Check against all hashes in the instance
+        for (DWORD j = 0; j &lt; DONUT_MAX_API; j++) {
+            if (inst-&gt;hash[j] == hash) {
+                // Found a match! Store the resolved address
+                WORD ord = ordinals[i];
+                FARPROC addr = (FARPROC)((BYTE*)dll + funcs[ord]);
+                ((FARPROC*)&amp;inst-&gt;api)[j] = addr;
+            }
+        }
+    }
+}</pre>
+
+<div class="card">
+<h4>The Hashing Algorithm</h4>
+<p>Donut uses a custom hash function (Maru hash) that combines the DLL name and function name into a single 64-bit value. This ensures that <code>kernel32!VirtualAlloc</code> and <code>ntdll!VirtualAlloc</code> (hypothetically) would produce different hashes. The hash includes both the DLL name and the function name to avoid collisions across modules.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Instance Decryption</h2>
+
+<p>After resolving the minimum required APIs, the loader decrypts the <code>DONUT_INSTANCE</code>. The decryption key is derived from a value embedded in the loader code at generation time:</p>
+
+<pre><span class="lang-tag">C</span>// Decrypt the DONUT_INSTANCE using Chaskey CTR mode
+// The initial key and counter are stored in the loader code itself
+chaskey_encrypt(
+    inst-&gt;key,       // Chaskey key (128-bit)
+    inst-&gt;ctr,       // Counter/nonce (128-bit)
+    (BYTE*)inst + offsetof(DONUT_INSTANCE, /* encrypted start */),
+    encrypted_size
+);
+
+// Verify integrity via MAC
+DWORD mac = ComputeMAC(inst, inst_size);
+if (mac != inst-&gt;mac) {
+    // Decryption failed or data corrupted - abort
+    return;
+}</pre>
+
+<p>Once decrypted, the instance reveals the full API hash table, the module decryption key, bypass configuration, and all other runtime parameters.</p>
+
+<!-- ============================================================ -->
+<h2>6. Module Decryption and Decompression</h2>
+
+<p>With the instance decrypted and APIs resolved, the loader proceeds to decrypt and decompress the <code>DONUT_MODULE</code>:</p>
+
+<pre><span class="lang-tag">C</span>// Locate the module (either embedded or downloaded via staging)
+PDONUT_MODULE mod;
+
+if (inst-&gt;type == DONUT_INSTANCE_EMBED) {
+    // Module is embedded after the instance
+    mod = (PDONUT_MODULE)((BYTE*)inst + inst-&gt;mod_offset);
+} else {
+    // Download the module via HTTP or DNS staging
+    mod = DownloadModule(inst);
+}
+
+// Decrypt the module with the module-specific key
+chaskey_encrypt(
+    inst-&gt;mod_key,
+    inst-&gt;mod_ctr,
+    (BYTE*)mod,
+    inst-&gt;mod_len
+);
+
+// Decompress based on the compression engine
+LPVOID payload = NULL;
+if (mod-&gt;compress == DONUT_COMPRESS_APLIB) {
+    payload = inst-&gt;api.VirtualAlloc(NULL, mod-&gt;len, MEM_COMMIT, PAGE_READWRITE);
+    aP_depack(mod-&gt;data, payload);
+} else if (mod-&gt;compress == DONUT_COMPRESS_LZNT1) {
+    payload = inst-&gt;api.VirtualAlloc(NULL, mod-&gt;len, MEM_COMMIT, PAGE_READWRITE);
+    ULONG final_size;
+    inst-&gt;api.RtlDecompressBuffer(
+        COMPRESSION_FORMAT_LZNT1,
+        payload, mod-&gt;len,
+        mod-&gt;data, mod-&gt;zlen,
+        &amp;final_size
+    );
+} else {
+    // No compression: data is the raw payload
+    payload = mod-&gt;data;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>7. Module-Type Dispatch</h2>
+
+<p>After decryption and decompression, the loader checks the module type and calls the appropriate handler:</p>
+
+<pre><span class="lang-tag">C</span>// Dispatch based on module type
+switch (mod-&gt;type) {
+    case DONUT_MODULE_NET_DLL:
+    case DONUT_MODULE_NET_EXE:
+        // .NET payload: host CLR, load assembly, invoke
+        RunDotNET(inst, mod, payload);
+        break;
+
+    case DONUT_MODULE_DLL:
+    case DONUT_MODULE_EXE:
+        // Native PE: map sections, relocate, resolve imports, execute
+        RunPE(inst, mod, payload);
+        break;
+
+    case DONUT_MODULE_VBS:
+    case DONUT_MODULE_JS:
+    case DONUT_MODULE_XSL:
+        // Script: create COM scripting engine, execute
+        RunScript(inst, mod, payload);
+        break;
+}</pre>
+
+<div class="diagram">
+<h4>Complete Loader Execution Flow</h4>
+<div class="flow">
+<div class="box hl">Find Instance<br><small>RIP-relative</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">PEB Walk<br><small>Resolve APIs</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Decrypt Instance<br><small>Chaskey</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">AMSI/ETW Bypass<br><small>Patch stubs</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Decrypt Module<br><small>Chaskey</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Decompress<br><small>aPLib/LZNT1</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Dispatch<br><small>PE/CLR/COM</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Exit Handling</h2>
+
+<p>After the payload finishes executing, the loader must clean up and exit. The exit behavior is configurable via <code>DONUT_INSTANCE.exit_opt</code>:</p>
+
+<table>
+<tr><th>Exit Option</th><th>Constant</th><th>Behavior</th></tr>
+<tr><td><strong>Exit Thread</strong></td><td><code>DONUT_OPT_EXIT_THREAD</code></td><td>Calls <code>ExitThread(0)</code> &mdash; only the current thread terminates</td></tr>
+<tr><td><strong>Exit Process</strong></td><td><code>DONUT_OPT_EXIT_PROCESS</code></td><td>Calls <code>ExitProcess(0)</code> &mdash; the entire process terminates</td></tr>
+<tr><td><strong>No Exit</strong></td><td><code>DONUT_OPT_EXIT_BLOCK</code></td><td>The loader returns normally, allowing the caller to continue</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Exit Option Matters</h4>
+<p>Choosing the wrong exit option can crash the target process or leave zombie threads. <strong>Exit Thread</strong> is safest for injection scenarios (the host process continues). <strong>Exit Process</strong> is useful for sacrificial processes. <strong>No Exit / Block</strong> is best when the loader is called from your own code and you want control to return.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="q5">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="1">
+<p>1. How does the PIC loader find loaded DLLs without calling any Windows APIs?</p>
+<label data-opt="0"><input type="radio" name="q5_1">It reads the registry for installed DLL paths</label>
+<label data-opt="1"><input type="radio" name="q5_1">It walks the PEB&rsquo;s InMemoryOrderModuleList via the TEB segment register</label>
+<label data-opt="2"><input type="radio" name="q5_1">It scans process memory for MZ headers</label>
+<label data-opt="3"><input type="radio" name="q5_1">It uses NtQuerySystemInformation</label>
+<div class="explain">The PEB (accessed via gs:[0x60] on x64 or fs:[0x30] on x86) contains a pointer to PEB_LDR_DATA, which has a linked list of all loaded modules. The loader traverses this list to find DLLs like kernel32.dll and ntdll.dll, then parses their export tables.</div>
+</div>
+
+<div class="quiz-q" data-correct="2">
+<p>2. Why does Donut use hash-based API resolution instead of plaintext strings?</p>
+<label data-opt="0"><input type="radio" name="q5_2">Hashes are faster to compare than strings</label>
+<label data-opt="1"><input type="radio" name="q5_2">Windows requires hashed function names</label>
+<label data-opt="2"><input type="radio" name="q5_2">To avoid plaintext API strings that static analysis and YARA rules could detect</label>
+<label data-opt="3"><input type="radio" name="q5_2">Because the PEB only stores function hashes</label>
+<div class="explain">Plaintext API strings like "VirtualAlloc" or "CreateRemoteThread" in shellcode are trivial to detect with static analysis and YARA rules. By storing only hashes, Donut avoids these signatures. The loader computes hashes of export names at runtime and compares them against the pre-computed values.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>3. What is the first thing the Donut loader must do after execution begins?</p>
+<label data-opt="0"><input type="radio" name="q5_3">Locate the DONUT_INSTANCE structure relative to the loader code</label>
+<label data-opt="1"><input type="radio" name="q5_3">Call VirtualAlloc to allocate memory</label>
+<label data-opt="2"><input type="radio" name="q5_3">Decrypt the payload</label>
+<label data-opt="3"><input type="radio" name="q5_3">Bypass AMSI</label>
+<div class="explain">The loader cannot do anything useful until it finds the DONUT_INSTANCE, which contains all configuration data, API hashes, and encryption keys. It locates the instance using RIP-relative addressing (x64) or a call/pop trick (x86) combined with a known offset.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('q5')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Previous: Module Architecture</a>
+<a class="primary" href="module6.html">Next: Encryption &amp; Anti-Detection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

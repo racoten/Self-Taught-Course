@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: Timer Queues & Waitable Timers - Ekko Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x23F1;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#8b5cf6;--accent2:#6d28d9;--gradient:linear-gradient(135deg,#8b5cf6,#6d28d9)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Ekko Course</h2>
+<span>Sleep Obfuscation Masterclass</span>
+</div>
+<a class="home-link" href="../Ekko_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Why Sleep Obfuscation Matters</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module2.html"><span>2. Timer Queues &amp; Waitable Timers</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. RC4 Encryption in Evasion</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. ROP Gadgets &amp; NtContinue</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Ekko Timer Chain</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Context Manipulation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Stack &amp; Return Address Handling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain, Detection &amp; Variants</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: Timer Queues &amp; Waitable Timers</h1>
+<p class="subtitle">Scheduling deferred execution through the Windows timer subsystem.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how Windows timer queues work, the <code>CreateTimerQueueTimer</code> API and its callback mechanism, the <code>WT_EXECUTEINTIMERTHREAD</code> flag that Ekko depends on, and how timer callbacks enable executing arbitrary functions at scheduled intervals without the main thread's involvement.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. What Is a Timer Queue?</h2>
+
+<p>A <strong>timer queue</strong> is a Windows kernel object that manages a collection of timers. Each timer in the queue is associated with a callback function that executes when the timer expires. The system manages the scheduling internally, firing callbacks on a dedicated thread pool thread (or, critically for Ekko, on the timer thread itself).</p>
+
+<p>Timer queues were introduced in Windows 2000 as a lightweight alternative to manually creating waitable timer objects and managing dedicated timer threads. They provide an efficient mechanism for scheduling deferred work without the overhead of full thread management.</p>
+
+<pre><span class="lang-tag">C</span>// Create a new timer queue
+HANDLE hTimerQueue = CreateTimerQueue();
+
+// The timer queue is now ready to accept timers
+// When done, clean up with:
+// DeleteTimerQueue( hTimerQueue );</pre>
+
+<p><code>CreateTimerQueue</code> returns a handle to a new timer queue object. Internally, Windows creates the supporting structures and thread pool infrastructure needed to service timers in this queue. Multiple timer queues can coexist in the same process, each managing independent sets of timers.</p>
+
+<!-- ============================================================ -->
+<h2>2. CreateTimerQueueTimer &mdash; The Core API</h2>
+
+<p>The function that Ekko relies on most heavily is <code>CreateTimerQueueTimer</code>. This API creates a timer within a timer queue and associates it with a callback function:</p>
+
+<pre><span class="lang-tag">C</span>BOOL CreateTimerQueueTimer(
+    PHANDLE             phNewTimer,      // Receives the timer handle
+    HANDLE              hTimerQueue,     // Timer queue to add timer to
+    WAITORTIMERCALLBACK Callback,        // Function to call when timer fires
+    PVOID               Parameter,       // Argument passed to callback
+    DWORD               DueTime,         // Delay before first firing (ms)
+    DWORD               Period,          // Repeat interval (0 = one-shot)
+    ULONG               Flags            // Execution flags
+);</pre>
+
+<p>The callback function must match the <code>WAITORTIMERCALLBACK</code> signature:</p>
+
+<pre><span class="lang-tag">C</span>VOID CALLBACK WaitOrTimerCallback(
+    PVOID lpParameter,    // The Parameter from CreateTimerQueueTimer
+    BOOLEAN TimerOrWaitFired  // TRUE if timer expired, FALSE if wait abandoned
+);</pre>
+
+<div class="card">
+<h4>Key Parameters for Ekko</h4>
+<ul>
+<li><strong>Callback</strong> &mdash; Ekko sets this to <code>NtContinue</code>, not a normal callback function. NtContinue expects a CONTEXT* as its first parameter, which aligns with the <code>lpParameter</code> position.</li>
+<li><strong>Parameter</strong> &mdash; Ekko passes a pointer to a pre-configured CONTEXT structure. NtContinue reads this to set the thread's register state.</li>
+<li><strong>DueTime</strong> &mdash; Ekko staggers timers at 100ms intervals (100, 200, 300, ...) to ensure they fire in the correct sequence.</li>
+<li><strong>Period</strong> &mdash; Set to 0 for one-shot timers. Each timer fires exactly once.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. The WT_EXECUTEINTIMERTHREAD Flag</h2>
+
+<p>The <code>Flags</code> parameter is where Ekko's technique becomes possible. The critical flag is <code>WT_EXECUTEINTIMERTHREAD</code>:</p>
+
+<table>
+<tr><th>Flag</th><th>Value</th><th>Behavior</th></tr>
+<tr><td><code>WT_EXECUTEDEFAULT</code></td><td>0x00</td><td>Callback runs on a thread pool worker thread</td></tr>
+<tr><td><code>WT_EXECUTEINTIMERTHREAD</code></td><td>0x20</td><td>Callback runs directly on the timer queue's dedicated thread</td></tr>
+<tr><td><code>WT_EXECUTELONGFUNCTION</code></td><td>0x10</td><td>Hints that the callback may run for a long time</td></tr>
+<tr><td><code>WT_EXECUTEONLYONCE</code></td><td>0x08</td><td>Timer fires only once (same as Period=0)</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Why WT_EXECUTEINTIMERTHREAD Is Essential</h4>
+<p>Ekko uses <code>WT_EXECUTEINTIMERTHREAD</code> because it guarantees that the callback executes on the <strong>same thread</strong> for every timer in the queue. This is critical because NtContinue replaces the <strong>entire thread context</strong> (all registers, including RSP and RIP). If callbacks ran on different thread pool threads, context manipulation would be unpredictable and potentially corrupt unrelated threads. By forcing all callbacks onto the single timer thread, Ekko ensures each NtContinue call affects only the dedicated timer thread, and sequential timers execute in a controlled, predictable order.</p>
+</div>
+
+<pre><span class="lang-tag">C</span>// Ekko's timer creation pattern - all use WT_EXECUTEINTIMERTHREAD
+CreateTimerQueueTimer( &hNewTimer, hTimerQueue,
+    NtContinue,    // Callback: restore context from CONTEXT struct
+    &RopProtRW,    // Parameter: pointer to CONTEXT for VirtualProtect(RW)
+    100,           // DueTime: fire after 100ms
+    0,             // Period: one-shot
+    WT_EXECUTEINTIMERTHREAD );
+
+CreateTimerQueueTimer( &hNewTimer, hTimerQueue,
+    NtContinue,    // Same callback for every timer
+    &RopMemEnc,    // Different CONTEXT: this one calls SystemFunction032
+    200,           // 200ms - fires after the first timer
+    0,
+    WT_EXECUTEINTIMERTHREAD );</pre>
+
+<!-- ============================================================ -->
+<h2>4. Timer Firing Order &amp; Sequencing</h2>
+
+<p>Ekko depends on timers firing in a specific order. The technique uses staggered <code>DueTime</code> values (100ms, 200ms, 300ms, 400ms, 500ms, 600ms) to ensure sequential execution:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Timer Firing Timeline</h4>
+<div class="flow">
+<div class="flow box">t=0ms<br><small>Timers queued</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">t=100ms<br><small>Timer 1: RW</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">t=200ms<br><small>Timer 2: Encrypt</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">t=300ms<br><small>Timer 3: Sleep</small></div>
+</div>
+<div class="flow" style="margin-top:12px;">
+<div class="flow box">t=300ms+Sleep<br><small>Timer 3 returns</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">t=400ms<br><small>Timer 4: Decrypt</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">t=500ms<br><small>Timer 5: RX</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">t=600ms<br><small>Timer 6: Signal</small></div>
+</div>
+</div>
+
+<p>Each timer fires at its DueTime relative to when it was created. Since <code>WT_EXECUTEINTIMERTHREAD</code> forces all callbacks onto a single thread, and each callback uses NtContinue to replace the thread context, the timer thread executes one operation at a time in sequence. Timer 3 (WaitForSingleObject) blocks the timer thread for the sleep duration, effectively delaying timers 4-6 until after the sleep completes.</p>
+
+<!-- ============================================================ -->
+<h2>5. The Initial Context Capture</h2>
+
+<p>Before queuing the six operational timers, Ekko first uses a timer to capture the current thread context via <code>RtlCaptureContext</code>:</p>
+
+<pre><span class="lang-tag">C</span>CONTEXT CtxThread = { 0 };
+
+// Timer 0: Capture the timer thread's context
+CreateTimerQueueTimer(
+    &hNewTimer, hTimerQueue,
+    RtlCaptureContext,  // Callback: captures full thread context
+    &CtxThread,         // Parameter: CONTEXT struct to fill
+    0,                  // DueTime: fire immediately
+    0,                  // One-shot
+    WT_EXECUTEINTIMERTHREAD );
+
+// Wait briefly for the capture to complete
+WaitForSingleObject( hEvent, 0x32 );  // 50ms timeout</pre>
+
+<div class="card highlight">
+<h4>Why Capture Context First?</h4>
+<p>RtlCaptureContext fills a CONTEXT structure with the current state of all CPU registers (RIP, RSP, general-purpose registers, flags, segments, etc.). Ekko captures this context from the timer thread so it has a <strong>valid baseline</strong> to clone. Each of the six operational CONTEXT structures is created by copying this baseline and then modifying only the registers needed for its specific API call (RIP for the target function, RCX/RDX/R8/R9 for arguments). This ensures that every context has valid segment registers, flags, and other state that Windows requires for proper execution.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Events for Synchronization</h2>
+
+<p>Ekko uses a Windows event object to synchronize between the main thread and the timer chain:</p>
+
+<pre><span class="lang-tag">C</span>// Create an auto-reset event, initially non-signaled
+HANDLE hEvent = CreateEventW( 0, 0, 0, 0 );
+
+// Main thread waits for the timer chain to complete
+WaitForSingleObject( hEvent, INFINITE );
+
+// The last timer in the chain signals the event:
+// RopSetEvt.Rip = SetEvent;
+// RopSetEvt.Rcx = hEvent;</pre>
+
+<p>The main thread calls <code>WaitForSingleObject(hEvent, INFINITE)</code> after queuing all timers. This blocks the main thread until the final timer (Timer 6) calls <code>SetEvent(hEvent)</code>, which signals that the entire encrypt-sleep-decrypt cycle has completed. At that point, the main thread wakes up and the beacon resumes normal operation.</p>
+
+<div class="card green">
+<h4>The Full Synchronization Flow</h4>
+<ol>
+<li>Main thread creates the event (non-signaled)</li>
+<li>Main thread queues all 6 timers</li>
+<li>Main thread calls <code>WaitForSingleObject(hEvent, INFINITE)</code> and blocks</li>
+<li>Timers 1-5 execute the encrypt-sleep-decrypt cycle on the timer thread</li>
+<li>Timer 6 calls <code>SetEvent(hEvent)</code></li>
+<li>Main thread's wait is satisfied, it resumes execution</li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Timer Queue vs. Other Callback Mechanisms</h2>
+
+<p>Windows provides several callback-based execution mechanisms. Understanding why Ekko chose timer queues over alternatives helps appreciate the design:</p>
+
+<table>
+<tr><th>Mechanism</th><th>Callback Thread</th><th>Ordering Guarantee</th><th>Suitability for Ekko</th></tr>
+<tr><td><strong>Timer Queue</strong></td><td>Dedicated timer thread (with WT_EXECUTEINTIMERTHREAD)</td><td>Sequential with staggered DueTimes</td><td>Ideal &mdash; single thread, ordered execution</td></tr>
+<tr><td><strong>APC Queue</strong></td><td>Target thread (when alertable)</td><td>FIFO order guaranteed</td><td>Good &mdash; used by FOLIAGE instead</td></tr>
+<tr><td><strong>Thread Pool</strong></td><td>Random pool thread</td><td>No ordering guarantee</td><td>Poor &mdash; context manipulation would be chaotic</td></tr>
+<tr><td><strong>Waitable Timer</strong></td><td>Requires manual thread management</td><td>Manual sequencing needed</td><td>Possible but more code</td></tr>
+</table>
+
+<p>Timer queues with <code>WT_EXECUTEINTIMERTHREAD</code> provide the best balance of simplicity and control for Ekko's use case. The alternative approach (APCs) is what FOLIAGE uses &mdash; it queues APCs to the current thread and enters an alertable wait, causing the APCs to drain in FIFO order.</p>
+
+<!-- ============================================================ -->
+<h2>8. Practical Example: Timer Queue Basics</h2>
+
+<p>Before diving into Ekko's full implementation, here is a simple example demonstrating the timer queue API in isolation:</p>
+
+<pre><span class="lang-tag">C</span>#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+
+VOID CALLBACK MyCallback(PVOID param, BOOLEAN timerFired) {
+    int step = *(int*)param;
+    printf("[Timer] Step %d fired on thread %lu\n",
+           step, GetCurrentThreadId());
+}
+
+int main() {
+    HANDLE hQueue = CreateTimerQueue();
+    HANDLE hTimer = NULL;
+
+    int steps[] = { 1, 2, 3 };
+
+    // Queue three timers at 100ms intervals
+    for (int i = 0; i &lt; 3; i++) {
+        CreateTimerQueueTimer(
+            &hTimer, hQueue,
+            MyCallback, &steps[i],
+            (i + 1) * 100,  // 100ms, 200ms, 300ms
+            0,               // One-shot
+            WT_EXECUTEINTIMERTHREAD );
+    }
+
+    // Wait for all timers to complete
+    Sleep(500);
+
+    printf("[Main] All timers fired. Main thread = %lu\n",
+           GetCurrentThreadId());
+
+    DeleteTimerQueue(hQueue);
+    return 0;
+}</pre>
+
+<div class="card">
+<h4>Expected Output</h4>
+<p>All three timer callbacks report the <strong>same thread ID</strong> (the timer thread), which is different from the main thread's ID. This confirms that <code>WT_EXECUTEINTIMERTHREAD</code> forces all callbacks onto a single, predictable thread &mdash; exactly the behavior Ekko needs.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. Clean Up: DeleteTimerQueue</h2>
+
+<p>After the timer chain completes, Ekko cleans up the timer queue to avoid resource leaks:</p>
+
+<pre><span class="lang-tag">C</span>// After WaitForSingleObject returns (event signaled by timer 6):
+DeleteTimerQueue( hTimerQueue );
+
+// DeleteTimerQueue cancels all pending timers in the queue and
+// releases the queue handle. Passing INVALID_HANDLE_VALUE as the
+// CompletionEvent parameter would make it wait for all callbacks
+// to finish, but Ekko knows they're done because of the event.</pre>
+
+<p><code>DeleteTimerQueue</code> marks all timers in the queue as cancelled and releases the queue resources. Since Ekko's final timer signals the event before the main thread calls this function, all timer callbacks have already completed by the time cleanup happens.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Why does Ekko use the WT_EXECUTEINTIMERTHREAD flag?</p>
+<div class="quiz-btn" data-choice="A">A) It makes the timers fire faster</div>
+<div class="quiz-btn" data-choice="B">B) It ensures all callbacks run on the same dedicated thread, making NtContinue context manipulation predictable</div>
+<div class="quiz-btn" data-choice="C">C) It prevents other threads from being created</div>
+<div class="quiz-btn" data-choice="D">D) It is required by the Windows API specification</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: What is the purpose of the initial RtlCaptureContext timer (Timer 0)?</p>
+<div class="quiz-btn" data-choice="A">A) To capture a valid baseline CONTEXT from the timer thread that can be cloned and modified for each operation</div>
+<div class="quiz-btn" data-choice="B">B) To encrypt the current thread's registers</div>
+<div class="quiz-btn" data-choice="C">C) To detect if a debugger is attached</div>
+<div class="quiz-btn" data-choice="D">D) To save the main thread's context for later restoration</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q3: How does Ekko ensure timers fire in the correct sequence?</p>
+<div class="quiz-btn" data-choice="A">A) It uses mutex objects between each timer</div>
+<div class="quiz-btn" data-choice="B">B) It sets thread priority levels for each callback</div>
+<div class="quiz-btn" data-choice="C">C) It uses APC queues which are inherently ordered</div>
+<div class="quiz-btn" data-choice="D">D) It staggers DueTime values at 100ms intervals (100, 200, 300, ...)</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Prev: Why Sleep Obfuscation Matters</a>
+<a class="primary" href="module3.html">Next: RC4 Encryption in Evasion &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

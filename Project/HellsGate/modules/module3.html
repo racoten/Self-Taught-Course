@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: System Service Numbers (SSN) - HellsGate Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#e11d48;--accent2:#be123c;--gradient:linear-gradient(135deg,#e11d48,#be123c)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>HellsGate Course</h2>
+<span>Dynamic SSN &amp; Direct Syscalls</span>
+</div>
+<a class="home-link" href="../HellsGate_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Hooking</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Syscall Architecture</a>
+<a class="mod-link active" href="module3.html"><span class="diff d1">3</span> SSN Basics</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> ntdll Stub Anatomy</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hell's Gate Algorithm</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Direct Syscall Exec</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Halo's &amp; Tartarus Gate</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: System Service Numbers (SSN)</h1>
+<p class="subtitle">Every kernel function has a number. Know the number, open the gate.</p>
+
+<div class="card highlight">
+<h4>The Central Concept</h4>
+<p>The <strong>System Service Number (SSN)</strong> is the integer that maps a user-mode Nt* function to its kernel-mode implementation. When you execute <code>syscall</code> with a specific value in EAX, the kernel dispatches to the corresponding function in the SSDT. Hell's Gate is fundamentally an SSN resolution engine -- everything else in the technique exists to discover and use these numbers at runtime.</p>
+</div>
+
+<h2>What Is an SSN?</h2>
+<p>Each Nt* / Zw* function exported by ntdll.dll has a unique SSN. This number serves as an index into the kernel's <strong>System Service Descriptor Table (SSDT)</strong>. The SSN is a simple unsigned integer, typically fitting in 12 bits (values range from 0 to roughly 470 on modern Windows builds).</p>
+
+<p>The SSN for a function is embedded directly in the ntdll stub as an immediate value in the <code>mov eax, &lt;SSN&gt;</code> instruction:</p>
+
+<pre><code><span class="lang-tag">ASM</span>; NtAllocateVirtualMemory on Windows 10 21H2 (x64)
+; SSN = 0x18 (24 decimal)
+ntdll!NtAllocateVirtualMemory:
+  4c 8b d1          mov  r10, rcx       ; save 1st param
+  b8 18 00 00 00    mov  eax, 0x18      ; SSN = 0x18
+  f6 04 25 08 03 fe
+  7f 01             test byte ptr [SharedUserData+0x308], 1
+  75 03             jnz  +3             ; if hypervisor flag set (VBS/HVCI), use int 2e path
+  0f 05             syscall
+  c3                ret
+  cd 2e             int  0x2e           ; alternative path (VBS/HVCI)
+  c3                ret</code></pre>
+
+<div class="card warn">
+<h4>SSNs Change Across Windows Versions</h4>
+<p>Microsoft does not guarantee stable SSNs. They change between major Windows versions, between builds, and even between service packs. A hardcoded SSN that works on Windows 10 1903 will produce wrong results (or BSOD) on Windows 10 21H2. This is precisely why Hell's Gate resolves SSNs <strong>dynamically at runtime</strong> rather than using a lookup table.</p>
+</div>
+
+<h2>SSN Variation Across Versions</h2>
+<p>Here are some examples showing how SSNs differ across Windows builds. Note how the ordering is not always consistent -- Microsoft can insert new syscalls between existing ones, shifting everything above:</p>
+
+<table>
+<tr><th>Function</th><th>Win7 SP1</th><th>Win10 1803</th><th>Win10 1903</th><th>Win10 21H2</th><th>Win11 22H2</th></tr>
+<tr><td><code>NtAllocateVirtualMemory</code></td><td>0x15</td><td>0x18</td><td>0x18</td><td>0x18</td><td>0x18</td></tr>
+<tr><td><code>NtWriteVirtualMemory</code></td><td>0x37</td><td>0x3A</td><td>0x3A</td><td>0x3A</td><td>0x3A</td></tr>
+<tr><td><code>NtCreateThreadEx</code></td><td>0xA5</td><td>0xBB</td><td>0xBD</td><td>0xC1</td><td>0xC2</td></tr>
+<tr><td><code>NtProtectVirtualMemory</code></td><td>0x4D</td><td>0x50</td><td>0x50</td><td>0x50</td><td>0x50</td></tr>
+<tr><td><code>NtOpenProcess</code></td><td>0x23</td><td>0x26</td><td>0x26</td><td>0x26</td><td>0x26</td></tr>
+<tr><td><code>NtQueueApcThread</code></td><td>0x44</td><td>0x47</td><td>0x47</td><td>0x47</td><td>0x47</td></tr>
+</table>
+
+<p>Notice that some SSNs (like <code>NtAllocateVirtualMemory</code> at 0x18) remain stable across recent Windows 10 and 11 builds, while others (like <code>NtCreateThreadEx</code>) shift with each major version as new syscalls are added to the table.</p>
+
+<h2>The Nt* / Zw* Naming Convention</h2>
+<p>You will see two prefixes for system service functions: <strong>Nt</strong> and <strong>Zw</strong>. In user mode (ntdll.dll), they are identical -- both point to the same stub and the same SSN. The distinction matters only in kernel mode:</p>
+
+<pre><code><span class="lang-tag">C</span>// In ntdll.dll (user mode): Nt and Zw are the SAME function
+// Both resolve to the same SSN and syscall stub
+NtAllocateVirtualMemory == ZwAllocateVirtualMemory  // same address
+
+// In ntoskrnl.exe (kernel mode): they differ
+// Nt* = direct call (no privilege check, assumes kernel caller)
+// Zw* = sets PreviousMode = KernelMode, then dispatches through SSDT
+//        This is how kernel-mode code safely calls itself through the SSDT</code></pre>
+
+<div class="card green">
+<h4>For Hell's Gate, Use Nt* Names</h4>
+<p>When walking the ntdll Export Address Table to find syscall stubs, Hell's Gate searches for functions starting with "Zw" (because these are slightly easier to pattern-match as they all correspond to syscall stubs). However, since Nt* and Zw* are identical in user mode, either prefix works. The original Hell's Gate code uses Zw* when enumerating exports.</p>
+</div>
+
+<h2>Static vs. Dynamic SSN Resolution</h2>
+<p>There are fundamentally two approaches to obtaining SSNs for direct syscalls:</p>
+
+<table>
+<tr><th>Approach</th><th>Description</th><th>Pros</th><th>Cons</th></tr>
+<tr><td><strong>Static (SysWhispers)</strong></td><td>Compile-time table mapping function names to SSNs per OS version</td><td>Simple, no runtime parsing</td><td>Must ship tables for every Windows build; breaks on unknown versions; large static artifact</td></tr>
+<tr><td><strong>Dynamic (Hell's Gate)</strong></td><td>Read SSNs from ntdll.dll stubs in memory at runtime</td><td>Works on any Windows version; no static tables; small footprint</td><td>Must handle hooked stubs; slightly more complex</td></tr>
+</table>
+
+<p>Hell's Gate pioneered the dynamic approach. At runtime, it reads the loaded ntdll.dll from the process's own memory, walks the Export Address Table to find Nt*/Zw* functions, and extracts the SSN directly from the <code>mov eax, SSN</code> instruction bytes in each stub. Since ntdll.dll is loaded into every Windows process, this information is always available.</p>
+
+<h2>SSN Ordering: The Alphabetical Property</h2>
+<p>A critical observation that Hell's Gate and its successors exploit: on every Windows version, the SSNs are assigned in <strong>alphabetical order</strong> of the Zw* function names. This means:</p>
+
+<pre><code><span class="lang-tag">C</span>// SSNs are assigned alphabetically by Zw* name:
+// ZwAcceptConnectPort       -> SSN 0x00
+// ZwAccessCheck             -> SSN 0x01
+// ZwAccessCheckAndAuditAlarm -> SSN 0x02
+// ...
+// ZwAllocateVirtualMemory   -> SSN 0x18
+// ...
+// ZwWriteVirtualMemory      -> SSN 0x3A
+// ...
+
+// This means: if you know the SSN of one function,
+// and you know the alphabetical order of Zw* names,
+// you can CALCULATE any other SSN.
+
+// Neighbor functions in the EAT (sorted by address) have SSNs
+// that differ by exactly 1 from their alphabetical neighbors.</code></pre>
+
+<div class="card highlight">
+<h4>Why Alphabetical Order Matters</h4>
+<p>This property is what makes Halo's Gate and TartarusGate possible (Module 7). If a stub is hooked and its SSN is unreadable, you can look at an adjacent clean stub, read its SSN, and add or subtract a delta based on position. The alphabetical assignment guarantees that neighboring stubs in sorted order have sequential SSNs. But first, you need to understand how to read the SSN from a stub -- that is Module 4.</p>
+</div>
+
+<div class="quiz" id="quiz3">
+<h4>Pop Quiz: System Service Numbers</h4>
+<div class="quiz-q" data-correct="3">
+<p>Q1: Why does Hell's Gate resolve SSNs dynamically rather than using a hardcoded table?</p>
+<label data-opt="0"><input type="radio" name="q3_0"> Hardcoded tables are too large to fit in memory</label>
+<label data-opt="1"><input type="radio" name="q3_0"> Windows encrypts SSNs differently on each boot</label>
+<label data-opt="2"><input type="radio" name="q3_0"> Dynamic resolution is faster than table lookups</label>
+<label data-opt="3"><input type="radio" name="q3_0"> SSNs change across Windows versions, so a static table breaks on unknown builds</label>
+<div class="explain">Microsoft does not guarantee stable SSNs. They change between Windows versions and builds. A dynamically resolved SSN works on any version because it reads the actual value from the loaded ntdll.dll.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: In user mode (ntdll.dll), what is the relationship between NtAllocateVirtualMemory and ZwAllocateVirtualMemory?</p>
+<label data-opt="0"><input type="radio" name="q3_1"> They are identical -- same stub, same SSN, same address</label>
+<label data-opt="1"><input type="radio" name="q3_1"> Zw version adds access checks, Nt version does not</label>
+<label data-opt="2"><input type="radio" name="q3_1"> Nt version uses syscall, Zw version uses int 0x2e</label>
+<label data-opt="3"><input type="radio" name="q3_1"> They have different SSNs and dispatch to different kernel functions</label>
+<div class="explain">In ntdll.dll (user mode), Nt* and Zw* prefixed functions are the same function at the same address. The distinction only matters in kernel mode, where Zw* functions set PreviousMode to KernelMode before dispatching through the SSDT.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: How are SSNs assigned to Nt*/Zw* functions on Windows?</p>
+<label data-opt="0"><input type="radio" name="q3_2"> Randomly, changing on each boot</label>
+<label data-opt="1"><input type="radio" name="q3_2"> By order of creation in the kernel source code</label>
+<label data-opt="2"><input type="radio" name="q3_2"> In alphabetical order of the Zw* function name</label>
+<label data-opt="3"><input type="radio" name="q3_2"> By frequency of use (most called = lowest SSN)</label>
+<div class="explain">SSNs are assigned in alphabetical order of the Zw* names. This consistent ordering is what allows neighbor-based SSN calculation techniques like Halo's Gate to work.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz3')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Previous: Syscall Architecture</a>
+<a class="primary" href="module4.html">Next: ntdll Stub Anatomy &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

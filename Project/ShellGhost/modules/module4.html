@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: The ShellGhost Concept - ShellGhost Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F47B;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#64748b;--accent2:#475569;--gradient:linear-gradient(135deg,#64748b,#475569)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ShellGhost Course</h2>
+<span>Single-Instruction Evasion</span>
+</div>
+<a class="home-link" href="../ShellGhost_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Memory Scanner Evasion Goals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Software Breakpoints &amp; INT3</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Vectored Exception Handling</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module4.html"><span>4. The ShellGhost Concept</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. SystemFunction032 &amp; Shellcode Mapping</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. VEH Handler Implementation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Background: Trap Flag &amp; Single-Stepping</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 4: The ShellGhost Concept</h1>
+<p class="subtitle">The complete single-instruction execution model &mdash; how INT3, VEH, shellcode mapping, SystemFunction032, and RW/RX toggling combine into invisible shellcode.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>This module ties together the foundational concepts (INT3 breakpoints, VEH handlers, CONTEXT usage, and per-instruction encryption) into the complete ShellGhost execution model. You will understand the full cycle: how each shellcode instruction is replaced with <code>0xCC</code>, how a Python preprocessing script maps each instruction for independent encryption, and how the VEH handler re-encrypts the previous instruction and decrypts the current one on each breakpoint &mdash; all within a single EXCEPTION_BREAKPOINT handler. This is the conceptual core of lem0nSec's ShellGhost technique.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The One-Exception Cycle</h2>
+
+<p>ShellGhost's execution revolves around a <strong>one-exception cycle</strong> that repeats for every instruction in the shellcode. Each iteration involves exactly one exception (EXCEPTION_BREAKPOINT) and one VEH handler invocation that performs <strong>both</strong> re-encryption of the previous instruction and decryption of the current one:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">The ShellGhost One-Exception Cycle</h4>
+<div class="flow">
+<div class="flow box">CPU hits 0xCC<br><small>EXCEPTION_BREAKPOINT</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">VEH: Re-encrypt prev<br><small>Restore 0xCC</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">VEH: Decrypt current<br><small>SystemFunction032</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Toggle RW&rarr;RX<br><small>VirtualProtect</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Execute instruction<br><small>CPU runs decrypted code</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Next 0xCC Hit<br><small>Cycle repeats</small></div>
+</div>
+</div>
+
+<table>
+<tr><th>Step</th><th>Handler Action</th><th>Result</th></tr>
+<tr><td><strong>Step 1</strong></td><td>EXCEPTION_BREAKPOINT fires. Handler re-encrypts the previously executed instruction bytes back to <code>0xCC</code> (if any).</td><td>Previous instruction is cleaned up</td></tr>
+<tr><td><strong>Step 2</strong></td><td>Handler looks up the current instruction in the <code>CRYPT_BYTES_QUOTA</code> array, decrypts it using SystemFunction032 (RC4), and writes the decrypted bytes to the execution buffer.</td><td>Current instruction is ready for execution</td></tr>
+<tr><td><strong>Step 3</strong></td><td>Handler toggles the page from RW to RX via <code>VirtualProtect</code> and returns EXCEPTION_CONTINUE_EXECUTION.</td><td>CPU resumes and executes the decrypted instruction, then hits the next <code>0xCC</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. Memory State at Each Phase</h2>
+
+<p>To make this concrete, let us trace the memory state through two iterations of the cycle. Assume the shellcode starts at address <code>0x1000</code>. The first instruction is <code>0x48 0x89 0xE5</code> (<code>mov rbp, rsp</code>, 3 bytes) and the second is <code>0x48 0x83 0xEC 0x20</code> (<code>sub rsp, 0x20</code>, 4 bytes):</p>
+
+<div class="card">
+<h4>Step-by-Step Memory Trace</h4>
+<table>
+<tr><th>Step</th><th>Memory at 0x1000-0x1002</th><th>Memory at 0x1003-0x1006</th><th>RIP</th><th>Event</th></tr>
+<tr><td>Initial</td><td><code>CC CC CC</code></td><td><code>CC CC CC CC</code></td><td><code>0x1000</code></td><td>CPU encounters 0xCC, BREAKPOINT fires</td></tr>
+<tr><td>After 1st BP handler</td><td><code>48 89 E5</code></td><td><code>CC CC CC CC</code></td><td><code>0x1000</code></td><td>Handler decrypts instruction 1, toggles to RX</td></tr>
+<tr><td>After instruction 1 executes</td><td><code>48 89 E5</code></td><td><code>CC CC CC CC</code></td><td><code>0x1003</code></td><td>CPU executes mov rbp,rsp; hits next 0xCC, BREAKPOINT fires</td></tr>
+<tr><td>After 2nd BP handler</td><td><code>CC CC CC</code></td><td><code>48 83 EC 20</code></td><td><code>0x1003</code></td><td>Handler re-encrypts instr 1, decrypts instr 2, toggles to RX</td></tr>
+</table>
+</div>
+
+<div class="card warn">
+<h4>Important Nuance: Multi-Byte Instructions</h4>
+<p>x86/x64 instructions can be 1 to 15 bytes long. ShellGhost handles this through the <strong>shellcode mapping</strong> preprocessing step. The Python script (<code>ShellGhost_mapping.py</code>) disassembles the shellcode ahead of time and records each instruction's offset (RVA) and byte count (quota) in a <code>CRYPT_BYTES_QUOTA</code> struct. At runtime, the VEH handler uses this mapping to know exactly how many bytes to decrypt for the current instruction and how many bytes to re-encrypt from the previous one. There is no need to determine instruction boundaries at runtime.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. The Handler Logic</h2>
+
+<p>ShellGhost's VEH handler performs all work within a single EXCEPTION_BREAKPOINT handler. Each invocation does both re-encryption and decryption:</p>
+
+<pre><span class="lang-tag">C</span>// Conceptual handler logic
+LONG CALLBACK GhostHandler(PEXCEPTION_POINTERS ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    PCONTEXT ctx = ep->ContextRecord;
+
+    if (code == EXCEPTION_BREAKPOINT) {
+        // Rip already points to the 0xCC (kernel adjusted it)
+        PBYTE current = (PBYTE)ctx->Rip;
+
+        // Validate: is this in our execution buffer?
+        if (!IsInExecBuffer(current))
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // Step 1: Re-encrypt the PREVIOUS instruction (if any)
+        //   - Toggle to RW via VirtualProtect
+        //   - Write 0xCC back over previous instruction bytes
+        if (g_ctx.prev_index >= 0) {
+            ReEncryptPrevious();
+        }
+
+        // Step 2: Decrypt the CURRENT instruction
+        //   - Look up CRYPT_BYTES_QUOTA for current instruction index
+        //   - Use SystemFunction032 to decrypt instruction bytes
+        //   - Write decrypted bytes to execution buffer
+        DecryptCurrent(g_ctx.current_index);
+
+        // Step 3: Toggle memory to RX for execution
+        VirtualProtect(page, size, PAGE_EXECUTE_READ, &old);
+
+        // Step 4: Advance instruction index
+        g_ctx.prev_index = g_ctx.current_index;
+        g_ctx.current_index++;
+
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    // Not our exception
+    return EXCEPTION_CONTINUE_SEARCH;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>4. The Data Structures</h2>
+
+<p>ShellGhost needs to maintain several pieces of state across handler invocations. These are typically stored in global variables accessible to the VEH handler:</p>
+
+<pre><span class="lang-tag">C</span>// Key data structure: per-instruction encryption mapping
+// Generated by ShellGhost_mapping.py preprocessing script
+typedef struct _CRYPT_BYTES_QUOTA {
+    DWORD rva;      // Offset of this instruction within the shellcode
+    DWORD quota;    // Number of bytes in this instruction
+} CRYPT_BYTES_QUOTA;
+
+// Example: first 3 instructions mapped by the preprocessing script
+// CRYPT_BYTES_QUOTA map[] = {
+//     { 0x0000, 3 },  // mov rbp, rsp      (3 bytes at offset 0)
+//     { 0x0003, 4 },  // sub rsp, 0x20     (4 bytes at offset 3)
+//     { 0x0007, 2 },  // xor ecx, ecx      (2 bytes at offset 7)
+//     ...
+// };
+
+// Global state for the ShellGhost handler
+typedef struct _GHOST_CONTEXT {
+    LPVOID  exec_buffer;       // Base address of the 0xCC-filled RW region
+    SIZE_T  exec_size;         // Size of the execution buffer
+    PBYTE   encrypted_sc;      // Per-instruction encrypted shellcode bytes
+    SIZE_T  sc_size;           // Size of the shellcode
+
+    // Instruction mapping (from preprocessing)
+    CRYPT_BYTES_QUOTA *map;    // Array of per-instruction RVA + byte count
+    DWORD   num_instructions;  // Total number of mapped instructions
+    DWORD   current_index;     // Index of current instruction being executed
+
+    // RC4 key for SystemFunction032
+    BYTE    rc4_key[16];       // RC4 encryption key
+    SIZE_T  key_len;           // Key length
+
+    // Tracking state
+    INT     prev_index;        // Index of previously executed instruction (-1 if none)
+} GHOST_CONTEXT;
+
+static GHOST_CONTEXT g_ghost = { 0 };</pre>
+
+<div class="card green">
+<h4>Why Global State?</h4>
+<p>VEH handlers receive only the <code>EXCEPTION_POINTERS</code> parameter &mdash; there is no way to pass custom context. Therefore, ShellGhost stores its state in global (or static) variables. This is safe because the execution buffer is only used by a single thread. If multi-threaded execution were needed, the state would need thread-local storage or synchronization.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Setup and Initialization</h2>
+
+<p>Before the execution cycle begins, ShellGhost performs these initialization steps:</p>
+
+<pre><span class="lang-tag">C</span>// Note: In real ShellGhost, the preprocessing is done OFFLINE
+// by ShellGhost_mapping.py. The encrypted data and CRYPT_BYTES_QUOTA
+// arrays are compiled directly into the C source as static arrays.
+
+void ShellGhostInit(
+    PBYTE encrypted_sc,            // Pre-encrypted shellcode (from mapping.py)
+    SIZE_T sc_size,
+    CRYPT_BYTES_QUOTA *map,        // Instruction map (from mapping.py)
+    DWORD num_instructions,
+    PBYTE key, SIZE_T key_size
+) {
+    // Step 1: Store encrypted data and mapping references
+    g_ghost.encrypted_sc = encrypted_sc;
+    g_ghost.sc_size = sc_size;
+    g_ghost.map = map;
+    g_ghost.num_instructions = num_instructions;
+    memcpy(g_ghost.rc4_key, key, key_size);
+    g_ghost.key_len = key_size;
+    g_ghost.prev_index = -1;
+    g_ghost.current_index = 0;
+
+    // Step 2: Allocate execution buffer filled with 0xCC (RW, not RWX)
+    g_ghost.exec_buffer = VirtualAlloc(NULL, sc_size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    memset(g_ghost.exec_buffer, 0xCC, sc_size);
+    g_ghost.exec_size = sc_size;
+
+    // Step 3: Register VEH handler
+    AddVectoredExceptionHandler(1, GhostHandler);
+
+    // Step 4: Create thread at end of .text segment
+    // ResolveEndofTextSegment() finds null bytes to use as entry
+    LPVOID entry = ResolveEndofTextSegment();
+    HANDLE hThread = CreateThread(NULL, 0,
+        (LPTHREAD_START_ROUTINE)entry, NULL, 0, NULL);
+    WaitForSingleObject(hThread, INFINITE);
+}</pre>
+
+<!-- ============================================================ -->
+<h2>6. Address Validation</h2>
+
+<p>A critical part of the handler is verifying that the exception originated from within the execution buffer. Without this check, the handler would incorrectly process breakpoints from other sources (debugger breakpoints, other code using INT3, etc.):</p>
+
+<pre><span class="lang-tag">C</span>// Check if the address is within our execution buffer
+BOOL IsInExecBuffer(PVOID addr) {
+    return (addr >= g_ghost.exec_buffer) &&
+           (addr < (PBYTE)g_ghost.exec_buffer + g_ghost.exec_size);
+}
+
+LONG CALLBACK GhostHandler(PEXCEPTION_POINTERS ep) {
+    PCONTEXT ctx = ep->ContextRecord;
+
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
+        // For breakpoint: the kernel (KiDispatchException) already
+        // decremented RIP by 1, so ContextRecord->Rip points directly
+        // at the 0xCC byte. No manual adjustment needed.
+        PVOID cc_addr = (PVOID)ctx->Rip;
+
+        if (!IsInExecBuffer(cc_addr)) {
+            return EXCEPTION_CONTINUE_SEARCH;  // Not ours
+        }
+        // ... handle our breakpoint
+    }
+    // ...
+}</pre>
+
+<!-- ============================================================ -->
+<h2>7. The Complete Conceptual Flow</h2>
+
+<p>Here is the entire ShellGhost execution flow from start to finish:</p>
+
+<div class="card">
+<h4>Preprocessing Phase (Offline)</h4>
+<ol>
+<li><code>ShellGhost_mapping.py</code> disassembles the raw shellcode using a disassembler (e.g., Capstone)</li>
+<li>Each instruction's offset (RVA) and byte count (quota) are recorded into <code>CRYPT_BYTES_QUOTA</code> structs</li>
+<li>Each instruction is encrypted independently with RC4 using SystemFunction032</li>
+<li>The encrypted data and mapping arrays are output as C source code to be compiled into the binary</li>
+</ol>
+</div>
+
+<div class="card">
+<h4>Initialization Phase (Runtime)</h4>
+<ol>
+<li>Load the pre-encrypted shellcode data and instruction map (compiled into the binary)</li>
+<li>Allocate a <code>PAGE_READWRITE</code> region and fill it entirely with <code>0xCC</code></li>
+<li>Register the VEH handler with <code>First = 1</code></li>
+<li>Create a new thread via <code>CreateThread()</code> with entry at the end of the <code>.text</code> segment</li>
+</ol>
+</div>
+
+<div class="card">
+<h4>Execution Cycle (repeats per instruction)</h4>
+<ol>
+<li>CPU hits <code>0xCC</code> at current position &rarr; EXCEPTION_BREAKPOINT fires</li>
+<li>VEH handler: <code>ContextRecord-&gt;Rip</code> already points at the 0xCC (kernel adjusted it)</li>
+<li>VEH handler: toggle page to RW via VirtualProtect</li>
+<li>VEH handler: re-encrypt the previously executed instruction back to <code>0xCC</code> (if any)</li>
+<li>VEH handler: look up <code>CRYPT_BYTES_QUOTA</code> for current instruction index to get RVA and byte count</li>
+<li>VEH handler: call SystemFunction032 to decrypt the instruction bytes at that offset</li>
+<li>VEH handler: write the decrypted bytes to the execution buffer</li>
+<li>VEH handler: toggle page to RX via VirtualProtect and return EXCEPTION_CONTINUE_EXECUTION</li>
+<li>CPU executes the decrypted instruction, then encounters the next <code>0xCC</code> &rarr; cycle repeats from step 1</li>
+</ol>
+</div>
+
+<div class="card">
+<h4>Termination</h4>
+<p>When the shellcode executes a <code>ret</code> instruction or otherwise transfers control outside the execution buffer, the next exception (if any) will not pass the address validation check, and normal execution resumes. If the shellcode calls Windows APIs, those calls execute normally without triggering breakpoints (the APIs live outside the execution buffer).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. What a Memory Scanner Sees</h2>
+
+<p>At any point during execution, a memory scanner examining the execution buffer sees:</p>
+
+<pre><span class="lang-tag">Text</span>Execution buffer during ShellGhost operation:
+
+Address     Content    Meaning
+0x1000      CC         INT3 (already executed and re-encrypted)
+0x1001      CC         INT3 (already executed and re-encrypted)
+0x1002      CC         INT3 (already executed and re-encrypted)
+0x1003      48         Decrypted instruction (currently executing)
+0x1004      83         (part of current instruction)
+0x1005      EC         (part of current instruction)
+0x1006      20         (part of current instruction)
+0x1007      CC         INT3 (not yet reached)
+...         CC         INT3 (all remaining bytes)
+
+At MOST one instruction is decrypted (~1-15 bytes).
+Every other byte is 0xCC.
+No shellcode signature. No recognizable pattern. No entropy anomaly.</pre>
+
+<div class="card green">
+<h4>The "Ghost" Effect</h4>
+<p>This is why the tool is called ShellGhost. The shellcode is like a ghost &mdash; it is there, executing and producing effects, but you cannot observe it. A memory scan shows nothing. A memory dump shows nothing. The shellcode materializes one instruction at a time, executes, and vanishes back into a sea of <code>0xCC</code> bytes.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="A">
+<p>Q1: How many exceptions does ShellGhost generate per shellcode instruction?</p>
+<div class="quiz-btn" data-choice="A">A) One (EXCEPTION_BREAKPOINT only)</div>
+<div class="quiz-btn" data-choice="B">B) Two (EXCEPTION_BREAKPOINT then EXCEPTION_SINGLE_STEP)</div>
+<div class="quiz-btn" data-choice="C">C) Three (breakpoint, single-step, and access violation)</div>
+<div class="quiz-btn" data-choice="D">D) It varies depending on instruction length</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: Why must the VEH handler check if the exception address is within the execution buffer?</p>
+<div class="quiz-btn" data-choice="A">A) To prevent stack overflow from recursive exceptions</div>
+<div class="quiz-btn" data-choice="B">B) To handle multi-threaded shellcode execution</div>
+<div class="quiz-btn" data-choice="C">C) To avoid processing breakpoints from other sources (debuggers, other code)</div>
+<div class="quiz-btn" data-choice="D">D) To ensure the buffer has not been freed</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What does the execution buffer contain when a memory scanner reads it during ShellGhost execution?</p>
+<div class="quiz-btn" data-choice="A">A) Almost entirely 0xCC bytes, with at most one decrypted instruction</div>
+<div class="quiz-btn" data-choice="B">B) The fully decrypted shellcode</div>
+<div class="quiz-btn" data-choice="C">C) RC4-encrypted ciphertext</div>
+<div class="quiz-btn" data-choice="D">D) Random data with high entropy</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Prev: Vectored Exception Handling</a>
+<a class="primary" href="module5.html">Next: SystemFunction032 &amp; Shellcode Mapping &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

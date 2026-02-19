@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: Memory Scanning Threat Model - ShellcodeFluctuation Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A0;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#10b981;--accent2:#059669;--gradient:linear-gradient(135deg,#10b981,#059669)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>ShellcodeFluctuation</h2><span>Memory Fluctuation Masterclass</span></div>
+  <a class="home-link" href="../ShellcodeFluctuation_index.html">&larr; Course Home</a>
+  <a class="mod-link active" href="module1.html"><span>1. Memory Scanning Threat Model</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module2.html"><span>2. XOR Encryption for Memory</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module3.html"><span>3. VirtualProtect &amp; Pages</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module4.html"><span>4. Sleep Function Hooking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module5.html"><span>5. The Fluctuation Algorithm</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module6.html"><span>6. Shellcode Region Tracking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module7.html"><span>7. Thread Stack Spoofing</span><span class="diff d3">d3</span></a>
+  <a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Memory Scanning Threat Model</h1>
+<p class="subtitle">What memory scanners look for, how they catch sleeping implants, and why ShellcodeFluctuation exists.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the detection capabilities of memory scanning tools like Moneta, pe-sieve, and BeaconEye. Learn why idle shellcode is maximally exposed, how scanners exploit the sleep window, and what specific indicators of compromise (IOCs) these tools flag.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Memory Scanner Landscape</h2>
+
+<p>Post-exploitation implants (Cobalt Strike Beacon, Meterpreter, Sliver, etc.) must reside in memory to execute. Once loaded, they become targets for a class of defensive tools that scan process address spaces for anomalies. Three tools are particularly relevant to understanding ShellcodeFluctuation:</p>
+
+<table>
+<tr><th>Tool</th><th>Author</th><th>Primary Detection Method</th><th>Key Strength</th></tr>
+<tr><td><strong>Moneta</strong></td><td>forrest-orr</td><td>Virtual memory anomaly detection</td><td>Identifies unbacked executable memory, RWX pages, modified mapped images</td></tr>
+<tr><td><strong>pe-sieve</strong></td><td>hasherezade</td><td>PE image integrity scanning</td><td>Compares in-memory modules against on-disk copies, detects hollowing and hooks</td></tr>
+<tr><td><strong>BeaconEye</strong></td><td>CCob</td><td>Cobalt Strike config signature scanning</td><td>Scans for Beacon configuration structures in process memory</td></tr>
+</table>
+
+<p>Each tool targets different evidence, but they share a common assumption: the shellcode or implant is <strong>present in cleartext in executable memory</strong> at the time of scanning.</p>
+
+<!-- ============================================================ -->
+<h2>2. What Moneta Detects</h2>
+
+<p>Moneta walks every process's virtual address space using <code>VirtualQueryEx</code> and flags memory regions exhibiting suspicious properties. Its detection categories are critical to understand because ShellcodeFluctuation is designed specifically to evade them.</p>
+
+<div class="card">
+<h4>Moneta IOC Categories</h4>
+<table>
+<tr><th>IOC</th><th>Description</th><th>Why Shellcode Triggers It</th></tr>
+<tr><td><strong>Abnormal private executable memory</strong></td><td>Private (not file-backed) memory with <code>PAGE_EXECUTE_READ</code> or <code>PAGE_EXECUTE_READWRITE</code></td><td>Shellcode is allocated with <code>VirtualAlloc</code>, creating private executable regions with no backing file</td></tr>
+<tr><td><strong>RWX memory</strong></td><td>Pages with simultaneous read, write, and execute permissions</td><td>Lazy protection: some loaders set <code>PAGE_EXECUTE_READWRITE</code> and never tighten permissions</td></tr>
+<tr><td><strong>Modified code</strong></td><td>Mapped image sections where in-memory bytes differ from the on-disk file</td><td>Inline hooks modify mapped DLL code (e.g., hooking <code>kernel32!Sleep</code> changes bytes in kernel32's .text section)</td></tr>
+<tr><td><strong>Abnormal thread start</strong></td><td>Threads whose start address points to non-image memory</td><td><code>CreateThread</code> targeting a <code>VirtualAlloc</code> region instead of a DLL function</td></tr>
+</table>
+</div>
+
+<p>When Moneta scans an unprotected Cobalt Strike Beacon, it immediately flags the shellcode allocation as "Abnormal private executable memory" &mdash; this is the primary IOC that ShellcodeFluctuation targets.</p>
+
+<!-- ============================================================ -->
+<h2>3. What pe-sieve Detects</h2>
+
+<p>pe-sieve focuses on PE image integrity. It enumerates loaded modules in a process and compares them byte-for-byte against their on-disk counterparts. Key detection capabilities:</p>
+
+<div class="card">
+<h4>pe-sieve Detection Vectors</h4>
+<ul>
+<li><strong>Module overwriting (hollowing)</strong> &mdash; the in-memory image of a DLL or EXE has been replaced with different code</li>
+<li><strong>Inline hooks</strong> &mdash; specific functions within a mapped module have been patched (JMP instructions at function entry points)</li>
+<li><strong>Implant scanning</strong> &mdash; pe-sieve can also scan non-image memory regions, finding shellcode through heuristics</li>
+<li><strong>IAT modification</strong> &mdash; Import Address Table entries pointing to unexpected locations</li>
+</ul>
+</div>
+
+<p>For ShellcodeFluctuation, pe-sieve is relevant in two ways: it can detect the shellcode itself (if present in cleartext), and it can detect the <strong>inline hook on kernel32!Sleep</strong> that the fluctuation mechanism installs.</p>
+
+<!-- ============================================================ -->
+<h2>4. What BeaconEye Detects</h2>
+
+<p>BeaconEye takes a targeted approach, specifically hunting for Cobalt Strike Beacon configurations in memory. Beacon stores its configuration (C2 URLs, sleep time, watermark, etc.) in a predictable structure that can be identified through pattern matching.</p>
+
+<pre><code class="language-cpp">// Simplified Beacon config structure in memory
+// BeaconEye scans for these characteristic patterns:
+struct BeaconConfig {
+    uint16_t setting_id;      // e.g., 0x0001 = BeaconType
+    uint16_t data_type;       // 0x0001=short, 0x0002=int, 0x0003=data
+    uint16_t data_length;
+    char     data[];          // the actual configuration value
+};
+// The config block is XOR'd with a single byte key in memory
+// BeaconEye tries all 256 possible XOR keys to decode it</code></pre>
+
+<p>BeaconEye scans all private memory regions in every process, attempting single-byte XOR decryption with each of the 256 possible keys. If the decoded data matches the Beacon configuration signature, detection occurs. ShellcodeFluctuation's multi-byte XOR encryption defeats this brute-force approach because 256 keys is insufficient to crack a 32-bit XOR key.</p>
+
+<!-- ============================================================ -->
+<h2>5. The Idle-Time Detection Window</h2>
+
+<p>C2 implants follow a predictable lifecycle: execute briefly, then sleep for an extended period. This creates a massive asymmetry that defenders exploit:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Time Distribution of a 60-Second Beacon</h4>
+<div class="flow">
+<div class="flow box">ACTIVE<br><small>~100ms<br>0.17% of cycle</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">SLEEPING<br><small>~59,900ms<br>99.83% of cycle</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">ACTIVE<br><small>~100ms<br>0.17% of cycle</small></div>
+</div>
+</div>
+
+<p>During the sleep window, the shellcode memory region has these properties that make it trivially detectable:</p>
+
+<table>
+<tr><th>Property</th><th>During Sleep (unprotected)</th><th>What Scanner Sees</th></tr>
+<tr><td><strong>Protection</strong></td><td><code>PAGE_EXECUTE_READ</code> (0x20)</td><td>Executable private memory with no backing file</td></tr>
+<tr><td><strong>Content</strong></td><td>Cleartext shellcode</td><td>Known signatures, MZ headers, config structures</td></tr>
+<tr><td><strong>Type</strong></td><td><code>MEM_PRIVATE</code></td><td>Not mapped from any DLL &mdash; allocated via <code>VirtualAlloc</code></td></tr>
+<tr><td><strong>Thread</strong></td><td>Suspended on <code>Sleep</code>/<code>WaitForSingleObject</code></td><td>Thread start address in private memory</td></tr>
+</table>
+
+<div class="card warn">
+<h4>The Core Problem</h4>
+<p>An unprotected implant is detectable during 99.83% of its runtime. Memory scanners do not need to be fast or lucky &mdash; they just need to scan at any point during the sleep window. Even periodic scans at 30-second intervals will catch a 60-second beacon with near-certainty.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. How Scanners Enumerate Memory</h2>
+
+<p>Understanding the API surface that scanners use helps explain why certain evasion strategies work:</p>
+
+<pre><code class="language-cpp">// Core scanning loop used by tools like Moneta
+MEMORY_BASIC_INFORMATION mbi;
+LPVOID address = 0;
+
+while (VirtualQueryEx(hProcess, address, &mbi, sizeof(mbi))) {
+    // Check for suspicious attributes
+    if (mbi.Type == MEM_PRIVATE &&
+        (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
+        // FLAG: Private executable memory - potential shellcode
+        ScanRegion(hProcess, mbi.BaseAddress, mbi.RegionSize);
+    }
+
+    if (mbi.Protect == PAGE_EXECUTE_READWRITE) {
+        // FLAG: RWX memory - highly suspicious
+        FlagRWX(hProcess, mbi.BaseAddress, mbi.RegionSize);
+    }
+
+    // Advance to next region
+    address = (LPBYTE)mbi.BaseAddress + mbi.RegionSize;
+}</code></pre>
+
+<p>The key insight: scanners use <code>VirtualQueryEx</code> to read the <strong>current page protection</strong>. If the memory is marked <code>PAGE_READWRITE</code> (no execute), it does not match the "private executable memory" heuristic. This is the foundation of ShellcodeFluctuation's evasion strategy.</p>
+
+<!-- ============================================================ -->
+<h2>7. The ShellcodeFluctuation Strategy</h2>
+
+<p>ShellcodeFluctuation (by mgeeky / Mariusz Banach) addresses the idle-time detection window with a straightforward but effective approach:</p>
+
+<div class="card green">
+<h4>The Fluctuation Concept</h4>
+<ol>
+<li><strong>Before sleep:</strong> Change shellcode memory from <code>PAGE_EXECUTE_READ</code> to <code>PAGE_READWRITE</code></li>
+<li><strong>Before sleep:</strong> XOR-encrypt the entire shellcode region in-place</li>
+<li><strong>During sleep:</strong> Memory is non-executable and contains encrypted gibberish</li>
+<li><strong>After wake:</strong> XOR-decrypt the shellcode region</li>
+<li><strong>After wake:</strong> Change memory back to <code>PAGE_EXECUTE_READ</code></li>
+</ol>
+<p>This transforms the scanner's view during the 99.83% sleep window from "executable shellcode" to "non-executable random data" &mdash; eliminating every IOC in the table above.</p>
+</div>
+
+<p>The mechanism is called "fluctuation" because the memory protection constantly oscillates between RW (encrypted) and RX (executable), and the content constantly toggles between ciphertext and plaintext.</p>
+
+<!-- ============================================================ -->
+<h2>8. Detection Evasion Summary</h2>
+
+<table>
+<tr><th>Scanner</th><th>IOC</th><th>Without Fluctuation</th><th>With Fluctuation (during sleep)</th></tr>
+<tr><td><strong>Moneta</strong></td><td>Private executable memory</td><td>Detected</td><td>Evaded &mdash; memory is RW, not executable</td></tr>
+<tr><td><strong>Moneta</strong></td><td>RWX memory</td><td>Detected (if RWX used)</td><td>Evaded &mdash; never uses RWX</td></tr>
+<tr><td><strong>pe-sieve</strong></td><td>Shellcode signatures</td><td>Detected</td><td>Evaded &mdash; content is XOR-encrypted</td></tr>
+<tr><td><strong>BeaconEye</strong></td><td>Beacon config pattern</td><td>Detected</td><td>Evaded &mdash; 32-bit XOR key defeats brute-force</td></tr>
+<tr><td><strong>Any scanner</strong></td><td>Known byte patterns</td><td>Detected</td><td>Evaded &mdash; encrypted content has no recognizable patterns</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>What Remains Detectable</h4>
+<p>ShellcodeFluctuation does not eliminate all IOCs. The inline hook on <code>kernel32!Sleep</code> creates a "Modified code" IOC in Moneta because patching a mapped module's code causes a private copy of the affected page (copy-on-write). This is addressed in Module 5 by temporarily unhooking Sleep before the actual sleep call.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What is the primary Moneta IOC that ShellcodeFluctuation eliminates during the sleep window?</p>
+<div class="quiz-btn" data-choice="A">A) Modified code in kernel32.dll</div>
+<div class="quiz-btn" data-choice="B">B) Abnormal private executable memory</div>
+<div class="quiz-btn" data-choice="C">C) Thread running from ntdll.dll</div>
+<div class="quiz-btn" data-choice="D">D) Signed module with invalid certificate</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: Why does single-byte XOR (as used by Beacon config obfuscation) fail against BeaconEye?</p>
+<div class="quiz-btn" data-choice="A">A) Single-byte XOR is too slow</div>
+<div class="quiz-btn" data-choice="B">B) BeaconEye uses hardware-accelerated decryption</div>
+<div class="quiz-btn" data-choice="C">C) BeaconEye can brute-force all 256 possible single-byte keys</div>
+<div class="quiz-btn" data-choice="D">D) Single-byte XOR corrupts the configuration data</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: Approximately what percentage of its runtime does a 60-second beacon spend sleeping (and thus vulnerable to scanning)?</p>
+<div class="quiz-btn" data-choice="A">A) ~99.8%</div>
+<div class="quiz-btn" data-choice="B">B) ~50%</div>
+<div class="quiz-btn" data-choice="C">C) ~75%</div>
+<div class="quiz-btn" data-choice="D">D) ~90%</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: XOR Encryption for Memory Evasion &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: Signature-Based Detection & Why Polymorphism - Shoggoth Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F419;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#a855f7;--accent2:#7c3aed;--gradient:linear-gradient(135deg,#a855f7,#7c3aed)}</style>
+</head>
+<body>
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+<nav>
+<div class="logo">
+<h2>Shoggoth Course</h2>
+<span>Polymorphic Engine Masterclass</span>
+</div>
+<a class="home-link" href="../Shoggoth_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span>1. Signatures &amp; Polymorphism</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Polymorphic Engine Concepts</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. asmjit: Runtime Codegen</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Shoggoth Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Encryption Layer</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Decoder Stub Generation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Junk Code &amp; Anti-Analysis</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Signature-Based Detection &amp; Why Polymorphism</h1>
+<p class="subtitle">Understanding how static analysis catches malware and why simple encoding schemes fail to provide lasting evasion.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Learn the mechanics behind signature-based detection, understand how YARA rules and pattern-matching engines work, see why XOR encoding and single-key encryption are trivially defeated, and build the conceptual foundation for why polymorphic engines like Shoggoth exist.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. How Signature-Based Detection Works</h2>
+
+<p>Antivirus and EDR products rely heavily on <strong>signature-based detection</strong> as a first line of defense. A signature is a sequence of bytes, a pattern, or a set of conditions that uniquely identifies a known piece of malicious code. When a file is scanned, the detection engine searches for these known patterns within the binary data.</p>
+
+<p>At its core, signature matching is a string search problem. The scanner maintains a database of thousands (sometimes millions) of signatures and compares every scanned file against this database. If a match is found, the file is flagged as malicious. The key advantage of this approach is its speed and low false-positive rate &mdash; a byte-exact match on a known malware sample is almost always a true positive.</p>
+
+<table>
+<tr><th>Detection Method</th><th>How It Works</th><th>Strengths</th><th>Weaknesses</th></tr>
+<tr><td><strong>Byte Signatures</strong></td><td>Exact byte sequences extracted from known malware samples</td><td>Extremely fast, near-zero false positives</td><td>Trivially defeated by changing a single byte</td></tr>
+<tr><td><strong>Wildcard Signatures</strong></td><td>Patterns with wildcards (e.g., <code>EB ?? 90 90 ?? FF</code>) allowing variable bytes</td><td>Tolerates minor variations</td><td>Wider patterns increase scan time and false positives</td></tr>
+<tr><td><strong>Heuristic Signatures</strong></td><td>Behavioral patterns like &ldquo;allocates RWX memory then writes MZ header&rdquo;</td><td>Catches unknown variants</td><td>Higher false-positive rate, computationally expensive</td></tr>
+<tr><td><strong>YARA Rules</strong></td><td>Flexible pattern language combining byte patterns, strings, conditions, and metadata</td><td>Highly expressive, community-maintained rulesets</td><td>Rules must be written and maintained; evasion is possible</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. YARA Rules in Practice</h2>
+
+<p>YARA is the de facto standard for writing malware signatures in the security industry. A YARA rule consists of strings to search for (hex patterns, text strings, or regular expressions) and a condition that determines when the rule matches. Understanding YARA is essential to understanding what polymorphic engines must defeat.</p>
+
+<p>Consider a simple YARA rule that targets a hypothetical shellcode loader:</p>
+
+<pre><span class="lang-tag">YARA</span><code>rule ShellcodeLoader_Generic {
+    meta:
+        author = "Analyst"
+        description = "Detects generic shellcode loader pattern"
+    strings:
+        $api1 = "VirtualAlloc" ascii
+        $api2 = "VirtualProtect" ascii
+        $stub = { 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 }
+        $xor_loop = { 80 34 ?? ?? 48 FF C? 48 3B ?? 75 }
+    condition:
+        uint16(0) == 0x5A4D and
+        all of ($api*) and
+        ($stub or $xor_loop)
+}</code></pre>
+
+<p>This rule looks for a PE file containing API import strings, a known function prologue byte pattern, and a characteristic XOR decryption loop. If all conditions match, the file is flagged. The rule is effective against <em>static</em> payloads but falls apart against polymorphic output because the byte patterns, register choices, and instruction sequences change every time.</p>
+
+<div class="card green">
+<h4>Key Insight</h4>
+<p>YARA rules target <strong>invariants</strong> &mdash; byte sequences that remain the same across samples. A polymorphic engine eliminates invariants by ensuring that no two outputs share the same byte sequences in their decoder stubs, encryption keys, or instruction layouts.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Why Simple XOR Encoding Fails</h2>
+
+<p>The most basic attempt at evading signatures is XOR encoding: take the payload, XOR every byte with a single key, and prepend a small decoder loop. This was sufficient in the 1990s but is trivially defeated today for several reasons:</p>
+
+<h3>3.1 The Decoder Stub Is Static</h3>
+
+<p>Even though the encrypted payload changes when the key changes, the decoder loop itself remains identical. A YARA rule can simply target the decoder stub rather than the payload:</p>
+
+<pre><span class="lang-tag">ASM</span><code>; Classic single-byte XOR decoder - always the same bytes
+    jmp short get_address     ; EB XX
+get_address:
+    pop rsi                   ; 5E
+    xor rcx, rcx              ; 48 31 C9
+    mov cl, PAYLOAD_LEN       ; B1 XX
+decode_loop:
+    xor byte [rsi + rcx], KEY ; 80 74 0E XX
+    loop decode_loop           ; E2 FA
+    jmp rsi                   ; FF E6</code></pre>
+
+<p>The opcodes <code>EB</code>, <code>5E</code>, <code>48 31 C9</code>, <code>80 74 0E</code>, <code>E2 FA</code>, <code>FF E6</code> form a reliable signature. Changing the XOR key changes the operand byte but not the instruction opcodes.</p>
+
+<h3>3.2 Statistical Analysis Breaks XOR</h3>
+
+<p>Single-byte XOR is vulnerable to <strong>frequency analysis</strong>. In most payloads, the null byte (<code>0x00</code>) appears frequently. When XORed with key <code>K</code>, null bytes become <code>K</code>. An analyst can find the most frequent byte in the encrypted blob, assume it corresponds to <code>0x00</code>, and recover the key instantly.</p>
+
+<div class="card warn">
+<h4>Brute Force Is Trivial</h4>
+<p>A single-byte XOR key has only 256 possible values. Even without frequency analysis, an automated tool can try all 256 keys in microseconds, check if the decrypted output contains known strings or valid instructions, and recover the payload. Multi-byte XOR with a short repeating key is only marginally better &mdash; Kasiski examination and index-of-coincidence analysis can determine the key length and break it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Why Multi-Layer Static Encryption Still Fails</h2>
+
+<p>A natural progression from single-byte XOR is to layer multiple encryption operations: first XOR with key A, then ADD with key B, then ROL by 3 bits. This makes frequency analysis harder, but it does not solve the fundamental problem:</p>
+
+<ul>
+<li><strong>The decoder is still static.</strong> No matter how complex the encryption, the decoder stub that reverses the operations is a fixed sequence of instructions. Analysts write signatures for the decoder, not the encrypted blob.</li>
+<li><strong>The structure is predictable.</strong> Decoder stub + encrypted payload is a recognizable pattern. The entropy profile (low-entropy decoder followed by high-entropy encrypted data) is itself a detection signal.</li>
+<li><strong>Emulation defeats it.</strong> Modern AV engines include CPU emulators that can execute the decoder stub in a sandbox, observe the decrypted output, and scan <em>that</em> for signatures. The encryption becomes irrelevant &mdash; the emulator peels it off automatically.</li>
+</ul>
+
+<div class="diagram">
+<h4>Why Static Encryption Fails Against Emulation</h4>
+<div class="flow">
+<div class="box">Encrypted Payload</div>
+<div class="arrow">&rarr;</div>
+<div class="box r">AV Emulator Runs Decoder</div>
+<div class="arrow">&rarr;</div>
+<div class="box">Decrypted Payload in Sandbox</div>
+<div class="arrow">&rarr;</div>
+<div class="box r">Signature Match!</div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. The Case for Polymorphism</h2>
+
+<p>Polymorphism solves the fundamental weakness of static encoding by ensuring that the <strong>decoder stub itself changes</strong> with every generation. A polymorphic engine does not merely change the encryption key &mdash; it changes the instructions used to perform decryption, the registers allocated, the order of operations, and even inserts meaningless junk code between real instructions.</p>
+
+<p>The goal is to eliminate <em>all</em> static invariants from the output. Two runs of a polymorphic engine with the same input payload produce outputs that:</p>
+
+<ul>
+<li>Use different encryption keys and algorithms</li>
+<li>Have different decoder stub instructions (even though they perform the same logical operation)</li>
+<li>Use different CPU registers</li>
+<li>Contain different amounts and types of junk code</li>
+<li>Have different binary sizes and layouts</li>
+<li>Share zero common byte sequences longer than a few bytes</li>
+</ul>
+
+<table>
+<tr><th>Property</th><th>Static Encoder</th><th>Polymorphic Engine</th></tr>
+<tr><td><strong>Decoder stub</strong></td><td>Identical every time</td><td>Different instructions, registers, layout each time</td></tr>
+<tr><td><strong>Encryption</strong></td><td>Same algorithm, different key</td><td>Different algorithm chain, different keys, different order</td></tr>
+<tr><td><strong>Junk code</strong></td><td>None</td><td>Randomly generated NOP-equivalent instructions inserted throughout</td></tr>
+<tr><td><strong>Register usage</strong></td><td>Hardcoded registers</td><td>Randomly selected from available pool</td></tr>
+<tr><td><strong>Signature resilience</strong></td><td>Trivially signatured on decoder</td><td>No stable byte pattern to signature</td></tr>
+<tr><td><strong>Emulation resilience</strong></td><td>None</td><td>Junk code + opaque predicates slow emulation; can exceed time budgets</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>6. What Shoggoth Brings to the Table</h2>
+
+<p>Shoggoth by <strong>frkngksl</strong> is a modern polymorphic encryptor implemented in C++ using the asmjit library for runtime x86-64 code generation. It takes three input types (raw shellcode, PE files, COFF/BOF files) and produces position-independent encrypted output that self-decrypts at runtime.</p>
+
+<p>What makes Shoggoth a true polymorphic engine rather than a simple encoder:</p>
+
+<div class="card green">
+<h4>Shoggoth&rsquo;s Polymorphic Properties</h4>
+<ul>
+<li><strong>Two-stage encryption</strong> &mdash; RC4 stream cipher plus a random block cipher using operations chosen from XOR, ADD, SUB, ROL, ROR, NOT, NEG, INC, DEC</li>
+<li><strong>Dynamic stub assembly</strong> &mdash; asmjit generates x86-64 machine code at runtime, choosing different registers and instruction sequences each time</li>
+<li><strong>Recursive junk code</strong> &mdash; garbage instructions are inserted between real decoder operations, including jump-over blocks, side-effect-free computations, and fake function calls</li>
+<li><strong>PIC output</strong> &mdash; all output is position-independent code that runs from any memory address without fixups</li>
+<li><strong>Deterministic replay</strong> &mdash; an optional seed parameter allows reproducible generation for testing while still producing polymorphic output by default</li>
+</ul>
+</div>
+
+<p>Over the next seven modules, we will dissect every component of this engine: the asmjit code generation library, the encryption pipeline, the decoder stub construction, the junk code strategies, and the final output packaging for each supported format.</p>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz1">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why does a single-byte XOR encoder fail against modern detection?</p>
+<label data-opt="0"><input type="radio" name="q1"> The XOR operation is too slow for real-time decryption</label>
+<label data-opt="1"><input type="radio" name="q1"> XOR cannot handle payloads larger than 256 bytes</label>
+<label data-opt="2"><input type="radio" name="q1"> The decoder stub is static and the key space (256 values) is trivially brute-forced</label>
+<label data-opt="3"><input type="radio" name="q1"> XOR encoding changes the file size, which triggers heuristic alerts</label>
+<div class="explain">Single-byte XOR has a fixed 256-value key space that can be exhausted in microseconds. More importantly, the decoder loop uses identical opcodes every time, making it trivially signaturable by YARA rules that target the decoder rather than the encrypted payload.</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>Q2: What is the primary advantage of a polymorphic engine over a static encoder?</p>
+<label data-opt="0"><input type="radio" name="q2"> It uses stronger encryption algorithms</label>
+<label data-opt="1"><input type="radio" name="q2"> The decoder stub changes with every generation, eliminating stable byte signatures</label>
+<label data-opt="2"><input type="radio" name="q2"> It compresses the payload to reduce file size</label>
+<label data-opt="3"><input type="radio" name="q3"> It runs the payload in kernel mode to bypass user-mode scanners</label>
+<div class="explain">The defining characteristic of a polymorphic engine is that the decoder stub (not just the encrypted payload) is different each time. This eliminates the static byte patterns that signature-based detection relies on, forcing defenders to use more expensive heuristic or emulation-based approaches.</div>
+</div>
+
+<div class="quiz-q" data-correct="3">
+<p>Q3: How does an AV emulator defeat static encryption?</p>
+<label data-opt="0"><input type="radio" name="q3a"> It decrypts the payload by brute-forcing the key</label>
+<label data-opt="1"><input type="radio" name="q3a"> It blocks the payload from executing in memory</label>
+<label data-opt="2"><input type="radio" name="q3a"> It compares file hashes against a known-malware database</label>
+<label data-opt="3"><input type="radio" name="q3a"> It executes the decoder stub in a sandbox, then scans the decrypted output for signatures</label>
+<div class="explain">AV emulators run the binary (or just the decoder stub) in a lightweight CPU emulator/sandbox. Once the decoder runs and produces the cleartext payload, the emulator scans that decrypted output against its signature database. This makes the encryption layer transparent &mdash; the emulator effectively undoes it.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: Polymorphic Engine Concepts &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

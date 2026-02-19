@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: Windows Kernel Driver Basics - Nidhogg Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F409;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#dc2626;--accent2:#b91c1c;--gradient:linear-gradient(135deg,#dc2626,#b91c1c)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Nidhogg Course</h2>
+<span>Kernel Rootkit Masterclass</span>
+</div>
+<a class="home-link" href="../Nidhogg_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Kernel vs User-Mode</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module2.html"><span>2. Driver Basics</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Process &amp; Thread</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. File &amp; Registry</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. ETW Disabling</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Callbacks &amp; Notifications</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Memory Evasion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: Windows Kernel Driver Basics</h1>
+<p class="subtitle">DriverEntry, IRP dispatch, IOCTL communication, and loading drivers into the kernel.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the anatomy of a Windows kernel driver: the <code>DriverEntry</code> entry point, device and symbolic link creation, IRP (I/O Request Packet) dispatch routines, IOCTL-based communication with user mode, and the mechanisms for loading a driver via <code>sc.exe</code> or manual mapping with kdmapper.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. DriverEntry: The Kernel Entry Point</h2>
+
+<p>Every Windows kernel driver begins execution at <code>DriverEntry</code>, analogous to <code>main()</code> in user-mode programs. The function signature is defined by the WDK:</p>
+
+<pre><span class="lang-tag">C</span>// DriverEntry - called by the I/O Manager when the driver is loaded
+NTSTATUS DriverEntry(
+    _In_ PDRIVER_OBJECT  DriverObject,   // Represents this driver in the kernel
+    _In_ PUNICODE_STRING RegistryPath    // Registry key for driver parameters
+) {
+    NTSTATUS status;
+
+    // 1. Set up dispatch routines (IRP handlers)
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = NidhoggCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE]  = NidhoggCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = NidhoggDeviceControl;
+
+    // 2. Set the unload routine (allows driver to be stopped)
+    DriverObject->DriverUnload = NidhoggUnload;
+
+    // 3. Create a device object (communication endpoint)
+    UNICODE_STRING deviceName = RTL_CONSTANT_STRING(L"\\Device\\Nidhogg");
+    PDEVICE_OBJECT DeviceObject;
+    status = IoCreateDevice(
+        DriverObject,
+        0,                    // DeviceExtensionSize
+        &deviceName,
+        FILE_DEVICE_UNKNOWN,
+        FILE_DEVICE_SECURE_OPEN,
+        FALSE,                // Not exclusive
+        &DeviceObject
+    );
+    if (!NT_SUCCESS(status)) return status;
+
+    // 4. Create a symbolic link for user-mode access
+    UNICODE_STRING symLink = RTL_CONSTANT_STRING(L"\\??\\Nidhogg");
+    status = IoCreateSymbolicLink(&symLink, &deviceName);
+    if (!NT_SUCCESS(status)) {
+        IoDeleteDevice(DeviceObject);
+        return status;
+    }
+
+    return STATUS_SUCCESS;
+}</pre>
+
+<div class="card">
+<h4>The DRIVER_OBJECT</h4>
+<p>The <code>DRIVER_OBJECT</code> structure is the kernel's representation of a loaded driver. It contains the <code>MajorFunction</code> array &mdash; a table of 28 function pointers, one for each IRP major function code. The I/O Manager uses this table to dispatch I/O requests to the correct handler in the driver. Setting these pointers is how the driver tells the kernel which functions to call.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Device Objects and Symbolic Links</h2>
+
+<p>For user-mode applications to communicate with a kernel driver, two objects must be created:</p>
+
+<table>
+<tr><th>Object</th><th>Purpose</th><th>Namespace</th><th>Accessible From</th></tr>
+<tr><td><strong>Device Object</strong></td><td>The actual communication endpoint in the kernel</td><td><code>\Device\Nidhogg</code></td><td>Kernel mode only</td></tr>
+<tr><td><strong>Symbolic Link</strong></td><td>A name visible to user-mode applications</td><td><code>\\.\Nidhogg</code> (user sees <code>\??\Nidhogg</code>)</td><td>User mode via <code>CreateFile</code></td></tr>
+</table>
+
+<p>The symbolic link acts as a bridge. When a user-mode application calls <code>CreateFile(L"\\\\.\\Nidhogg", ...)</code>, the Object Manager resolves the symbolic link <code>\??\Nidhogg</code> to the device object <code>\Device\Nidhogg</code>, and the I/O Manager sends an <code>IRP_MJ_CREATE</code> to the driver.</p>
+
+<pre><span class="lang-tag">C++</span>// User-mode client opening a handle to Nidhogg
+HANDLE hDevice = CreateFileW(
+    L"\\\\.\\Nidhogg",       // Symbolic link name
+    GENERIC_READ | GENERIC_WRITE,
+    0,                        // No sharing
+    NULL,                     // Default security
+    OPEN_EXISTING,
+    FILE_ATTRIBUTE_NORMAL,
+    NULL
+);
+// hDevice is now a handle to Nidhogg's device object</pre>
+
+<!-- ============================================================ -->
+<h2>3. IRP Dispatch Model</h2>
+
+<p>All communication between user mode and kernel drivers flows through <strong>I/O Request Packets (IRPs)</strong>. An IRP is a kernel data structure that describes a pending I/O operation:</p>
+
+<div class="card">
+<h4>Key IRP Major Function Codes</h4>
+<table>
+<tr><th>Code</th><th>Triggered By</th><th>Purpose in Nidhogg</th></tr>
+<tr><td><code>IRP_MJ_CREATE</code></td><td><code>CreateFile()</code></td><td>Open a handle to the device</td></tr>
+<tr><td><code>IRP_MJ_CLOSE</code></td><td><code>CloseHandle()</code></td><td>Close the device handle</td></tr>
+<tr><td><code>IRP_MJ_DEVICE_CONTROL</code></td><td><code>DeviceIoControl()</code></td><td>Send IOCTL commands (the main communication channel)</td></tr>
+<tr><td><code>IRP_MJ_READ</code></td><td><code>ReadFile()</code></td><td>Not used by Nidhogg (IOCTL-only design)</td></tr>
+<tr><td><code>IRP_MJ_WRITE</code></td><td><code>WriteFile()</code></td><td>Not used by Nidhogg (IOCTL-only design)</td></tr>
+</table>
+</div>
+
+<p>Each IRP contains an array of <code>IO_STACK_LOCATION</code> structures, one per driver in the device stack. The current stack location holds the parameters for the operation, including the IOCTL code and input/output buffer information.</p>
+
+<pre><span class="lang-tag">C</span>// Minimal IRP_MJ_CREATE / IRP_MJ_CLOSE handler
+NTSTATUS NidhoggCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>4. IOCTL Communication</h2>
+
+<p>IOCTLs (I/O Control Codes) are the primary mechanism for sending structured commands from user mode to a kernel driver. An IOCTL code is a 32-bit value that encodes four fields:</p>
+
+<pre><span class="lang-tag">C</span>// IOCTL code layout (CTL_CODE macro)
+#define CTL_CODE(DeviceType, Function, Method, Access) \
+    (((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method))
+
+// Nidhogg IOCTL definitions (example)
+#define IOCTL_NIDHOGG_HIDE_PROCESS \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define IOCTL_NIDHOGG_PROTECT_FILE \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define IOCTL_NIDHOGG_DISABLE_ETW \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)</pre>
+
+<table>
+<tr><th>Field</th><th>Bits</th><th>Purpose</th></tr>
+<tr><td><strong>DeviceType</strong></td><td>31-16</td><td>Type of device (FILE_DEVICE_UNKNOWN for custom drivers)</td></tr>
+<tr><td><strong>Access</strong></td><td>15-14</td><td>Required access rights (FILE_ANY_ACCESS, FILE_READ_DATA, etc.)</td></tr>
+<tr><td><strong>Function</strong></td><td>13-2</td><td>Driver-defined function code (0x800+ for vendor-defined)</td></tr>
+<tr><td><strong>Method</strong></td><td>1-0</td><td>Buffer transfer method (METHOD_BUFFERED, METHOD_NEITHER, etc.)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. Buffer Transfer Methods</h2>
+
+<p>The <code>Method</code> field in the IOCTL code determines how input/output buffers are handled between user mode and kernel mode:</p>
+
+<div class="card green">
+<h4>METHOD_BUFFERED (Most Common, Used by Nidhogg)</h4>
+<p>The I/O Manager allocates a kernel-mode buffer, copies user input into it before calling the driver, and copies output back to user mode after the driver completes. This is the safest method because the driver never touches user-mode addresses directly.</p>
+</div>
+
+<pre><span class="lang-tag">C</span>// Accessing buffers in METHOD_BUFFERED IOCTL handler
+NTSTATUS NidhoggDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG ioctl = stack->Parameters.DeviceIoControl.IoControlCode;
+
+    // For METHOD_BUFFERED:
+    // Input buffer:  Irp->AssociatedIrp.SystemBuffer (kernel copy of user input)
+    // Output buffer: Irp->AssociatedIrp.SystemBuffer (same buffer, reused)
+    // Input size:    stack->Parameters.DeviceIoControl.InputBufferLength
+    // Output size:   stack->Parameters.DeviceIoControl.OutputBufferLength
+
+    PVOID buffer = Irp->AssociatedIrp.SystemBuffer;
+    ULONG inLen  = stack->Parameters.DeviceIoControl.InputBufferLength;
+
+    switch (ioctl) {
+    case IOCTL_NIDHOGG_HIDE_PROCESS:
+        // buffer contains the PID to hide
+        if (inLen < sizeof(ULONG)) {
+            Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        ULONG pid = *(PULONG)buffer;
+        Irp->IoStatus.Status = HideProcess(pid);
+        break;
+
+    // ... other IOCTL cases ...
+
+    default:
+        Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Irp->IoStatus.Status;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>6. The User-Mode Client Side</h2>
+
+<p>NidhoggClient (the C++ user-mode component) sends commands to the driver through standard Win32 APIs:</p>
+
+<pre><span class="lang-tag">C++</span>// NidhoggClient: sending a "hide process" command
+bool HideProcess(HANDLE hDevice, DWORD pid) {
+    DWORD bytesReturned = 0;
+    BOOL success = DeviceIoControl(
+        hDevice,                       // Handle from CreateFile
+        IOCTL_NIDHOGG_HIDE_PROCESS,    // IOCTL code
+        &pid,                          // Input buffer (PID)
+        sizeof(pid),                   // Input size
+        NULL,                          // No output buffer needed
+        0,                             // Output size
+        &bytesReturned,                // Bytes returned
+        NULL                           // Not overlapped
+    );
+    return success != FALSE;
+}</pre>
+
+<div class="card">
+<h4>Communication Flow</h4>
+<ol>
+<li>Client calls <code>CreateFile(L"\\\\.\\Nidhogg")</code> &rarr; IRP_MJ_CREATE &rarr; driver returns SUCCESS</li>
+<li>Client calls <code>DeviceIoControl(hDevice, IOCTL_HIDE_PROCESS, &pid, ...)</code></li>
+<li>I/O Manager creates an IRP with major function IRP_MJ_DEVICE_CONTROL</li>
+<li>I/O Manager copies <code>pid</code> into a kernel buffer (METHOD_BUFFERED)</li>
+<li>Driver's <code>NidhoggDeviceControl</code> is called, reads PID, performs DKOM</li>
+<li>Driver completes IRP with STATUS_SUCCESS</li>
+<li>Control returns to user mode; <code>DeviceIoControl</code> returns TRUE</li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Driver Unload</h2>
+
+<p>A well-written rootkit should support clean unloading. The <code>DriverUnload</code> routine reverses all setup done in <code>DriverEntry</code>:</p>
+
+<pre><span class="lang-tag">C</span>VOID NidhoggUnload(_In_ PDRIVER_OBJECT DriverObject) {
+    // 1. Remove any installed callbacks
+    // (CmUnRegisterCallback, ObUnRegisterCallbacks, etc.)
+
+    // 2. Undo any DKOM modifications
+    // (re-link hidden processes, restore hooked IRP pointers)
+
+    // 3. Delete symbolic link
+    UNICODE_STRING symLink = RTL_CONSTANT_STRING(L"\\??\\Nidhogg");
+    IoDeleteSymbolicLink(&symLink);
+
+    // 4. Delete device object
+    IoDeleteDevice(DriverObject->DeviceObject);
+}</pre>
+
+<div class="card warn">
+<h4>Unload Considerations</h4>
+<p>In practice, many rootkits either omit the unload routine (making the driver persistent until reboot) or set <code>DriverObject->DriverUnload = NULL</code> to prevent administrators from stopping the driver. Nidhogg supports unloading for development convenience, but an operational deployment might disable it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Loading Drivers: sc.exe vs kdmapper</h2>
+
+<p>Two common methods for loading kernel drivers during red team operations:</p>
+
+<h3>8.1 Service Control Manager (sc.exe)</h3>
+
+<pre><span class="lang-tag">Batch</span>:: Create a kernel driver service
+sc create Nidhogg type= kernel binPath= C:\path\to\Nidhogg.sys
+
+:: Start the driver (triggers DriverEntry)
+sc start Nidhogg
+
+:: Stop the driver (triggers DriverUnload)
+sc stop Nidhogg
+
+:: Delete the service registration
+sc delete Nidhogg</pre>
+
+<p>This is the legitimate path. It requires administrator privileges and a signed driver. The Service Control Manager calls <code>NtLoadDriver</code>, which invokes CI signature validation. The driver load is logged in the System event log (Event ID 7045).</p>
+
+<h3>8.2 kdmapper (Manual Mapping)</h3>
+
+<pre><span class="lang-tag">Text</span>kdmapper.exe Nidhogg.sys
+
+Flow:
+1. Load signed vulnerable driver (e.g., iqvw64e.sys from Intel)
+2. Exploit R/W primitive in the vulnerable driver
+3. Allocate kernel pool memory via the exploit
+4. Copy Nidhogg.sys image into pool memory
+5. Resolve imports manually (ntoskrnl exports)
+6. Call DriverEntry via the exploit
+7. Unload the vulnerable driver (optional)
+
+Result: Nidhogg is running in kernel memory
+        with NO service registration
+        NO entry in the loaded modules list
+        NO standard driver signature check</pre>
+
+<div class="card">
+<h4>Detection Differences</h4>
+<table>
+<tr><th>Indicator</th><th>sc.exe Load</th><th>kdmapper Load</th></tr>
+<tr><td>Service registry key</td><td>Yes</td><td>No</td></tr>
+<tr><td>System event log (7045)</td><td>Yes</td><td>No (but vuln driver load is logged)</td></tr>
+<tr><td>PsLoadedModuleList entry</td><td>Yes</td><td>No</td></tr>
+<tr><td>Driver signature required</td><td>Yes</td><td>No (bypassed)</td></tr>
+<tr><td>DriverObject created</td><td>Yes (by I/O Manager)</td><td>No (must be faked or omitted)</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. Kernel Pool Memory</h2>
+
+<p>Kernel drivers allocate memory from kernel pools rather than the user-mode heap. Understanding pool types is important for rootkit development:</p>
+
+<table>
+<tr><th>Pool Type</th><th>Characteristics</th><th>Typical Use</th></tr>
+<tr><td><code>NonPagedPool</code></td><td>Always in physical memory (never paged out), accessible at any IRQL</td><td>Data accessed in ISRs, DPC routines, or at DISPATCH_LEVEL</td></tr>
+<tr><td><code>PagedPool</code></td><td>Can be paged to disk, accessible only at IRQL &lt; DISPATCH_LEVEL</td><td>Large buffers, string storage, data accessed only at PASSIVE_LEVEL</td></tr>
+<tr><td><code>NonPagedPoolNx</code></td><td>Non-paged, non-executable (W^X compliant)</td><td>Data buffers that should never contain executable code</td></tr>
+</table>
+
+<pre><span class="lang-tag">C</span>// Allocating kernel pool memory
+PVOID buffer = ExAllocatePool2(
+    POOL_FLAG_NON_PAGED,  // Pool type (Windows 10 2004+)
+    sizeof(HIDDEN_PROCESS_ENTRY),
+    'hdiN'                // Pool tag ('Nidh' reversed) for debugging
+);
+
+// Always check for allocation failure
+if (!buffer) return STATUS_INSUFFICIENT_RESOURCES;
+
+// Free when done
+ExFreePoolWithTag(buffer, 'hdiN');</pre>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What is the purpose of a symbolic link in kernel driver communication?</p>
+<div class="quiz-btn" data-choice="A">A) It encrypts the communication channel between user mode and kernel mode</div>
+<div class="quiz-btn" data-choice="B">B) It provides a user-mode-accessible name that maps to the kernel device object, allowing CreateFile to open a handle</div>
+<div class="quiz-btn" data-choice="C">C) It links the driver to other kernel modules</div>
+<div class="quiz-btn" data-choice="D">D) It registers the driver with PatchGuard</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: In METHOD_BUFFERED IOCTL handling, where does the driver read user input from?</p>
+<div class="quiz-btn" data-choice="A">A) Irp->AssociatedIrp.SystemBuffer (a kernel-mode copy made by the I/O Manager)</div>
+<div class="quiz-btn" data-choice="B">B) Directly from the user-mode buffer address</div>
+<div class="quiz-btn" data-choice="C">C) The driver's DeviceExtension</div>
+<div class="quiz-btn" data-choice="D">D) A shared memory region in the PEB</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: What is the key advantage of loading a driver via kdmapper versus sc.exe?</p>
+<div class="quiz-btn" data-choice="A">A) kdmapper provides better driver performance</div>
+<div class="quiz-btn" data-choice="B">B) kdmapper creates proper service registry entries</div>
+<div class="quiz-btn" data-choice="C">C) kdmapper bypasses driver signature enforcement and leaves no service registration or loaded module list entry</div>
+<div class="quiz-btn" data-choice="D">D) kdmapper is the only way to load drivers on Windows 11</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Previous: Kernel vs User-Mode Evasion</a>
+<a class="primary" href="module3.html">Next: Process &amp; Thread Manipulation &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

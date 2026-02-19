@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Context Manipulation - Ekko Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x23F1;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#8b5cf6;--accent2:#6d28d9;--gradient:linear-gradient(135deg,#8b5cf6,#6d28d9)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Ekko Course</h2>
+<span>Sleep Obfuscation Masterclass</span>
+</div>
+<a class="home-link" href="../Ekko_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Why Sleep Obfuscation Matters</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Timer Queues &amp; Waitable Timers</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. RC4 Encryption in Evasion</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. ROP Gadgets &amp; NtContinue</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Ekko Timer Chain</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module6.html"><span>6. Context Manipulation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Stack &amp; Return Address Handling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain, Detection &amp; Variants</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 6: Context Manipulation</h1>
+<p class="subtitle">Capturing, cloning, and weaponizing the CONTEXT structure for controlled execution.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Deep dive into how Ekko captures the timer thread's context with <code>RtlCaptureContext</code>, why each CONTEXT is cloned from this baseline, what the <code>Rsp -= 8</code> adjustment does, and how RIP control turns a data structure into an execution primitive. This module covers the precise mechanics that make Ekko's context-oriented programming work.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. RtlCaptureContext &mdash; Capturing Thread State</h2>
+
+<p><code>RtlCaptureContext</code> is an ntdll function that fills a CONTEXT structure with the current thread's register state at the point of the call. It is defined as:</p>
+
+<pre><span class="lang-tag">C</span>// RtlCaptureContext - captures current thread state
+// Exported by ntdll.dll
+//
+// VOID RtlCaptureContext(
+//     PCONTEXT ContextRecord  // Output: filled with current registers
+// );
+//
+// This function captures:
+//   - RIP (pointing to the instruction after the call)
+//   - RSP (current stack pointer)
+//   - All general-purpose registers
+//   - RFLAGS
+//   - Segment registers
+//   - XMM registers</pre>
+
+<p>Ekko uses RtlCaptureContext as the callback for Timer 0, passing <code>&CtxThread</code> as the parameter. Since the timer fires on the timer thread (due to <code>WT_EXECUTEINTIMERTHREAD</code>), the captured context reflects the <strong>timer thread's</strong> register state &mdash; not the main thread's.</p>
+
+<div class="card">
+<h4>Why the Timer Thread's Context Matters</h4>
+<p>The captured context must come from the timer thread because all subsequent NtContinue calls execute on that same thread. If Ekko captured the main thread's context instead, the RSP would point to the main thread's stack, segment registers might differ, and NtContinue would corrupt the timer thread's state. By capturing from the timer thread itself, Ekko ensures all cloned contexts have a stack pointer, segment registers, and flags that are valid for the thread that will actually execute them.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. What RtlCaptureContext Captures</h2>
+
+<p>The captured CONTEXT includes these key fields that Ekko depends on:</p>
+
+<table>
+<tr><th>Register/Field</th><th>Captured Value</th><th>Ekko's Use</th></tr>
+<tr><td><strong>RIP</strong></td><td>Address after RtlCaptureContext call</td><td>Overwritten with target API address</td></tr>
+<tr><td><strong>RSP</strong></td><td>Timer thread's current stack pointer</td><td>Adjusted with <code>Rsp -= 8</code> for alignment</td></tr>
+<tr><td><strong>SegCs</strong></td><td>Code segment selector (0x33 for x64)</td><td>Kept as-is &mdash; must be valid for x64 execution</td></tr>
+<tr><td><strong>SegSs</strong></td><td>Stack segment selector</td><td>Kept as-is</td></tr>
+<tr><td><strong>RFLAGS</strong></td><td>Current processor flags</td><td>Kept as-is &mdash; must be reasonable for API execution</td></tr>
+<tr><td><strong>RCX, RDX, R8, R9</strong></td><td>Current values (unimportant)</td><td>Overwritten with API arguments</td></tr>
+<tr><td><strong>MxCsr</strong></td><td>SSE control register</td><td>Kept as-is &mdash; prevents floating-point exceptions</td></tr>
+</table>
+
+<div class="card warn">
+<h4>The Capture Timing Issue</h4>
+<p>There is a subtle race condition in Ekko's PoC. After Timer 0 fires (calling RtlCaptureContext), the main thread waits for 50ms (<code>WaitForSingleObject(hEvent, 0x32)</code>) before reading the captured context. This 50ms window is a heuristic &mdash; if the timer takes longer than 50ms to fire and complete, the context may not be fully written when the main thread reads it. A more robust approach would use a separate synchronization event to confirm the capture completed.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Cloning the Baseline Context</h2>
+
+<p>After capturing the baseline, Ekko clones it into all six operational contexts:</p>
+
+<pre><span class="lang-tag">C</span>memcpy( &RopProtRW, &CtxThread, sizeof(CONTEXT) );
+memcpy( &RopMemEnc, &CtxThread, sizeof(CONTEXT) );
+memcpy( &RopDelay,  &CtxThread, sizeof(CONTEXT) );
+memcpy( &RopMemDec, &CtxThread, sizeof(CONTEXT) );
+memcpy( &RopProtRX, &CtxThread, sizeof(CONTEXT) );
+memcpy( &RopSetEvt, &CtxThread, sizeof(CONTEXT) );</pre>
+
+<p>Each <code>memcpy</code> copies all 1232 bytes of the CONTEXT structure. After cloning, each operational context is an exact copy of the timer thread's state. Ekko then selectively modifies only the registers it needs:</p>
+
+<div class="card green">
+<h4>The Minimal Modification Principle</h4>
+<p>Ekko modifies the fewest registers possible in each context:</p>
+<ul>
+<li><strong>RIP</strong> &mdash; Set to the target function address</li>
+<li><strong>RCX, RDX, R8, R9</strong> &mdash; Set to the function arguments</li>
+<li><strong>RSP</strong> &mdash; Decremented by 8 for alignment</li>
+</ul>
+<p>All other registers (segment selectors, flags, XMM state, etc.) are inherited from the baseline capture. This minimizes the chance of an invalid state causing a crash or exception.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. RSP Pivoting: The Rsp -= 8 Adjustment</h2>
+
+<p>Every operational context includes this adjustment:</p>
+
+<pre><span class="lang-tag">C</span>RopProtRW.Rsp -= 8;
+RopMemEnc.Rsp -= 8;
+RopDelay.Rsp  -= 8;
+RopMemDec.Rsp -= 8;
+RopProtRX.Rsp -= 8;
+RopSetEvt.Rsp -= 8;</pre>
+
+<p>This single line is critical and easy to overlook. To understand why it is necessary, we need to understand the x64 stack alignment requirement and the call instruction's behavior:</p>
+
+<h3>The x64 ABI Stack Alignment Rule</h3>
+
+<p>The Microsoft x64 calling convention requires that <strong>at the point of a <code>CALL</code> instruction, RSP must be 16-byte aligned</strong>. The <code>CALL</code> instruction itself pushes an 8-byte return address onto the stack, making RSP 16-byte-aligned-minus-8 at function entry. Functions expect this alignment and may use SSE instructions (like <code>MOVAPS</code>) that require 16-byte-aligned operands.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Stack Alignment During a Normal CALL</h4>
+<div class="flow">
+<div class="flow box">Before CALL<br><small>RSP = 0x...0 (16-aligned)</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">CALL pushes RIP<br><small>RSP -= 8</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">At Function Entry<br><small>RSP = 0x...8 (16-aligned - 8)</small></div>
+</div>
+</div>
+
+<h3>Why Ekko Needs the Adjustment</h3>
+
+<p>When NtContinue restores a context, it sets RSP to whatever value is in the CONTEXT structure and sets RIP to the target function. But <strong>NtContinue does not execute a <code>CALL</code> instruction</strong> &mdash; it directly sets the registers. This means no return address is pushed onto the stack.</p>
+
+<p>The captured RSP from RtlCaptureContext reflects the stack state at capture time. By subtracting 8, Ekko simulates the effect of a <code>CALL</code> instruction having pushed a return address. The target function sees RSP at the expected alignment (16-byte-aligned minus 8) and operates correctly:</p>
+
+<pre><span class="lang-tag">Text</span>Captured RSP:     0x00000010AA00F000  (16-byte aligned)
+After Rsp -= 8:   0x00000010AA00EFF8  (16-byte aligned - 8)
+
+This matches what a function expects after a CALL instruction.
+Without the adjustment, MOVAPS and other aligned SSE instructions
+inside VirtualProtect or SystemFunction032 could fault.</pre>
+
+<div class="card highlight">
+<h4>The 8-Byte Slot</h4>
+<p>The <code>Rsp -= 8</code> also reserves space where a return address would normally be. When the target function executes <code>RET</code>, it pops 8 bytes from this location. The value at that address depends on whatever was on the timer thread's stack at that offset &mdash; this is one of Ekko's known imperfections. In the PoC, the return from each API call goes to whatever address happens to be at that stack location. The timer infrastructure handles recovering from this, but it is not a clean return path. Module 7 covers this in detail.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. RIP Control &mdash; Directing Execution</h2>
+
+<p>Setting RIP in the CONTEXT is the most fundamental operation in Ekko's technique. It determines where execution goes after NtContinue restores the context:</p>
+
+<pre><span class="lang-tag">C</span>// Each context's RIP points to a different Windows API:
+RopProtRW.Rip = (DWORD64)VirtualProtect;      // kernel32.dll
+RopMemEnc.Rip = (DWORD64)SysFunc032;          // advapi32.dll
+RopDelay.Rip  = (DWORD64)WaitForSingleObject; // kernel32.dll
+RopMemDec.Rip = (DWORD64)SysFunc032;          // advapi32.dll
+RopProtRX.Rip = (DWORD64)VirtualProtect;      // kernel32.dll
+RopSetEvt.Rip = (DWORD64)SetEvent;            // kernel32.dll</pre>
+
+<p>All target functions reside in system DLLs that are mapped at fixed addresses (with ASLR per-boot). Since these DLLs are not part of the implant's image, they remain functional even after the image is encrypted and marked non-executable. This is the key insight that makes the entire technique work.</p>
+
+<!-- ============================================================ -->
+<h2>6. Argument Setup via Registers</h2>
+
+<p>The x64 calling convention passes the first four integer/pointer arguments in RCX, RDX, R8, and R9. Ekko sets these registers in each CONTEXT to provide the correct arguments to each target function:</p>
+
+<table>
+<tr><th>Timer</th><th>Function</th><th>RCX (arg1)</th><th>RDX (arg2)</th><th>R8 (arg3)</th><th>R9 (arg4)</th></tr>
+<tr><td>1</td><td>VirtualProtect</td><td>ImageBase</td><td>ImageSize</td><td>PAGE_READWRITE</td><td>&amp;OldProtect</td></tr>
+<tr><td>2</td><td>SystemFunction032</td><td>&amp;Img</td><td>&amp;Key</td><td><em>unused</em></td><td><em>unused</em></td></tr>
+<tr><td>3</td><td>WaitForSingleObject</td><td>NtCurrentProcess()</td><td>SleepTime</td><td><em>unused</em></td><td><em>unused</em></td></tr>
+<tr><td>4</td><td>SystemFunction032</td><td>&amp;Img</td><td>&amp;Key</td><td><em>unused</em></td><td><em>unused</em></td></tr>
+<tr><td>5</td><td>VirtualProtect</td><td>ImageBase</td><td>ImageSize</td><td>PAGE_EXECUTE_READWRITE</td><td>&amp;OldProtect</td></tr>
+<tr><td>6</td><td>SetEvent</td><td>hEvent</td><td><em>unused</em></td><td><em>unused</em></td><td><em>unused</em></td></tr>
+</table>
+
+<div class="card">
+<h4>Unused Registers</h4>
+<p>For functions that take fewer than four arguments (SystemFunction032 takes 2, SetEvent takes 1), the R8 and R9 registers retain their values from the baseline capture. These leftover values are ignored by the target function since it only reads the registers it needs.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Stack Frame Considerations</h2>
+
+<p>Beyond the RSP alignment, the x64 calling convention requires a 32-byte "shadow space" (also called "home space") on the stack above the return address. This space is reserved by the caller for the callee to optionally store parameters:</p>
+
+<pre><span class="lang-tag">Text</span>Stack layout expected by a function on entry:
+
+RSP + 0x28    [5th argument, if any]
+RSP + 0x20    [shadow space for R9]
+RSP + 0x18    [shadow space for R8]
+RSP + 0x10    [shadow space for RDX]
+RSP + 0x08    [shadow space for RCX]
+RSP + 0x00    [return address]     &lt;-- RSP points here</pre>
+
+<p>Ekko's <code>Rsp -= 8</code> accounts for the return address slot. The shadow space above it already exists on the timer thread's stack from the captured state. As long as the timer thread's stack has at least 32 bytes of usable space above the adjusted RSP, the target functions have valid shadow space. Since the timer thread has a full-sized stack, this is not a problem in practice.</p>
+
+<!-- ============================================================ -->
+<h2>8. Context Lifetime &amp; Stack Variables</h2>
+
+<p>A critical detail is that all CONTEXT structures, USTRING descriptors, the key buffer, and OldProtect are <strong>local variables in EkkoObf</strong>. They live on the main thread's stack frame:</p>
+
+<pre><span class="lang-tag">C</span>VOID EkkoObf( DWORD SleepTime )
+{
+    CONTEXT CtxThread   = { 0 };   // Stack variable
+    CONTEXT RopProtRW   = { 0 };   // Stack variable
+    // ... all contexts on main thread's stack
+
+    CHAR    KeyBuf[16]  = { ... }; // Stack variable
+    USTRING Key         = { 0 };   // Stack variable
+    USTRING Img         = { 0 };   // Stack variable
+    DWORD   OldProtect  = 0;       // Stack variable
+
+    // ... setup and queue timers ...
+
+    WaitForSingleObject( hEvent, INFINITE );  // BLOCKS HERE
+    // While blocked, stack frame is preserved
+    // All stack variables remain valid
+
+    DeleteTimerQueue( hTimerQueue );
+}  // Stack frame destroyed AFTER timers complete</pre>
+
+<div class="card green">
+<h4>Why This Works</h4>
+<p>The main thread blocks on <code>WaitForSingleObject</code> until Timer 6 signals the event. Because the main thread is blocked (not returned), its stack frame is preserved. The CONTEXT structures, USTRING pointers, and OldProtect variable remain at valid memory addresses for the entire duration of the timer chain. If EkkoObf returned before the timers completed, these stack variables would be destroyed, and the timer callbacks would read/write invalid memory &mdash; a use-after-free bug.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. Visualizing the Memory Layout</h2>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Memory Relationships During Timer Chain</h4>
+<div class="flow">
+<div class="flow box">Main Thread Stack<br><small>CtxThread, RopProtRW...<br>Key, Img, OldProtect<br>(all valid while blocked)</small></div>
+<div class="flow arrow">&larr; reads</div>
+<div class="flow box">Timer Thread<br><small>NtContinue loads CONTEXT<br>from main thread's stack</small></div>
+<div class="flow arrow">&rarr; calls</div>
+<div class="flow box">System DLLs<br><small>VirtualProtect, SysFunc032<br>SetEvent, WaitForSingleObject</small></div>
+</div>
+</div>
+
+<p>The timer thread reads CONTEXT structures from the main thread's stack, then NtContinue redirects execution into system DLL functions. The system functions operate on the process image (encrypting/decrypting, changing permissions) and the event handle. All of these exist in process-global memory and are accessible from any thread.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Why does Ekko subtract 8 from RSP in each operational context?</p>
+<div class="quiz-btn" data-choice="A">A) To allocate space for local variables in the target function</div>
+<div class="quiz-btn" data-choice="B">B) To simulate the effect of a CALL instruction pushing a return address, maintaining the expected stack alignment</div>
+<div class="quiz-btn" data-choice="C">C) To store the RC4 encryption key on the stack</div>
+<div class="quiz-btn" data-choice="D">D) To prevent stack overflow during the timer chain</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: Why must the context be captured from the timer thread specifically?</p>
+<div class="quiz-btn" data-choice="A">A) Because NtContinue executes on the timer thread, so the context must have valid state (RSP, segments) for that thread</div>
+<div class="quiz-btn" data-choice="B">B) The main thread's context is encrypted and inaccessible</div>
+<div class="quiz-btn" data-choice="C">C) RtlCaptureContext only works on timer threads</div>
+<div class="quiz-btn" data-choice="D">D) The timer thread has more registers available than the main thread</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: What would happen if EkkoObf returned before the timer chain completed?</p>
+<div class="quiz-btn" data-choice="A">A) The timers would be automatically cancelled</div>
+<div class="quiz-btn" data-choice="B">B) The timers would continue working normally using cached copies</div>
+<div class="quiz-btn" data-choice="C">C) The timer callbacks would access destroyed stack variables, causing a use-after-free crash</div>
+<div class="quiz-btn" data-choice="D">D) Windows would block the return until timers complete</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Prev: The Ekko Timer Chain</a>
+<a class="primary" href="module7.html">Next: Stack &amp; Return Address Handling &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

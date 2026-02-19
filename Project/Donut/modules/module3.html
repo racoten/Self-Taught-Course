@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: .NET CLR Hosting - Donut Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F369;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#ec4899;--accent2:#db2777;--gradient:linear-gradient(135deg,#ec4899,#db2777)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Donut Course</h2>
+<span>PE-to-Shellcode Masterclass</span>
+</div>
+<a class="home-link" href="../Donut_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. The PE-to-Shellcode Problem</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Loader Fundamentals</span><span class="diff d1">B</span></a>
+<a class="mod-link active" href="module3.html"><span>3. .NET CLR Hosting</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module4.html"><span>4. Module Architecture</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Donut Loader</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Anti-Detection</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module7.html"><span>7. Advanced Payload Types</span><span class="diff d3">A</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">A</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: .NET CLR Hosting</h1>
+<p class="subtitle">How Donut loads the Common Language Runtime from unmanaged code and executes .NET assemblies entirely in memory via <code>inmem_dotnet.c</code>.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how the .NET Common Language Runtime (CLR) can be loaded and controlled from unmanaged C code using COM hosting interfaces, how Donut creates an AppDomain and invokes <code>Assembly::Load</code> to execute .NET payloads without touching disk, and the differences between CLR v2 and v4 hosting APIs.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The .NET Execution Problem</h2>
+
+<p>Offensive tools written in C# (Seatbelt, Rubeus, SharpHound, etc.) are .NET assemblies. Running them normally requires the .NET runtime, which is typically invoked by the Windows loader when the PE&rsquo;s COM directory indicates it is a managed binary. But in an injection scenario, you need to:</p>
+
+<ul>
+<li>Execute .NET code inside an <strong>unmanaged process</strong> (one that doesn&rsquo;t already host the CLR)</li>
+<li>Load the assembly from a <strong>byte array in memory</strong> (not from a file path on disk)</li>
+<li>Pass <strong>command-line arguments</strong> to the assembly&rsquo;s entry point</li>
+<li>Control the <strong>AppDomain</strong> to isolate execution and clean up afterward</li>
+</ul>
+
+<p>Donut solves this by embedding a CLR host in its PIC loader. The loader bootstraps the entire .NET runtime, loads the assembly from the decrypted <code>DONUT_MODULE</code> buffer, and invokes the entry point &mdash; all from position-independent C code.</p>
+
+<!-- ============================================================ -->
+<h2>2. CLR Hosting Interfaces</h2>
+
+<p>Microsoft provides COM-based interfaces for hosting the CLR from unmanaged code. There are two generations of these APIs:</p>
+
+<table>
+<tr><th>API Generation</th><th>CLR Versions</th><th>Key Interface</th><th>Header</th></tr>
+<tr><td><strong>Legacy (v2)</strong></td><td>.NET 2.0, 3.0, 3.5</td><td><code>ICorRuntimeHost</code></td><td><code>mscoree.h</code></td></tr>
+<tr><td><strong>Modern (v4)</strong></td><td>.NET 4.0+</td><td><code>ICLRMetaHost</code> + <code>ICLRRuntimeInfo</code></td><td><code>metahost.h</code></td></tr>
+</table>
+
+<p>Donut supports both. It reads the .NET assembly&rsquo;s metadata to determine which runtime version is required, then uses the appropriate hosting API. For .NET 4.x assemblies, it uses the <code>ICLRMetaHost</code> chain; for older assemblies, it falls back to <code>CorBindToRuntime</code>.</p>
+
+<!-- ============================================================ -->
+<h2>3. The CLR v4 Hosting Chain</h2>
+
+<p>For modern .NET assemblies, Donut follows this sequence of COM interface calls:</p>
+
+<div class="diagram">
+<h4>CLR v4 Hosting Pipeline</h4>
+<div class="flow">
+<div class="box hl">CLRCreateInstance<br><small>Get ICLRMetaHost</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">GetRuntime<br><small>Get ICLRRuntimeInfo</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">GetInterface<br><small>Get ICorRuntimeHost</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Start()<br><small>Initialize CLR</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">CreateDomain<br><small>AppDomain</small></div>
+</div>
+</div>
+
+<pre><span class="lang-tag">C</span>// Step 1: Get ICLRMetaHost via CLRCreateInstance
+ICLRMetaHost *meta = NULL;
+CLRCreateInstance(
+    &amp;CLSID_CLRMetaHost,
+    &amp;IID_ICLRMetaHost,
+    (LPVOID*)&amp;meta
+);
+
+// Step 2: Get ICLRRuntimeInfo for the target runtime version
+ICLRRuntimeInfo *info = NULL;
+meta-&gt;lpVtbl-&gt;GetRuntime(
+    meta,
+    L"v4.0.30319",        // Runtime version string from assembly metadata
+    &amp;IID_ICLRRuntimeInfo,
+    (LPVOID*)&amp;info
+);
+
+// Step 3: Get ICorRuntimeHost from the runtime info
+ICorRuntimeHost *host = NULL;
+info-&gt;lpVtbl-&gt;GetInterface(
+    info,
+    &amp;CLSID_CorRuntimeHost,
+    &amp;IID_ICorRuntimeHost,
+    (LPVOID*)&amp;host
+);
+
+// Step 4: Start the CLR
+host-&gt;lpVtbl-&gt;Start(host);</pre>
+
+<div class="card">
+<h4>Why ICorRuntimeHost Instead of ICLRRuntimeHost?</h4>
+<p>Donut uses <code>ICorRuntimeHost</code> (not <code>ICLRRuntimeHost</code>) even in the v4 path because <code>ICorRuntimeHost</code> provides the <code>CreateDomain</code> method that returns an <code>IUnknown</code> pointer to the AppDomain. From this, Donut can <code>QueryInterface</code> for <code>_AppDomain</code>, which exposes the <code>Load_3</code> method needed for byte-array assembly loading.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. AppDomain Creation</h2>
+
+<p>Rather than using the default AppDomain, Donut creates a new, named AppDomain. This provides isolation and allows cleanup after execution:</p>
+
+<pre><span class="lang-tag">C</span>// Create a new AppDomain with a random name
+IUnknown *domain_unk = NULL;
+host-&gt;lpVtbl-&gt;CreateDomain(
+    host,
+    inst-&gt;wAppDomainName,  // Random name from DONUT_INSTANCE
+    NULL,                   // No evidence
+    &amp;domain_unk
+);
+
+// Query for the _AppDomain interface
+_AppDomain *domain = NULL;
+domain_unk-&gt;lpVtbl-&gt;QueryInterface(
+    domain_unk,
+    &amp;IID__AppDomain,
+    (LPVOID*)&amp;domain
+);</pre>
+
+<div class="card warn">
+<h4>AppDomain Naming</h4>
+<p>Donut generates a random name for the AppDomain (stored in <code>DONUT_INSTANCE.wAppDomainName</code>). This avoids using a recognizable name that defenders could use as an IOC. Some early Donut versions used a fixed name, which became a well-known detection vector.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Loading the Assembly from Memory</h2>
+
+<p>The critical step: loading a .NET assembly from a raw byte array in memory, bypassing the filesystem entirely. This uses the <code>_AppDomain::Load_3</code> method, which accepts a <code>SAFEARRAY</code> of bytes:</p>
+
+<pre><span class="lang-tag">C</span>// Create a SAFEARRAY containing the assembly bytes
+SAFEARRAYBOUND bound;
+bound.lLbound   = 0;
+bound.cElements = assembly_size;  // Size of .NET assembly
+
+SAFEARRAY *sa = SafeArrayCreate(VT_UI1, 1, &amp;bound);
+
+// Copy the decrypted assembly bytes into the SAFEARRAY
+void *sa_data = NULL;
+SafeArrayAccessData(sa, &amp;sa_data);
+memcpy(sa_data, assembly_bytes, assembly_size);
+SafeArrayUnaccessData(sa);
+
+// Load the assembly into the AppDomain
+_Assembly *assembly = NULL;
+domain-&gt;lpVtbl-&gt;Load_3(
+    domain,
+    sa,             // SAFEARRAY of bytes
+    &amp;assembly       // Receives _Assembly pointer
+);
+
+// Clean up the SAFEARRAY
+SafeArrayDestroy(sa);</pre>
+
+<p>This is the equivalent of calling <code>System.Reflection.Assembly.Load(byte[])</code> in C#, but done entirely through COM vtable calls from unmanaged C code.</p>
+
+<!-- ============================================================ -->
+<h2>6. Invoking the Entry Point</h2>
+
+<p>Once the assembly is loaded, Donut invokes it differently depending on whether it is an EXE or DLL:</p>
+
+<h3>6.1 .NET EXE (Has Main Method)</h3>
+
+<pre><span class="lang-tag">C</span>// Get the entry point from the assembly
+_MethodInfo *entry = NULL;
+assembly-&gt;lpVtbl-&gt;get_EntryPoint(assembly, &amp;entry);
+
+// Build argument array (SAFEARRAY of strings)
+SAFEARRAYBOUND args_bound;
+args_bound.lLbound   = 0;
+args_bound.cElements = 1;  // One element: the args string array
+
+SAFEARRAY *args = SafeArrayCreate(VT_VARIANT, 1, &amp;args_bound);
+
+// The single element is itself a SAFEARRAY of BSTRs (the command-line args)
+VARIANT v;
+v.vt = VT_ARRAY | VT_BSTR;
+v.parray = string_args_safearray;  // SAFEARRAY of BSTR arguments
+
+LONG idx = 0;
+SafeArrayPutElement(args, &amp;idx, &amp;v);
+
+// Invoke the entry point
+VARIANT result;
+VariantInit(&amp;result);
+entry-&gt;lpVtbl-&gt;Invoke_3(entry, v_null, args, &amp;result);</pre>
+
+<h3>6.2 .NET DLL (Specific Class and Method)</h3>
+
+<pre><span class="lang-tag">C</span>// For DLLs, Donut needs a class name and method name from DONUT_MODULE
+// e.g., class = "Rubeus.Program", method = "Main"
+
+_Type *type = NULL;
+BSTR class_name = SysAllocString(mod-&gt;cls);  // From DONUT_MODULE
+assembly-&gt;lpVtbl-&gt;GetType_2(assembly, class_name, &amp;type);
+
+// Invoke the static method with arguments
+BSTR method_name = SysAllocString(mod-&gt;method);
+VARIANT result;
+type-&gt;lpVtbl-&gt;InvokeMember_3(
+    type, method_name,
+    BindingFlags_InvokeMethod | BindingFlags_Static | BindingFlags_Public,
+    NULL, v_null, args, &amp;result
+);</pre>
+
+<!-- ============================================================ -->
+<h2>7. CLR v2 Fallback Path</h2>
+
+<p>For assemblies targeting .NET 2.0/3.5, the <code>ICLRMetaHost</code> API may not be available (on older systems) or the target runtime may be v2. Donut falls back to the legacy <code>CorBindToRuntime</code> function:</p>
+
+<pre><span class="lang-tag">C</span>// Legacy path: bind directly to the v2 runtime
+ICorRuntimeHost *host = NULL;
+CorBindToRuntime(
+    L"v2.0.50727",             // CLR version
+    L"wks",                     // Workstation GC
+    &amp;CLSID_CorRuntimeHost,
+    &amp;IID_ICorRuntimeHost,
+    (LPVOID*)&amp;host
+);
+
+// From here, the flow is identical: Start(), CreateDomain(), Load_3(), Invoke()</pre>
+
+<div class="card">
+<h4>Runtime Version Detection</h4>
+<p>Donut determines the required CLR version by reading the .NET assembly&rsquo;s metadata. Specifically, it parses the <code>IMAGE_COR20_HEADER</code> (COM descriptor) and the metadata tables to find the target framework version. This information is stored in the <code>DONUT_MODULE</code> structure so the loader knows which runtime version string to pass.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. The Complete .NET Loading Flow</h2>
+
+<div class="diagram">
+<h4>Donut .NET Execution Pipeline (inmem_dotnet.c)</h4>
+<div class="flow">
+<div class="box hl">Decrypt Module<br><small>Chaskey CTR</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">AMSI Bypass<br><small>Patch AmsiScanBuffer</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Start CLR<br><small>ICLRMetaHost chain</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Create Domain<br><small>Random name</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Load_3<br><small>SAFEARRAY bytes</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Invoke<br><small>Entry / Method</small></div>
+</div>
+</div>
+
+<p>Notice that Donut patches AMSI <em>before</em> loading the assembly. This is critical because AMSI scans occur during <code>Assembly::Load</code> &mdash; if AMSI is not neutralized first, the assembly can be flagged before it even begins execution.</p>
+
+<!-- ============================================================ -->
+<h2>9. Handling Already-Loaded CLR</h2>
+
+<p>If the target process already hosts the CLR (e.g., a PowerShell process or a .NET application), Donut handles this gracefully. The <code>ICLRMetaHost::EnumerateInstalledRuntimes</code> or <code>GetRuntime</code> call will succeed for the already-loaded version. Starting an already-started CLR via <code>Start()</code> is a no-op and returns <code>S_FALSE</code>, which Donut treats as success.</p>
+
+<div class="card green">
+<h4>Key Insight: COM Interface Pattern</h4>
+<p>The entire .NET hosting API is COM-based. Donut&rsquo;s PIC loader calls these interfaces through <strong>vtable pointers</strong> (e.g., <code>host-&gt;lpVtbl-&gt;Start(host)</code>). This is the standard C pattern for calling COM interfaces without C++ virtual dispatch. The GUIDs (<code>CLSID_CLRMetaHost</code>, <code>IID_ICorRuntimeHost</code>, etc.) are hardcoded in the loader or stored in <code>DONUT_INSTANCE</code>.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="q3">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>1. Which method does Donut use to load a .NET assembly from a byte array in memory?</p>
+<label data-opt="0"><input type="radio" name="q3_1">Assembly::LoadFrom with a file path</label>
+<label data-opt="1"><input type="radio" name="q3_1">CLRCreateInstance with the assembly bytes</label>
+<label data-opt="2"><input type="radio" name="q3_1">_AppDomain::Load_3 with a SAFEARRAY of bytes</label>
+<label data-opt="3"><input type="radio" name="q3_1">ICorRuntimeHost::LoadAssembly</label>
+<div class="explain">Donut uses <code>_AppDomain::Load_3</code>, which accepts a <code>SAFEARRAY</code> of <code>VT_UI1</code> (bytes) containing the raw assembly data. This is the COM equivalent of <code>Assembly.Load(byte[])</code> in C#.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>2. Why does Donut create a new AppDomain instead of using the default one?</p>
+<label data-opt="0"><input type="radio" name="q3_2">For isolation and to avoid leaving artifacts in the default domain</label>
+<label data-opt="1"><input type="radio" name="q3_2">Because the default AppDomain cannot load assemblies</label>
+<label data-opt="2"><input type="radio" name="q3_2">Because .NET requires multiple AppDomains</label>
+<label data-opt="3"><input type="radio" name="q3_2">To improve execution performance</label>
+<div class="explain">Creating a new AppDomain provides isolation from the host process and allows Donut to unload the domain after execution, reducing forensic artifacts. The random domain name also avoids creating a recognizable IOC.</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>3. Why must AMSI be bypassed before calling Assembly::Load?</p>
+<label data-opt="0"><input type="radio" name="q3_3">AMSI prevents the CLR from starting</label>
+<label data-opt="1"><input type="radio" name="q3_3">AMSI scans assembly bytes during Load, which would flag malicious assemblies</label>
+<label data-opt="2"><input type="radio" name="q3_3">AMSI encrypts the assembly during loading</label>
+<label data-opt="3"><input type="radio" name="q3_3">AMSI blocks all COM interface calls</label>
+<div class="explain">Starting with Windows 10, AMSI is integrated into the CLR. When <code>Assembly::Load</code> is called, the CLR passes the assembly bytes to <code>AmsiScanBuffer</code> for scanning. If the assembly matches a malicious signature, the load is blocked. Donut patches <code>AmsiScanBuffer</code> before loading to prevent this.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('q3')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Previous: PE Loader Fundamentals</a>
+<a class="primary" href="module4.html">Next: Donut Module Architecture &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

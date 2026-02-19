@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: RC4 Encryption in Evasion - Ekko Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x23F1;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#8b5cf6;--accent2:#6d28d9;--gradient:linear-gradient(135deg,#8b5cf6,#6d28d9)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Ekko Course</h2>
+<span>Sleep Obfuscation Masterclass</span>
+</div>
+<a class="home-link" href="../Ekko_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Why Sleep Obfuscation Matters</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Timer Queues &amp; Waitable Timers</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module3.html"><span>3. RC4 Encryption in Evasion</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. ROP Gadgets &amp; NtContinue</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Ekko Timer Chain</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Context Manipulation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Stack &amp; Return Address Handling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain, Detection &amp; Variants</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: RC4 Encryption in Evasion</h1>
+<p class="subtitle">An undocumented Windows API that gives you free RC4 &mdash; no custom crypto needed.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how the RC4 stream cipher works at a conceptual level, why it is the preferred cipher for sleep obfuscation, how Ekko uses the undocumented <code>SystemFunction032</code> from advapi32.dll, and the <code>USTRING</code> structure that serves as the interface for both data and key buffers.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Why RC4 for Sleep Obfuscation?</h2>
+
+<p>Several encryption algorithms could theoretically be used to encrypt an implant's memory during sleep. Ekko specifically uses <strong>RC4</strong> (Rivest Cipher 4), and the choice is deliberate for several reasons:</p>
+
+<table>
+<tr><th>Property</th><th>RC4</th><th>AES-CBC</th><th>XOR (single byte)</th></tr>
+<tr><td><strong>Symmetric decrypt = encrypt</strong></td><td>Yes (XOR-based stream)</td><td>No (separate decrypt routine needed)</td><td>Yes</td></tr>
+<tr><td><strong>Block padding required</strong></td><td>No (stream cipher)</td><td>Yes (16-byte blocks)</td><td>No</td></tr>
+<tr><td><strong>Available via Windows API</strong></td><td>Yes (SystemFunction032)</td><td>Yes (BCrypt/CNG, but complex)</td><td>No built-in API</td></tr>
+<tr><td><strong>API simplicity</strong></td><td>2 parameters (data + key)</td><td>Multiple calls (init, update, final)</td><td>N/A</td></tr>
+<tr><td><strong>Output size</strong></td><td>Same as input</td><td>Rounded up to block boundary</td><td>Same as input</td></tr>
+<tr><td><strong>Cryptographic strength</strong></td><td>Weak by modern standards</td><td>Strong</td><td>Trivial to break</td></tr>
+</table>
+
+<div class="card green">
+<h4>The Key Advantage: Symmetry</h4>
+<p>RC4 is a stream cipher that generates a pseudo-random keystream from the key and XORs it with the data. Because XOR is its own inverse (<code>A ^ K ^ K = A</code>), encrypting with RC4 and then encrypting again with the same key produces the original data. This means Ekko needs only <strong>one function</strong> for both encryption and decryption &mdash; it calls <code>SystemFunction032</code> to encrypt before sleep and calls it again with the same key to decrypt after sleep. No separate decryption routine is needed.</p>
+</div>
+
+<p>Cryptographic strength is not the primary goal here. Sleep obfuscation only needs the encrypted data to be unrecognizable to signature scanners and memory analysis tools. RC4 with a random 16-byte key more than satisfies this requirement, even though RC4 is considered broken for protocols like TLS.</p>
+
+<!-- ============================================================ -->
+<h2>2. How RC4 Works</h2>
+
+<p>RC4 operates in two phases: <strong>Key Scheduling Algorithm (KSA)</strong> and <strong>Pseudo-Random Generation Algorithm (PRGA)</strong>.</p>
+
+<h3>Phase 1: Key Scheduling Algorithm (KSA)</h3>
+
+<p>KSA initializes a 256-byte permutation array (S-box) using the key:</p>
+
+<pre><span class="lang-tag">C</span>// RC4 Key Scheduling Algorithm (conceptual)
+unsigned char S[256];
+int j = 0;
+
+// Initialize S-box to identity permutation
+for (int i = 0; i &lt; 256; i++)
+    S[i] = i;
+
+// Permute S-box using the key
+for (int i = 0; i &lt; 256; i++) {
+    j = (j + S[i] + key[i % key_length]) % 256;
+    // Swap S[i] and S[j]
+    unsigned char tmp = S[i];
+    S[i] = S[j];
+    S[j] = tmp;
+}</pre>
+
+<h3>Phase 2: Pseudo-Random Generation Algorithm (PRGA)</h3>
+
+<p>PRGA generates a keystream byte-by-byte and XORs each with a plaintext byte:</p>
+
+<pre><span class="lang-tag">C</span>// RC4 PRGA - generates keystream and XORs with data
+int i = 0, j = 0;
+
+for (int n = 0; n &lt; data_length; n++) {
+    i = (i + 1) % 256;
+    j = (j + S[i]) % 256;
+
+    // Swap S[i] and S[j]
+    unsigned char tmp = S[i];
+    S[i] = S[j];
+    S[j] = tmp;
+
+    // Generate keystream byte and XOR with data
+    unsigned char K = S[(S[i] + S[j]) % 256];
+    data[n] ^= K;  // XOR: encrypt or decrypt
+}</pre>
+
+<div class="card">
+<h4>The XOR Property</h4>
+<p>Since the PRGA generates the <strong>same keystream</strong> given the same key (the S-box is initialized identically each time), and the only operation on the data is XOR, running RC4 twice with the same key first XORs with the keystream (encrypt) then XORs with the identical keystream again (decrypt), recovering the original data. This is the property Ekko exploits.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. SystemFunction032 &mdash; The Undocumented RC4</h2>
+
+<p><code>SystemFunction032</code> is an undocumented function exported by <code>advapi32.dll</code> (internally implemented in <code>cryptsp.dll</code> on modern Windows). It provides a complete RC4 encryption/decryption operation in a single function call.</p>
+
+<pre><span class="lang-tag">C</span>// SystemFunction032 - undocumented RC4 implementation
+// Exported by advapi32.dll
+//
+// NTSTATUS SystemFunction032(
+//     PUSTRING Data,    // Buffer to encrypt/decrypt in place
+//     PUSTRING Key      // RC4 key
+// );
+//
+// Returns STATUS_SUCCESS (0) on success
+
+// Ekko resolves it at runtime:
+PVOID SysFunc032 = GetProcAddress(
+    LoadLibraryA("Advapi32"),
+    "SystemFunction032"
+);</pre>
+
+<p>The function takes two parameters, both pointers to <code>USTRING</code> structures. It performs RC4 encryption in-place &mdash; the data buffer is modified directly, with no separate output buffer needed.</p>
+
+<!-- ============================================================ -->
+<h2>4. The USTRING Structure</h2>
+
+<p>Both the data and key are passed to SystemFunction032 using a structure called <code>USTRING</code> (sometimes called <code>UNICODE_STRING</code> in some implementations, though it is used here as a generic buffer descriptor):</p>
+
+<pre><span class="lang-tag">C</span>// USTRING structure - Ekko's definition from Ekko.h
+typedef struct {
+    DWORD  Length;           // Current length of data in buffer
+    DWORD  MaximumLength;    // Maximum capacity of buffer
+    PVOID  Buffer;           // Pointer to the actual data
+} USTRING;</pre>
+
+<div class="card highlight">
+<h4>USTRING vs UNICODE_STRING</h4>
+<p>This structure is nearly identical to the Windows <code>UNICODE_STRING</code> type used throughout the NT kernel, except the Length/MaximumLength fields are <code>DWORD</code> (32-bit) instead of <code>USHORT</code> (16-bit). This is important because Ekko needs to describe buffers larger than 65,535 bytes &mdash; the entire process image can be many megabytes. The DWORD-sized length fields allow describing buffers up to 4GB.</p>
+</div>
+
+<p>Ekko sets up two USTRING structures &mdash; one for the image data to encrypt and one for the RC4 key:</p>
+
+<pre><span class="lang-tag">C</span>// From Ekko.c - Setting up the encryption parameters
+
+// The RC4 key: 16 bytes of 0x55 (hardcoded in the PoC)
+CHAR KeyBuf[16] = { 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+                    0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55 };
+
+USTRING Key = { 0 };
+USTRING Img = { 0 };
+
+// Key setup
+Key.Buffer         = KeyBuf;
+Key.Length          = 16;
+Key.MaximumLength  = 16;
+
+// Image data setup - the entire process image
+ImageBase = GetModuleHandleA( NULL );
+ImageSize = ((PIMAGE_NT_HEADERS)(ImageBase +
+    ((PIMAGE_DOS_HEADER)ImageBase)-&gt;e_lfanew))-&gt;
+    OptionalHeader.SizeOfImage;
+
+Img.Buffer         = ImageBase;
+Img.Length          = ImageSize;
+Img.MaximumLength  = ImageSize;</pre>
+
+<div class="card warn">
+<h4>Hardcoded Key in the PoC</h4>
+<p>Ekko's proof-of-concept uses a hardcoded key of 16 bytes of <code>0x55</code>. In a production implant, this key should be randomly generated for each sleep cycle using a CSPRNG like <code>RtlGenRandom</code> / <code>BCryptGenRandom</code>. A hardcoded key means an analyst who knows the key can decrypt the sleeping beacon's memory. The PoC prioritizes clarity over operational security.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. How Ekko Passes Arguments to SystemFunction032</h2>
+
+<p>Ekko does not call SystemFunction032 directly. Instead, it sets up a CONTEXT structure with the registers configured as if calling the function, then uses NtContinue to "jump" into it. On x64 Windows, the first four integer/pointer arguments are passed in RCX, RDX, R8, R9:</p>
+
+<pre><span class="lang-tag">C</span>// Setting up the CONTEXT to call SystemFunction032(&Img, &Key)
+// (encrypt the image with the RC4 key)
+
+RopMemEnc.Rsp -= 8;           // Stack alignment (explained in Module 6)
+RopMemEnc.Rip  = SysFunc032;  // RIP = SystemFunction032 address
+RopMemEnc.Rcx  = &Img;        // Arg 1: pointer to data USTRING
+RopMemEnc.Rdx  = &Key;        // Arg 2: pointer to key USTRING
+
+// When NtContinue loads this context:
+//   RIP jumps to SystemFunction032
+//   RCX = &Img (first argument)
+//   RDX = &Key (second argument)
+// Result: SystemFunction032 encrypts the image in-place with RC4</pre>
+
+<p>The decrypt step is identical &mdash; same function, same arguments. Because RC4 is symmetric, calling SystemFunction032 again with the same key on the already-encrypted data produces the original plaintext:</p>
+
+<pre><span class="lang-tag">C</span>// Decrypt context - identical to encrypt
+RopMemDec.Rsp -= 8;
+RopMemDec.Rip  = SysFunc032;  // Same function
+RopMemDec.Rcx  = &Img;        // Same data buffer (now encrypted)
+RopMemDec.Rdx  = &Key;        // Same key
+// Result: encrypted data XOR keystream = original plaintext</pre>
+
+<!-- ============================================================ -->
+<h2>6. The Image Region Being Encrypted</h2>
+
+<p>Ekko encrypts the <strong>entire process image</strong> &mdash; from the base address to <code>base + SizeOfImage</code>. This covers:</p>
+
+<table>
+<tr><th>Section</th><th>Contents</th><th>Why Encrypt It</th></tr>
+<tr><td><code>.text</code></td><td>Executable code</td><td>Contains the implant's machine code and signatures</td></tr>
+<tr><td><code>.rdata</code></td><td>Read-only data, strings, imports</td><td>Contains string constants, C2 URLs, pipe names</td></tr>
+<tr><td><code>.data</code></td><td>Initialized global variables</td><td>Contains configuration data, state variables</td></tr>
+<tr><td><code>.bss</code></td><td>Uninitialized globals</td><td>May contain runtime state after initialization</td></tr>
+<tr><td>PE headers</td><td>DOS/NT/section headers</td><td>MZ/PE signatures are easily detectable</td></tr>
+</table>
+
+<pre><span class="lang-tag">C</span>// Getting the image base and size
+ImageBase = GetModuleHandleA( NULL );  // Base of current process
+
+// Parse PE headers to get SizeOfImage
+ImageSize = ((PIMAGE_NT_HEADERS)(
+    (PBYTE)ImageBase +
+    ((PIMAGE_DOS_HEADER)ImageBase)-&gt;e_lfanew
+))-&gt;OptionalHeader.SizeOfImage;</pre>
+
+<div class="card green">
+<h4>Complete Image Coverage</h4>
+<p>By encrypting the entire SizeOfImage range, Ekko ensures that <strong>no</strong> recognizable artifacts remain in the process image during sleep &mdash; not code, not strings, not PE headers, not configuration blocks. A memory scanner examining this region sees only pseudo-random bytes that match no known signatures.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. RC4 Limitations &amp; Operational Considerations</h2>
+
+<p>While RC4 is excellent for sleep masking, there are limitations to be aware of:</p>
+
+<div class="card warn">
+<h4>Known Weaknesses</h4>
+<ul>
+<li><strong>Key reuse</strong> &mdash; Using the same RC4 key across multiple sleep cycles leaks information. If an attacker captures memory snapshots from two different sleep cycles encrypted with the same key, XORing them together cancels the keystream and reveals the XOR of the two plaintexts. Production implants should generate a fresh random key for each cycle.</li>
+<li><strong>Biased output</strong> &mdash; RC4's second output byte has a known bias toward zero. While irrelevant for sleep masking (scanners do not exploit RC4 biases), it illustrates why RC4 is not suitable for cryptographic protocols.</li>
+<li><strong>No integrity protection</strong> &mdash; RC4 provides confidentiality only. If an attacker modifies the encrypted memory, the decrypted result will be silently corrupted. For sleep masking, this is acceptable since memory corruption during sleep is not a typical attack vector.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Standalone SystemFunction032 Example</h2>
+
+<p>Here is a complete standalone example demonstrating SystemFunction032 usage outside of Ekko's timer chain:</p>
+
+<pre><span class="lang-tag">C</span>#include &lt;windows.h&gt;
+#include &lt;stdio.h&gt;
+
+typedef struct {
+    DWORD  Length;
+    DWORD  MaximumLength;
+    PVOID  Buffer;
+} USTRING;
+
+typedef NTSTATUS (WINAPI* fnSystemFunction032)(
+    PUSTRING Data,
+    PUSTRING Key
+);
+
+int main() {
+    // Resolve SystemFunction032
+    fnSystemFunction032 SystemFunction032 =
+        (fnSystemFunction032)GetProcAddress(
+            LoadLibraryA("advapi32.dll"),
+            "SystemFunction032");
+
+    // Sample data to encrypt
+    char data[] = "Hello from Ekko course!";
+    char key[]  = "MySecretKey12345";  // 16-byte key
+
+    USTRING Data = { sizeof(data)-1, sizeof(data)-1, data };
+    USTRING Key  = { sizeof(key)-1,  sizeof(key)-1,  key  };
+
+    printf("Original:  %s\n", data);
+
+    // Encrypt
+    SystemFunction032(&Data, &Key);
+    printf("Encrypted: ");
+    for (int i = 0; i &lt; Data.Length; i++)
+        printf("%02x ", (unsigned char)data[i]);
+    printf("\n");
+
+    // Decrypt (same call, same key - RC4 symmetry)
+    SystemFunction032(&Data, &Key);
+    printf("Decrypted: %s\n", data);
+
+    return 0;
+}</pre>
+
+<div class="card">
+<h4>Expected Behavior</h4>
+<p>The first call to SystemFunction032 encrypts the string in-place, producing seemingly random bytes. The second call with the identical key decrypts it back to the original string. This is exactly what happens inside Ekko's timer chain &mdash; Timer 2 encrypts and Timer 4 decrypts.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: Why can Ekko use the same SystemFunction032 call for both encryption and decryption?</p>
+<div class="quiz-btn" data-choice="A">A) SystemFunction032 detects whether the data is already encrypted</div>
+<div class="quiz-btn" data-choice="B">B) The function takes a mode parameter that selects encrypt or decrypt</div>
+<div class="quiz-btn" data-choice="C">C) RC4 is a XOR-based stream cipher, so applying it twice with the same key restores the original data</div>
+<div class="quiz-btn" data-choice="D">D) Windows automatically tracks encryption state in the USTRING structure</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q2: What does the USTRING structure contain?</p>
+<div class="quiz-btn" data-choice="A">A) A null-terminated string pointer and character encoding flag</div>
+<div class="quiz-btn" data-choice="B">B) Length, MaximumLength (both DWORD), and a Buffer pointer</div>
+<div class="quiz-btn" data-choice="C">C) A hash value and the original data size</div>
+<div class="quiz-btn" data-choice="D">D) An encryption algorithm identifier and IV</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What is the main weakness of Ekko's hardcoded 0x55 key in the proof-of-concept?</p>
+<div class="quiz-btn" data-choice="A">A) An analyst who knows the key can decrypt the sleeping beacon's memory</div>
+<div class="quiz-btn" data-choice="B">B) RC4 cannot use repeated byte patterns as keys</div>
+<div class="quiz-btn" data-choice="C">C) The key is too long for SystemFunction032 to handle</div>
+<div class="quiz-btn" data-choice="D">D) Windows Defender specifically detects the 0x55 key pattern</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Prev: Timer Queues &amp; Waitable Timers</a>
+<a class="primary" href="module4.html">Next: ROP Gadgets &amp; NtContinue &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: File System States & Delete-Pending - ProcessGhosting Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A8;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#6366f1;--accent2:#4f46e5;--gradient:linear-gradient(135deg,#6366f1,#4f46e5)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ProcessGhosting</h2>
+<span>Ghost Process Evasion</span>
+</div>
+<a class="home-link" href="../ProcessGhosting_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Creation Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Tampering Overview</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module3.html"><span>3. File States &amp; Delete-Pending</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Creating the Ghost File</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Section Mapping from Ghost</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Process &amp; Thread Creation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. AV/EDR Scan Timing</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: File System States &amp; Delete-Pending</h1>
+<p class="subtitle">Understanding the NTFS delete-pending state &mdash; the key mechanism that makes Process Ghosting possible.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how NTFS file deletion really works at the kernel level, the delete-pending state, the difference between <code>FILE_DELETE_ON_CLOSE</code> and <code>FileDispositionInformation</code>, how mapped files interact with deletion, and why the delete-pending state creates a window where the file exists (for the handle owner) but is inaccessible (to everyone else).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. How File Deletion Actually Works in Windows</h2>
+
+<p>When you call <code>DeleteFile</code> in Win32, the file does not immediately vanish from disk. Instead, Windows follows a multi-stage process that involves marking the file and then removing it only when all handles are closed. The NT-native view reveals the actual mechanics:</p>
+
+<div class="card">
+<h4>The Two-Stage Deletion Model</h4>
+<ol>
+<li><strong>Stage 1 &mdash; Mark for deletion</strong>: The file is marked as &ldquo;delete-pending.&rdquo; The MFT (Master File Table) entry is flagged, but the file&rsquo;s data and metadata remain intact. The file still exists in the namespace.</li>
+<li><strong>Stage 2 &mdash; Actual removal</strong>: When the <strong>last handle</strong> to the file is closed, the filesystem completes the deletion. The directory entry is removed and the data clusters are freed.</li>
+</ol>
+</div>
+
+<p>This two-stage model exists because Windows must handle the case where a file is in use when deletion is requested. Unlike Unix (where <code>unlink</code> immediately removes the directory entry while keeping the inode alive for existing file descriptors), Windows keeps the directory entry until all handles close.</p>
+
+<!-- ============================================================ -->
+<h2>2. Two Ways to Mark a File for Deletion</h2>
+
+<p>There are two mechanisms to put a file into the delete-pending state:</p>
+
+<h3>2.1 FILE_DELETE_ON_CLOSE (at open time)</h3>
+
+<p>The <code>FILE_DELETE_ON_CLOSE</code> flag is specified when opening or creating a file. It tells the filesystem to delete the file when the last handle with this flag is closed:</p>
+
+<pre><code>// FILE_DELETE_ON_CLOSE - set at file open time
+HANDLE hFile;
+IO_STATUS_BLOCK iosb;
+OBJECT_ATTRIBUTES objAttr;
+
+NtCreateFile(
+    &hFile,
+    DELETE | GENERIC_WRITE,   // DELETE access required
+    &objAttr,
+    &iosb,
+    NULL,
+    FILE_ATTRIBUTE_NORMAL,
+    0,                         // no sharing
+    FILE_SUPERSEDE,            // create or replace
+    FILE_DELETE_ON_CLOSE,      // <-- delete when handle closes
+    NULL, 0
+);</code></pre>
+
+<h3>2.2 FileDispositionInformation (after open)</h3>
+
+<p>The <code>NtSetInformationFile</code> call with <code>FileDispositionInformation</code> can mark an already-open file for deletion. This is the approach Process Ghosting uses:</p>
+
+<pre><code>// FileDispositionInformation - set AFTER file is open
+FILE_DISPOSITION_INFORMATION dispInfo;
+dispInfo.DeleteFile = TRUE;
+
+IO_STATUS_BLOCK iosb;
+NTSTATUS status = NtSetInformationFile(
+    hFile,                           // existing open handle
+    &iosb,
+    &dispInfo,
+    sizeof(dispInfo),
+    FileDispositionInformation       // information class
+);</code></pre>
+
+<div class="card green">
+<h4>Why Ghosting Uses FileDispositionInformation</h4>
+<p>Process Ghosting uses <code>NtSetInformationFile</code> with <code>FileDispositionInformation</code> rather than <code>FILE_DELETE_ON_CLOSE</code> because it needs to control the <strong>order of operations</strong>: create the file, mark it delete-pending, write the payload, then create the section. The <code>FILE_DELETE_ON_CLOSE</code> flag does not allow this fine-grained control because the delete-on-close behavior is tied to handle closure, not to an explicit API call.</p>
+</div>
+
+<table>
+<tr><th>Property</th><th>FILE_DELETE_ON_CLOSE</th><th>FileDispositionInformation</th></tr>
+<tr><td><strong>When set</strong></td><td>At <code>NtCreateFile</code> time</td><td>Anytime via <code>NtSetInformationFile</code></td></tr>
+<tr><td><strong>Reversible?</strong></td><td>No (once set, cannot be cleared)</td><td>Yes (set <code>DeleteFile = FALSE</code> to unmark)</td></tr>
+<tr><td><strong>Access rights needed</strong></td><td><code>DELETE</code> at open time</td><td><code>DELETE</code> on the handle</td></tr>
+<tr><td><strong>When deletion occurs</strong></td><td>When handle with this flag closes</td><td>When the last handle closes</td></tr>
+<tr><td><strong>Used by Ghosting</strong></td><td>No</td><td>Yes</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. The Delete-Pending State in Detail</h2>
+
+<p>Once a file is marked for deletion (by either mechanism), it enters the <strong>delete-pending</strong> state. This is a real state tracked by the filesystem driver (NTFS). While in this state:</p>
+
+<div class="card">
+<h4>Delete-Pending State Properties</h4>
+<table>
+<tr><th>Operation</th><th>From Existing Handle</th><th>From New Open Attempt</th></tr>
+<tr><td><strong>Read file</strong></td><td>Succeeds (handle is still valid)</td><td>Fails: <code>STATUS_DELETE_PENDING</code></td></tr>
+<tr><td><strong>Write file</strong></td><td>Succeeds (handle is still valid)</td><td>Fails: <code>STATUS_DELETE_PENDING</code></td></tr>
+<tr><td><strong>Create section</strong></td><td>Succeeds (handle is still valid)</td><td>Cannot open file to create section</td></tr>
+<tr><td><strong>Open file (NtCreateFile/NtOpenFile)</strong></td><td>N/A</td><td>Fails: <code>STATUS_DELETE_PENDING</code></td></tr>
+<tr><td><strong>Delete file again</strong></td><td>No-op (already pending)</td><td>Fails: <code>STATUS_DELETE_PENDING</code></td></tr>
+<tr><td><strong>List in directory</strong></td><td colspan="2">May still appear (implementation-dependent)</td></tr>
+</table>
+</div>
+
+<p>The critical insight is the asymmetry: the <strong>handle owner</strong> can still do everything with the file (read, write, create sections), but <strong>no one else</strong> can open the file. This is exactly the property Process Ghosting exploits.</p>
+
+<!-- ============================================================ -->
+<h2>4. Interaction with Section Objects</h2>
+
+<p>A key question for Process Ghosting is: can you create a section from a delete-pending file? The answer is <strong>yes</strong>, as long as you use the existing open handle.</p>
+
+<pre><code>// This works: create section from delete-pending file via existing handle
+HANDLE hSection = NULL;
+NTSTATUS status = NtCreateSection(
+    &hSection,
+    SECTION_ALL_ACCESS,
+    NULL,
+    NULL,
+    PAGE_READONLY,
+    SEC_IMAGE,
+    hFile           // handle to delete-pending file - WORKS
+);</code></pre>
+
+<p>Once the section is created, it holds a reference to the underlying file object in the kernel. Even when the file handle is closed and the file is deleted from disk, the section persists because the kernel keeps the file object alive through the section&rsquo;s <code>CONTROL_AREA</code> &rarr; <code>FILE_OBJECT</code> reference chain.</p>
+
+<div class="card warn">
+<h4>What About Existing Mapped Sections?</h4>
+<p>Windows prevents deletion of files that have existing image sections mapped. If you try to delete a file that is currently mapped as a <code>SEC_IMAGE</code> section (e.g., a running executable), you get <code>STATUS_CANNOT_DELETE</code>. Process Ghosting avoids this by marking the file delete-pending <strong>before</strong> creating the section. The order matters: mark delete first, then create section.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. The Ghosting Order of Operations</h2>
+
+<p>The specific order in which operations are performed is critical. Here is why each step must happen in this exact sequence:</p>
+
+<div class="card">
+<h4>Step-by-Step Rationale</h4>
+<ol>
+<li><strong>NtCreateFile</strong> &mdash; Creates the file. It must exist to write to it and create a section from it.</li>
+<li><strong>NtSetInformationFile (FileDispositionInformation)</strong> &mdash; Marks the file delete-pending. This must happen <strong>before</strong> writing the payload, because once the payload is written and a section is created, the file would have an image section mapped, which would prevent deletion. By marking delete-pending first, the deletion is already queued.</li>
+<li><strong>NtWriteFile</strong> &mdash; Writes the malicious PE content. The file is delete-pending but the handle is still valid for writes.</li>
+<li><strong>NtCreateSection (SEC_IMAGE)</strong> &mdash; Creates the image section. The file is delete-pending and contains the malicious PE. The section captures this content.</li>
+<li><strong>NtClose (hFile)</strong> &mdash; Closes the file handle. Since the file is delete-pending, closing the last handle triggers actual deletion. The file vanishes from disk.</li>
+<li><strong>NtCreateProcessEx</strong> &mdash; Creates the process from the section. The section is still valid even though the backing file is gone.</li>
+</ol>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">File State Transitions</h4>
+<div class="flow">
+<div class="flow box">Created<br><small>Normal file</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Delete-Pending<br><small>Marked, still open</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Written + Sectioned<br><small>PE content, section created</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Deleted<br><small>Handle closed, gone from disk</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. STATUS_DELETE_PENDING vs STATUS_FILE_DELETED</h2>
+
+<p>When another process (like an AV scanner) tries to open a file in these states, it receives different error codes depending on timing:</p>
+
+<table>
+<tr><th>File State</th><th>NtCreateFile/NtOpenFile Result</th><th>Meaning</th></tr>
+<tr><td><strong>Delete-pending</strong> (handle still open)</td><td><code>STATUS_DELETE_PENDING</code> (0xC0000056)</td><td>File exists in MFT but is queued for deletion. Cannot open.</td></tr>
+<tr><td><strong>Deleted</strong> (all handles closed)</td><td><code>STATUS_OBJECT_NAME_NOT_FOUND</code> (0xC0000034)</td><td>File no longer exists in the directory namespace.</td></tr>
+</table>
+
+<p>In both cases, the AV scanner <strong>cannot open or read the file</strong>. This is the fundamental evasion mechanism of Process Ghosting. The file is either locked by the delete-pending state or gone entirely.</p>
+
+<!-- ============================================================ -->
+<h2>7. NTFS Internals: The MFT Perspective</h2>
+
+<p>At the NTFS level, deletion involves the Master File Table (MFT) entry for the file:</p>
+
+<div class="card">
+<h4>MFT Entry Lifecycle During Ghosting</h4>
+<table>
+<tr><th>Phase</th><th>MFT State</th><th>Directory Entry</th><th>Data Clusters</th></tr>
+<tr><td>File created</td><td>Allocated, flags = IN_USE</td><td>Present in parent directory index</td><td>Allocated to file</td></tr>
+<tr><td>Delete-pending</td><td>Still IN_USE, pending delete flag</td><td>Still present (may be hidden from some queries)</td><td>Still allocated</td></tr>
+<tr><td>After last handle closes</td><td>Marked free (IN_USE cleared)</td><td>Removed from parent directory index</td><td>Freed to bitmap</td></tr>
+</table>
+</div>
+
+<p>The key point is that during the delete-pending phase, the MFT entry and data clusters are fully intact. The file&rsquo;s data (our malicious PE) is physically present on disk and readable through the existing handle. It is only inaccessible to processes that try to <em>open</em> it, because NTFS rejects new opens for delete-pending files.</p>
+
+<!-- ============================================================ -->
+<h2>8. Practical Implications for Security Tools</h2>
+
+<div class="card warn">
+<h4>AV Scanner Perspective</h4>
+<p>When a process creation notification fires (via <code>PsSetCreateProcessNotifyRoutineEx</code>, which fires at first thread insertion via <code>NtCreateThreadEx</code>, not at process object creation), the AV driver receives the <code>FILE_OBJECT</code> of the image backing the process. The driver typically tries to read this file to scan its content. But if the file is delete-pending or already deleted:</p>
+<ul>
+<li>The <code>FILE_OBJECT</code> may point to a file that no longer has a directory entry</li>
+<li>Trying to open the file by name fails with <code>STATUS_DELETE_PENDING</code> or <code>STATUS_OBJECT_NAME_NOT_FOUND</code></li>
+<li>The <code>FILE_OBJECT</code> itself may still be valid (referenced by the section), but the data may not be easily accessible through normal file I/O paths</li>
+</ul>
+<p>This creates a blind spot: the process is running, but its backing file cannot be scanned through conventional means.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What happens when another process tries to open a file that is in the delete-pending state?</p>
+<div class="quiz-btn" data-choice="A">A) The open succeeds but reads return zeroes</div>
+<div class="quiz-btn" data-choice="B">B) The open fails with STATUS_DELETE_PENDING</div>
+<div class="quiz-btn" data-choice="C">C) The open succeeds in read-only mode</div>
+<div class="quiz-btn" data-choice="D">D) The file is immediately deleted and the open fails with STATUS_OBJECT_NAME_NOT_FOUND</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: Why does Process Ghosting use NtSetInformationFile (FileDispositionInformation) instead of FILE_DELETE_ON_CLOSE?</p>
+<div class="quiz-btn" data-choice="A">A) It allows controlling the exact moment the file is marked for deletion, enabling the correct order of operations</div>
+<div class="quiz-btn" data-choice="B">B) FILE_DELETE_ON_CLOSE does not work on NTFS</div>
+<div class="quiz-btn" data-choice="C">C) FileDispositionInformation deletes the file faster</div>
+<div class="quiz-btn" data-choice="D">D) FILE_DELETE_ON_CLOSE requires administrator privileges</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: Can you create a SEC_IMAGE section from a file that is in the delete-pending state using the existing open handle?</p>
+<div class="quiz-btn" data-choice="A">A) No, the kernel rejects section creation from delete-pending files</div>
+<div class="quiz-btn" data-choice="B">B) Only if the file has PAGE_EXECUTE protection</div>
+<div class="quiz-btn" data-choice="C">C) Yes, the existing handle is still fully functional for section creation</div>
+<div class="quiz-btn" data-choice="D">D) Only with SEC_COMMIT, not SEC_IMAGE</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Prev: PE Tampering Techniques Overview</a>
+<a class="primary" href="module4.html">Next: Creating the Ghost File &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: Shoggoth Architecture Overview - Shoggoth Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F419;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#a855f7;--accent2:#7c3aed;--gradient:linear-gradient(135deg,#a855f7,#7c3aed)}</style>
+</head>
+<body>
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+<nav>
+<div class="logo">
+<h2>Shoggoth Course</h2>
+<span>Polymorphic Engine Masterclass</span>
+</div>
+<a class="home-link" href="../Shoggoth_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Signatures &amp; Polymorphism</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Polymorphic Engine Concepts</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. asmjit: Runtime Codegen</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module4.html"><span>4. Shoggoth Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Encryption Layer</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Decoder Stub Generation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Junk Code &amp; Anti-Analysis</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 4: Shoggoth Architecture Overview</h1>
+<p class="subtitle">The end-to-end encoder pipeline: from raw input to polymorphic position-independent output, covering the three operational modes and the role of each component.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand Shoggoth&rsquo;s complete architecture: how input payloads are processed, how the PIC loaders are merged for PE and COFF modes, the two encryption stages, the decoder stub generation pipeline, garbage code insertion points, and the final output assembly. By the end of this module, you will have a mental model of the entire data flow.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Three Operational Modes</h2>
+
+<p>Shoggoth supports three input modes, each handling a different payload type. The mode determines how the input is pre-processed before encryption:</p>
+
+<table>
+<tr><th>Mode</th><th>Flag</th><th>Input</th><th>Pre-Processing</th><th>Output</th></tr>
+<tr><td><strong>Raw</strong></td><td><code>--mode raw</code></td><td>Shellcode (.bin)</td><td>None &mdash; input is used as-is</td><td>PIC blob (decoder stub + encrypted shellcode)</td></tr>
+<tr><td><strong>PE</strong></td><td><code>--mode pe</code></td><td>x64 PE executable (.exe)</td><td>PIC PE loader prepended to the PE file</td><td>PIC blob (decoder stub + encrypted [loader + PE])</td></tr>
+<tr><td><strong>COFF</strong></td><td><code>--mode coff</code></td><td>x64 COFF/BOF (.o)</td><td>PIC COFF loader prepended to the COFF object</td><td>PIC blob (decoder stub + encrypted [loader + COFF])</td></tr>
+</table>
+
+<p>In <strong>raw mode</strong>, the input shellcode is treated as an opaque byte sequence. Shoggoth encrypts it and generates a decoder stub that decrypts and jumps to it. No loader is needed because the input is already position-independent shellcode.</p>
+
+<p>In <strong>PE mode</strong>, the input is a standard x64 PE executable. Since PE files require a loader to process imports, relocations, and sections, Shoggoth prepends a <strong>PIC PE loader</strong> &mdash; a self-contained piece of shellcode that can parse the PE headers, map sections, resolve imports by walking the PEB/LDR structures, apply relocations, and transfer control to the entry point.</p>
+
+<p>In <strong>COFF mode</strong>, the input is a COFF object file (commonly used as Beacon Object Files / BOFs in Cobalt Strike). A <strong>PIC COFF loader</strong> is prepended that handles symbol resolution and section mapping for COFF objects.</p>
+
+<!-- ============================================================ -->
+<h2>2. PIC Loaders</h2>
+
+<p>The PE and COFF loaders are critical components that enable Shoggoth to handle non-shellcode inputs. They are compiled from C source code using MinGW with specific constraints to ensure position-independence:</p>
+
+<div class="card">
+<h4>PIC Loader Constraints</h4>
+<ul>
+<li><strong>No global variables</strong> &mdash; all state is kept on the stack or in registers</li>
+<li><strong>No C runtime</strong> &mdash; compiled with <code>-nostdlib -nostartfiles</code></li>
+<li><strong>Only .text section extracted</strong> &mdash; the compiled output is stripped to only the executable code</li>
+<li><strong>Runtime API resolution</strong> &mdash; Windows API addresses are resolved at runtime by walking the PEB &rarr; LDR &rarr; InMemoryOrderModuleList to find kernel32.dll, then parsing its export table</li>
+<li><strong>No absolute addresses</strong> &mdash; all references are RIP-relative or stack-relative</li>
+</ul>
+</div>
+
+<p>The loaders are pre-compiled and stored in the <code>stub/</code> directory of the Shoggoth source tree. At encryption time, the appropriate loader binary is read, the input payload is appended to it, and the combined blob becomes the data that gets encrypted.</p>
+
+<pre><span class="lang-tag">C++</span><code>// Conceptual: PE mode payload assembly
+// 1. Read the PIC PE loader stub
+std::vector&lt;uint8_t&gt; loader = readFile("stub/PELoader.bin");
+
+// 2. Read the input PE file
+std::vector&lt;uint8_t&gt; peFile = readFile(inputPath);
+
+// 3. Concatenate: loader + PE file = combined payload
+std::vector&lt;uint8_t&gt; payload;
+payload.insert(payload.end(), loader.begin(), loader.end());
+payload.insert(payload.end(), peFile.begin(), peFile.end());
+
+// 4. Now encrypt this combined payload
+// The decoder stub will decrypt it, then execution starts
+// at the loader, which parses and maps the PE file</code></pre>
+
+<!-- ============================================================ -->
+<h2>3. The Encryption Pipeline</h2>
+
+<p>After the payload is assembled (raw shellcode, or loader + PE/COFF), Shoggoth applies a <strong>two-stage encryption pipeline</strong>. Each stage uses a different algorithm with randomly generated parameters:</p>
+
+<div class="diagram">
+<h4>Shoggoth Encryption Pipeline</h4>
+<div class="flow">
+<div class="box">Input Payload<br><small>shellcode / loader+PE / loader+COFF</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Stage 1: RC4<br><small>Random key, stream cipher</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Stage 2: Block Cipher<br><small>Random ops on 8-byte blocks</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">Encrypted Blob</div>
+</div>
+</div>
+
+<h3>3.1 Stage 1: RC4 Stream Cipher</h3>
+
+<p>The first encryption stage applies the RC4 stream cipher with a randomly generated key. RC4 was chosen for several reasons: it produces output of the same length as the input (no padding), it has a simple implementation that can be expressed in few x86 instructions, and it provides good byte-level diffusion (changing one key byte affects the entire output).</p>
+
+<h3>3.2 Stage 2: Random Block Cipher</h3>
+
+<p>The second stage divides the data into 8-byte blocks and applies a randomly selected chain of arithmetic/bitwise operations. For each encryption run, Shoggoth randomly selects which operations to apply and in what order from the pool: <code>ADD</code>, <code>SUB</code>, <code>XOR</code>, <code>NOT</code>, <code>NEG</code>, <code>INC</code>, <code>DEC</code>, <code>ROL</code>, <code>ROR</code>. Each operation uses a randomly generated key/shift value.</p>
+
+<div class="card warn">
+<h4>Optional Stage Control</h4>
+<p>Shoggoth provides flags to skip either encryption stage: <code>--dont-do-first-encryption</code> skips RC4, and <code>--dont-do-second-encryption</code> skips the block cipher. There is also <code>--encrypt-only-decryptor</code> which applies the second stage only to the RC4 decryptor stub (not the entire payload). These options are useful for testing or when layering Shoggoth with other tools.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Decoder Stub Generation</h2>
+
+<p>For each encryption stage, Shoggoth uses asmjit to generate a corresponding <strong>decoder stub</strong> &mdash; position-independent x86-64 machine code that reverses the encryption at runtime. The decoder stubs are the polymorphic heart of the system:</p>
+
+<table>
+<tr><th>Stub</th><th>Decrypts</th><th>Algorithm</th><th>Polymorphic Properties</th></tr>
+<tr><td><strong>Block Cipher Decoder</strong></td><td>Stage 2 encryption</td><td>Inverse operations on 8-byte blocks (reverse order: if encrypted with ADD then XOR, decoder does XOR then SUB)</td><td>Random registers, random junk code, random operation sequence (matches encryption)</td></tr>
+<tr><td><strong>RC4 Decoder</strong></td><td>Stage 1 encryption</td><td>RC4 KSA + PRGA implementation in x86-64 assembly</td><td>Random registers, junk code insertion between RC4 steps</td></tr>
+</table>
+
+<p>Each decoder stub is generated fresh using asmjit, with random register assignments and junk code inserted at multiple points. The stubs include RIP-relative addressing to locate the encrypted data that follows them in memory.</p>
+
+<!-- ============================================================ -->
+<h2>5. Garbage Code Insertion Points</h2>
+
+<p>Shoggoth inserts garbage (junk) instructions at multiple points in the pipeline to further break pattern matching. Junk code is inserted:</p>
+
+<ul>
+<li><strong>Before the block cipher decoder</strong> &mdash; garbage instructions at the very start of execution</li>
+<li><strong>Within the block cipher decoder loop</strong> &mdash; between real decryption instructions</li>
+<li><strong>Between the two decoder stubs</strong> &mdash; after block cipher decryption, before RC4 decryption</li>
+<li><strong>Within the RC4 decoder</strong> &mdash; between KSA and PRGA steps</li>
+<li><strong>After the final decoder</strong> &mdash; before the jump to the decrypted payload</li>
+</ul>
+
+<p>The junk code generator recursively produces instructions that have no net effect on the decoder&rsquo;s functional state. These include jump-over blocks (a short JMP that skips random bytes), side-effect-free operations (push/pop pairs, XOR reg with self then XOR again), and fake function call patterns. Module 7 covers this in detail.</p>
+
+<!-- ============================================================ -->
+<h2>6. Final Output Assembly</h2>
+
+<p>The final output is assembled by concatenating the generated components in execution order:</p>
+
+<div class="diagram">
+<h4>Final PIC Output Structure</h4>
+<div class="flow">
+<div class="box hl">Junk Preamble</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Stage 2 Decoder<br><small>(block cipher)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Junk Interlude</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Stage 1 Decoder<br><small>(RC4)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">Encrypted Payload</div>
+</div>
+</div>
+
+<p>When executed, the flow is:</p>
+<ol>
+<li>CPU executes junk preamble (no-ops effectively)</li>
+<li>Stage 2 decoder runs: decrypts the block cipher layer, revealing the RC4-encrypted payload (and the RC4 decoder stub, if <code>--encrypt-only-decryptor</code> was not used)</li>
+<li>Junk interlude executes (more no-ops)</li>
+<li>Stage 1 decoder runs: decrypts the RC4 layer, revealing the cleartext payload</li>
+<li>Control transfers to the decrypted payload (shellcode, or the PIC PE/COFF loader)</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2>7. Command-Line Interface</h2>
+
+<p>Shoggoth&rsquo;s CLI exposes control over every stage of the pipeline:</p>
+
+<pre><span class="lang-tag">Shell</span><code># Basic usage: encrypt raw shellcode
+Shoggoth.exe -i payload.bin -o encrypted.bin -m raw
+
+# Encrypt a PE file with a specific seed for reproducibility
+Shoggoth.exe -i implant.exe -o encrypted.bin -m pe -s 12345
+
+# Encrypt a COFF/BOF with custom RC4 key
+Shoggoth.exe -i beacon.o -o encrypted.bin -m coff -k AABBCCDD
+
+# Skip RC4 stage, only use block cipher
+Shoggoth.exe -i payload.bin -o encrypted.bin -m raw --dont-do-first-encryption
+
+# Encrypt COFF with BOF arguments
+Shoggoth.exe -i beacon.o -o encrypted.bin -m coff --coff-arg 0x00000001...</code></pre>
+
+<table>
+<tr><th>Flag</th><th>Required</th><th>Description</th></tr>
+<tr><td><code>-i / --input</code></td><td>Yes</td><td>Path to input payload file</td></tr>
+<tr><td><code>-o / --output</code></td><td>Yes</td><td>Path for encrypted output file</td></tr>
+<tr><td><code>-m / --mode</code></td><td>Yes</td><td>Encryption mode: <code>raw</code>, <code>pe</code>, or <code>coff</code></td></tr>
+<tr><td><code>-s / --seed</code></td><td>No</td><td>RNG seed for deterministic output (useful for testing)</td></tr>
+<tr><td><code>-k / --key</code></td><td>No</td><td>Custom RC4 key in hex (default: randomly generated)</td></tr>
+<tr><td><code>--coff-arg</code></td><td>No</td><td>BOF arguments in beacon_generate.py format</td></tr>
+<tr><td><code>--dont-do-first-encryption</code></td><td>No</td><td>Skip Stage 1 (RC4)</td></tr>
+<tr><td><code>--dont-do-second-encryption</code></td><td>No</td><td>Skip Stage 2 (block cipher)</td></tr>
+<tr><td><code>--encrypt-only-decryptor</code></td><td>No</td><td>Stage 2 encrypts only the RC4 decoder, not the full payload</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>8. Source Code Organization</h2>
+
+<p>The Shoggoth repository is organized into distinct directories, each handling a specific concern:</p>
+
+<div class="card">
+<h4>Repository Structure</h4>
+<table>
+<tr><th>Directory</th><th>Contents</th><th>Role</th></tr>
+<tr><td><code>src/</code></td><td>Main encryptor C++ source</td><td>Core engine: encryption, asmjit stub generation, junk code, CLI</td></tr>
+<tr><td><code>PELoader/</code></td><td>PIC PE loader C source</td><td>Compiled to position-independent shellcode that loads PE files from memory</td></tr>
+<tr><td><code>COFFLoader/</code></td><td>PIC COFF loader C source</td><td>Compiled to position-independent shellcode that loads COFF/BOF files</td></tr>
+<tr><td><code>stub/</code></td><td>Pre-compiled loader binaries</td><td>Ready-to-use .bin files for PE and COFF loaders</td></tr>
+<tr><td><code>COFFArgGenerator/</code></td><td>Python script</td><td><code>beacon_generate.py</code> for formatting BOF arguments</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz4">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="1">
+<p>Q1: In PE mode, what does Shoggoth prepend to the PE file before encryption?</p>
+<label data-opt="0"><input type="radio" name="q1"> A Windows DLL that loads the PE at runtime</label>
+<label data-opt="1"><input type="radio" name="q1"> A position-independent PE loader shellcode that resolves imports and maps sections at runtime</label>
+<label data-opt="2"><input type="radio" name="q1"> A copy of ntdll.dll for system call access</label>
+<label data-opt="3"><input type="radio" name="q1"> A standard PE header with import directory entries</label>
+<div class="explain">Shoggoth prepends a PIC PE loader &mdash; a self-contained shellcode stub compiled from C with <code>-nostdlib</code>. This loader resolves API addresses by walking the PEB/LDR structures, maps PE sections, applies relocations, and calls the PE entry point. It contains no global variables and uses only RIP-relative addressing.</div>
+</div>
+
+<div class="quiz-q" data-correct="2">
+<p>Q2: What is the correct order of decryption when the output executes?</p>
+<label data-opt="0"><input type="radio" name="q2"> RC4 first, then block cipher</label>
+<label data-opt="1"><input type="radio" name="q2"> Block cipher and RC4 simultaneously in parallel</label>
+<label data-opt="2"><input type="radio" name="q2"> Block cipher (Stage 2) first, then RC4 (Stage 1)</label>
+<label data-opt="3"><input type="radio" name="q2"> The order is randomly chosen at runtime</label>
+<div class="explain">Encryption applies RC4 first (Stage 1), then the block cipher (Stage 2). At runtime, decryption must reverse this: the block cipher decoder (Stage 2) runs first to peel off the outer layer, then the RC4 decoder (Stage 1) runs to reveal the cleartext payload. This is the standard &ldquo;last encrypted, first decrypted&rdquo; pattern.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>Q3: What does the <code>--seed</code> flag do?</p>
+<label data-opt="0"><input type="radio" name="q3"> Sets the random number generator seed so the same input produces identical output (deterministic mode for testing)</label>
+<label data-opt="1"><input type="radio" name="q3"> Specifies the encryption key for both stages</label>
+<label data-opt="2"><input type="radio" name="q3"> Seeds the junk code generator but not the encryption</label>
+<label data-opt="3"><input type="radio" name="q3"> Determines the output file format</label>
+<div class="explain">The <code>--seed</code> flag initializes the C++ random number generator with a fixed value. Since all random decisions (key generation, register selection, junk code placement, operation selection) flow from this RNG, the same seed with the same input produces byte-identical output. This is invaluable for debugging and testing while still being fully polymorphic by default (random seed from system entropy).</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz4')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Prev: asmjit Runtime Codegen</a>
+<a class="primary" href="module5.html">Next: The Encryption Layer &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

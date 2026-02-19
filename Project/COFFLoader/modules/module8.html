@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Full Chain, Writing BOFs & Security - COFFLoader Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4E6;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f97316;--accent2:#ea580c;--gradient:linear-gradient(135deg,#f97316,#ea580c)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>COFFLoader Course</h2><span>BOF Loader Masterclass</span></div>
+  <a class="home-link" href="../COFFLoader_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> What Are BOFs?</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> COFF Format Deep Dive</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> The BOF API Contract</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> COFF Section Loading</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Symbol Resolution</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Relocation Processing</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Beacon Compat Layer</a>
+  <a class="mod-link active" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Security</a>
+</nav>
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Full Chain, Writing BOFs &amp; Security</h1>
+<p class="subtitle">End-to-end loader flow, writing production BOFs, compilation, and detection considerations.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>This final module ties everything together. We trace the complete execution flow from reading the COFF file to calling <code>go()</code> and retrieving output. Then we cover practical BOF authoring, compilation for both MSVC and MinGW, security/OPSEC considerations for both the loader and BOFs, and how COFFLoader compares to alternative loaders like bof-launcher by The-Z-Labs.</p>
+</div>
+
+<h2>The Complete RunCOFF Flow</h2>
+<p>Here is the entire execution pipeline in one view, referencing every module:</p>
+
+<pre><code><span class="lang-tag">TEXT</span>RunCOFF(functionname="go", coff_data, filesize, argumentdata, argumentSize)
+  |
+  +-- [Module 2] Parse COFF header
+  |     coff_header = (coff_file_header_t*)coff_data
+  |     Validate: Machine == 0x8664, SizeOfOptionalHeader == 0
+  |
+  +-- [Module 2] Locate tables
+  |     sections     = coff_data + sizeof(coff_file_header_t)
+  |     symbols      = coff_data + PointerToSymbolTable
+  |     string_table = symbols + (NumberOfSymbols * 18)
+  |
+  +-- [Module 4] Load sections
+  |     for each section i:
+  |       sectionMapping[i] = VirtualAlloc(NULL, SizeOfRawData, RWX)
+  |       memcpy(sectionMapping[i], coff_data + PointerToRawData, SizeOfRawData)
+  |
+  +-- [Module 4] Allocate function pointer table
+  |     relocationCount = sum of all sections' NumberOfRelocations
+  |     functionMapping = VirtualAlloc(NULL, relocationCount * 8, RWX)
+  |
+  +-- [Module 7] Populate InternalFunctions[30]
+  |     InternalFunctions[0] = {"BeaconDataParse", &BeaconDataParse}
+  |     InternalFunctions[1] = {"BeaconDataInt",   &BeaconDataInt}
+  |     ... (all 24 entries)
+  |
+  +-- [Module 5+6] Process relocations (per section)
+  |     for each section secIdx:
+  |       for each relocation relIdx:
+  |         symIdx    = relocs[relIdx].SymbolTableIndex
+  |         symName   = get_symbol_name(symbols[symIdx])
+  |         |
+  |         +-- [Module 5] Resolve symbol
+  |         |     if defined(symIdx): addr = sectionMapping[sec-1] + Value
+  |         |     elif __imp_: addr = functionMapping slot (filled by process_symbol)
+  |         |     else: addr = process_symbol(symName) direct
+  |         |
+  |         +-- [Module 6] Apply relocation fixup
+  |               ADDR64:   *(uint64_t*)fixup = symbolAddr
+  |               REL32:    *(int32_t*)fixup  = symbolAddr - (fixup + 4)
+  |               REL32_N:  *(int32_t*)fixup  = symbolAddr - (fixup + 4 + N)
+  |               ADDR32NB: *(uint32_t*)fixup = symbolAddr - imageBase
+  |
+  +-- Find entry point
+  |     Scan symbol table for "go" (x64) or "_go" (x86)
+  |     entryAddr = sectionMapping[sym.SectionNumber - 1] + sym.Value
+  |
+  +-- Call the BOF
+  |     typedef void (*entry_t)(char*, int);
+  |     entry_t entry = (entry_t)entryAddr;
+  |     entry(argumentdata, argumentSize);
+  |
+  +-- Retrieve output
+  |     char* output = BeaconGetOutputData(&outsize);
+  |
+  +-- Cleanup
+        for each section: VirtualFree(sectionMapping[i])
+        VirtualFree(functionMapping)
+        free(sectionMapping)</code></pre>
+
+<h2>Entry Point Discovery</h2>
+<p>COFFLoader finds the entry function by scanning the symbol table for a symbol whose name matches the requested function name. On x64, it looks for the exact name (e.g., <code>go</code>). On x86, the C calling convention prepends an underscore, so it looks for <code>_go</code>:</p>
+
+<pre><code><span class="lang-tag">C</span>// Find the entry point symbol
+void* entryPoint = NULL;
+for (int i = 0; i < coff_header->NumberOfSymbols; i++) {
+    char* name = get_symbol_name(&symbols[i], string_table);
+
+#ifdef _WIN64
+    if (strcmp(name, functionname) == 0) {
+#else
+    // x86: prepend underscore
+    char decorated[256];
+    snprintf(decorated, sizeof(decorated), "_%s", functionname);
+    if (strcmp(name, decorated) == 0) {
+#endif
+        int secIdx = symbols[i].SectionNumber - 1;
+        entryPoint = sectionMapping[secIdx] + symbols[i].Value;
+        break;
+    }
+    // Skip auxiliary symbols
+    i += symbols[i].NumberOfAuxSymbols;
+}
+
+// Cast and call
+if (entryPoint) {
+    typedef void (*entry_fn)(char*, int);
+    entry_fn go = (entry_fn)entryPoint;
+    go(argumentdata, argumentSize);
+}</code></pre>
+
+<h2>Writing a Complete BOF</h2>
+<p>Here is a practical BOF that demonstrates proper API usage, error handling, and DLL import conventions:</p>
+
+<pre><code><span class="lang-tag">C</span>// whoami_bof.c -- BOF that displays current user and privilege info
+#include &lt;windows.h&gt;
+#include "beacon.h"
+
+// Declare DLL imports using LIBRARY$Function convention
+DECLSPEC_IMPORT BOOL    WINAPI ADVAPI32$OpenProcessToken(HANDLE, DWORD, PHANDLE);
+DECLSPEC_IMPORT BOOL    WINAPI ADVAPI32$GetTokenInformation(HANDLE, TOKEN_INFORMATION_CLASS,
+                                                             LPVOID, DWORD, PDWORD);
+DECLSPEC_IMPORT BOOL    WINAPI ADVAPI32$LookupAccountSidA(LPCSTR, PSID, LPSTR, LPDWORD,
+                                                           LPSTR, LPDWORD, PSID_NAME_USE);
+DECLSPEC_IMPORT HANDLE  WINAPI KERNEL32$GetCurrentProcess(void);
+DECLSPEC_IMPORT BOOL    WINAPI KERNEL32$CloseHandle(HANDLE);
+DECLSPEC_IMPORT DWORD   WINAPI KERNEL32$GetCurrentProcessId(void);
+DECLSPEC_IMPORT DWORD   WINAPI KERNEL32$GetLastError(void);
+
+void go(char* args, int len) {
+    HANDLE hToken = NULL;
+    DWORD  pid = KERNEL32$GetCurrentProcessId();
+
+    BeaconPrintf(CALLBACK_OUTPUT, "[*] PID: %d\n", pid);
+
+    // Open our process token
+    if (!ADVAPI32$OpenProcessToken(
+            KERNEL32$GetCurrentProcess(),
+            TOKEN_QUERY,
+            &hToken))
+    {
+        BeaconPrintf(CALLBACK_ERROR, "[!] OpenProcessToken failed: %d\n",
+                     KERNEL32$GetLastError());
+        return;
+    }
+
+    // Get the token user
+    BYTE tokenInfo[256];
+    DWORD returnLength = 0;
+
+    if (!ADVAPI32$GetTokenInformation(
+            hToken, TokenUser, tokenInfo, sizeof(tokenInfo), &returnLength))
+    {
+        BeaconPrintf(CALLBACK_ERROR, "[!] GetTokenInformation failed: %d\n",
+                     KERNEL32$GetLastError());
+        KERNEL32$CloseHandle(hToken);
+        return;
+    }
+
+    // Look up the account name from the SID
+    TOKEN_USER* pUser = (TOKEN_USER*)tokenInfo;
+    char username[128] = {0};
+    char domain[128]   = {0};
+    DWORD userLen   = sizeof(username);
+    DWORD domainLen = sizeof(domain);
+    SID_NAME_USE sidType;
+
+    if (ADVAPI32$LookupAccountSidA(
+            NULL, pUser->User.Sid,
+            username, &userLen,
+            domain, &domainLen,
+            &sidType))
+    {
+        BeaconPrintf(CALLBACK_OUTPUT, "[+] User: %s\\%s\n", domain, username);
+    }
+    else {
+        BeaconPrintf(CALLBACK_ERROR, "[!] LookupAccountSid failed: %d\n",
+                     KERNEL32$GetLastError());
+    }
+
+    KERNEL32$CloseHandle(hToken);
+}</code></pre>
+
+<h2>Compilation Guide</h2>
+<p>BOFs must be compiled to object files (not linked) and must avoid CRT dependencies:</p>
+
+<pre><code><span class="lang-tag">BASH</span># ============================
+# MinGW Cross-Compilation (Linux -> Windows x64)
+# ============================
+x86_64-w64-mingw32-gcc -c whoami_bof.c -o whoami_bof.o
+
+# For x86 BOFs:
+i686-w64-mingw32-gcc -c whoami_bof.c -o whoami_bof_x86.o
+
+# ============================
+# MSVC (Windows, x64)
+# ============================
+cl.exe /c /GS- /O2 whoami_bof.c /Fo whoami_bof.obj
+
+# Flag explanations:
+#   /c     - compile only, do not link
+#   /GS-   - disable stack buffer security checks (no CRT cookie)
+#   /O2    - optimize for speed (optional but recommended)
+
+# ============================
+# Running with COFFLoader
+# ============================
+COFFLoader.exe go whoami_bof.o
+
+# With arguments (hex-encoded):
+COFFLoader.exe go enumerate_bof.o 0c0000000800000068006f0073007400</code></pre>
+
+<div class="card warn">
+<h4>Critical Compilation Rules</h4>
+<table>
+<tr><th>Rule</th><th>Reason</th></tr>
+<tr><td>Always use <code>-c</code> / <code>/c</code></td><td>Produces an object file, not an executable. Linking would create a PE with an import table.</td></tr>
+<tr><td>Use <code>/GS-</code> with MSVC</td><td>Disables __security_check_cookie. The CRT initializes this cookie; BOFs have no CRT.</td></tr>
+<tr><td>Never use CRT functions</td><td>No printf, malloc, free, strlen, etc. Use Beacon API or declare Windows API imports.</td></tr>
+<tr><td>No global constructors</td><td>C++ static initializers require CRT. Use plain C only.</td></tr>
+<tr><td>No static linking</td><td>Do not link any .lib files. All external references must use LIBRARY$ convention.</td></tr>
+</table>
+</div>
+
+<h2>Security Considerations</h2>
+<p>Both the COFFLoader itself and BOFs have OPSEC characteristics that defenders can detect:</p>
+
+<h3>COFFLoader Detection Indicators</h3>
+<table>
+<tr><th>Indicator</th><th>Detail</th><th>Mitigation</th></tr>
+<tr><td>RWX Memory</td><td>VirtualAlloc with PAGE_EXECUTE_READWRITE for every section</td><td>Allocate RW, apply relocations, then VirtualProtect to proper permissions</td></tr>
+<tr><td>LoadLibraryA calls</td><td>Loading DLLs during symbol resolution (KERNEL32, ADVAPI32, NTDLL, etc.)</td><td>Many of these DLLs are already loaded; use GetModuleHandle first</td></tr>
+<tr><td>GetProcAddress chains</td><td>Rapid sequential GetProcAddress calls during relocation processing</td><td>Use manual PE parsing (export table walking) instead</td></tr>
+<tr><td>Unbacked executable memory</td><td>Code executing from VirtualAlloc'd regions (no backing file on disk)</td><td>Map a file-backed section or use module stomping</td></tr>
+<tr><td>No exception handler registration</td><td>.pdata/.xdata are loaded but not registered with RtlAddFunctionTable</td><td>Call RtlAddFunctionTable after loading for proper SEH support</td></tr>
+</table>
+
+<h3>BOF-Specific OPSEC</h3>
+<div class="card warn">
+<h4>BOF OPSEC Checklist</h4>
+<p>1. <strong>Clean up memory</strong>: BOFs should zero sensitive buffers before returning. The loader will VirtualFree the sections, but sensitive data could remain in unfreed heap allocations.</p>
+<p>2. <strong>Handle errors gracefully</strong>: A crash in the BOF crashes the entire host process. Always check return values and use __try/__except if available.</p>
+<p>3. <strong>Minimize API calls</strong>: Every LoadLibraryA and GetProcAddress is logged by ETW. Prefer DLLs already loaded in the process.</p>
+<p>4. <strong>Avoid AMSI-triggering strings</strong>: String literals in .rdata can be scanned by AMSI if the process has AMSI loaded. Encrypt or obfuscate sensitive strings.</p>
+<p>5. <strong>Keep BOFs small</strong>: The smaller the memory allocation, the less likely it is to attract attention from memory scanners.</p>
+</div>
+
+<h2>COFFLoader vs. bof-launcher (The-Z-Labs)</h2>
+<p>bof-launcher is an alternative COFF loader written in Zig with several improvements over COFFLoader:</p>
+
+<table>
+<tr><th>Feature</th><th>COFFLoader (TrustedSec)</th><th>bof-launcher (The-Z-Labs)</th></tr>
+<tr><td>Language</td><td>C</td><td>Zig (with C API)</td></tr>
+<tr><td>Memory permissions</td><td>RWX for all sections</td><td>Proper per-section permissions (RX, RW, R)</td></tr>
+<tr><td>Cross-platform</td><td>Windows only</td><td>Windows + Linux (ELF COFF support)</td></tr>
+<tr><td>Exception handling</td><td>Not registered</td><td>Registered via RtlAddFunctionTable</td></tr>
+<tr><td>Contiguous allocation</td><td>Separate VirtualAlloc per section</td><td>Single contiguous block, partitioned</td></tr>
+<tr><td>Beacon API</td><td>Full compatibility layer</td><td>Extended API with additional functions</td></tr>
+<tr><td>Thread safety</td><td>Global output buffer (not thread-safe)</td><td>Per-invocation context</td></tr>
+<tr><td>API resolution</td><td>LoadLibraryA + GetProcAddress</td><td>Manual PE export table parsing</td></tr>
+</table>
+
+<div class="card green">
+<h4>When to Use Which</h4>
+<p><strong>COFFLoader</strong> is ideal for learning (its source is straightforward and well-commented), for quick BOF testing from the command line, and for integration into C-based tools. <strong>bof-launcher</strong> is better suited for production C2 frameworks where OPSEC matters: proper memory permissions, registered exception handlers, contiguous section layout, and cross-platform support. Many frameworks (Sliver, Havoc, Mythic agents) have their own COFF loaders inspired by both projects.</p>
+</div>
+
+<h2>Building COFFLoader from Source</h2>
+<pre><code><span class="lang-tag">BASH</span># Clone the repository
+git clone https://github.com/trustedsec/COFFLoader.git
+cd COFFLoader
+
+# Build with MSVC (Visual Studio Developer Command Prompt)
+cl.exe /Fe:COFFLoader.exe COFFLoader.c beacon_compatibility.c
+
+# Build with MinGW (on Linux or Windows)
+x86_64-w64-mingw32-gcc COFFLoader.c beacon_compatibility.c -o COFFLoader.exe -luser32
+
+# Test with a simple BOF
+COFFLoader.exe go test_bof.o</code></pre>
+
+<h2>Advanced: Adding Custom Internal Functions</h2>
+<p>If you are integrating COFFLoader into a custom framework, you can register additional internal functions that BOFs can call:</p>
+
+<pre><code><span class="lang-tag">C</span>// Custom function that BOFs can call
+void MyCustomOutput(int type, char* data, int len) {
+    // Send data over your custom C2 channel
+    send_to_c2_server(data, len);
+}
+
+// Register it in the InternalFunctions table (before calling RunCOFF)
+InternalFunctions[24][0] = (unsigned char*)"MyCustomOutput";
+InternalFunctions[24][1] = (unsigned char*)&MyCustomOutput;
+
+// In the BOF:
+// DECLSPEC_IMPORT void MyCustomOutput(int type, char* data, int len);
+// void go(char* args, int len) {
+//     MyCustomOutput(0, "hello from BOF", 14);
+// }</code></pre>
+
+<h2>Common BOF Patterns</h2>
+<p>Here are patterns frequently used in production BOFs:</p>
+
+<pre><code><span class="lang-tag">C</span>// Pattern 1: Argument parsing with multiple types
+void go(char* args, int len) {
+    datap parser;
+    BeaconDataParse(&parser, args, len);
+
+    int   targetPid  = BeaconDataInt(&parser);
+    short someFlag   = BeaconDataShort(&parser);
+    int   strLen;
+    char* targetName = BeaconDataExtract(&parser, &strLen);
+
+    // ... use parsed arguments ...
+}
+
+// Pattern 2: Structured output with formatp
+void go(char* args, int len) {
+    formatp buffer;
+    BeaconFormatAlloc(&buffer, 4096);
+
+    // Build structured output
+    BeaconFormatPrintf(&buffer, "%-20s %-10s %-8s\n", "PROCESS", "PID", "ARCH");
+    BeaconFormatPrintf(&buffer, "%-20s %-10d %-8s\n", "explorer.exe", 1234, "x64");
+    BeaconFormatPrintf(&buffer, "%-20s %-10d %-8s\n", "svchost.exe",  5678, "x64");
+
+    int outLen;
+    char* output = BeaconFormatToString(&buffer, &outLen);
+    BeaconOutput(CALLBACK_OUTPUT, output, outLen);
+    BeaconFormatFree(&buffer);
+}
+
+// Pattern 3: Dynamic API resolution within the BOF
+//   (for APIs you do not want in the symbol table)
+DECLSPEC_IMPORT HMODULE WINAPI KERNEL32$LoadLibraryA(LPCSTR);
+DECLSPEC_IMPORT FARPROC WINAPI KERNEL32$GetProcAddress(HMODULE, LPCSTR);
+
+void go(char* args, int len) {
+    // Resolve at runtime -- the symbol table only shows LoadLibrary/GetProcAddress
+    HMODULE hLib = KERNEL32$LoadLibraryA("amsi.dll");
+    if (hLib) {
+        typedef HRESULT (WINAPI *pAmsiInit)(LPCWSTR, HAMSICONTEXT*);
+        pAmsiInit AmsiInitialize = (pAmsiInit)KERNEL32$GetProcAddress(hLib, "AmsiInitialize");
+        // ... use resolved function ...
+    }
+}</code></pre>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: Full Chain &amp; Security</h4>
+<div class="quiz-q" data-correct="0">
+<p>Q1: Why must BOFs compiled with MSVC use the /GS- flag?</p>
+<label data-opt="0"><input type="radio" name="q1_8"> Stack cookies require CRT initialization (__security_init_cookie), which does not happen for BOFs</label>
+<label data-opt="1"><input type="radio" name="q1_8"> /GS enables ASLR which conflicts with COFF loading</label>
+<label data-opt="2"><input type="radio" name="q2_8"> /GS enables debug symbols which increase file size</label>
+<label data-opt="3"><input type="radio" name="q3_8"> /GS is only needed for DLLs, not object files</label>
+<div class="explain">The /GS flag enables stack buffer overrun detection via a security cookie. The CRT's DllMain or mainCRTStartup initializes __security_cookie with a random value. BOFs bypass CRT initialization entirely, so the cookie is never set. When the function epilogue checks the cookie, it finds an invalid value and calls __security_check_cookie, which either crashes or calls an uninitialized handler. /GS- disables this mechanism.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: What is the most significant OPSEC weakness of COFFLoader's memory allocation strategy?</p>
+<label data-opt="0"><input type="radio" name="q2_8"> It allocates too little memory</label>
+<label data-opt="1"><input type="radio" name="q2_8"> It uses HeapAlloc instead of VirtualAlloc</label>
+<label data-opt="2"><input type="radio" name="q2_8"> All sections use PAGE_EXECUTE_READWRITE, creating detectable RWX memory regions</label>
+<label data-opt="3"><input type="radio" name="q3_8"> It does not encrypt the COFF data in memory</label>
+<div class="explain">COFFLoader allocates every section (code, data, and read-only) with PAGE_EXECUTE_READWRITE. RWX memory regions are rare in legitimate applications and are a strong indicator of shellcode or runtime code generation. EDR products and memory scanners specifically flag RWX allocations. A better approach is to allocate with RW, apply relocations, then VirtualProtect to the correct per-section permissions (RX for .text, RW for .data, R for .rdata).</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q3: How does bof-launcher improve on COFFLoader's section allocation?</p>
+<label data-opt="0"><input type="radio" name="q3_8"> It uses kernel-mode memory allocation</label>
+<label data-opt="1"><input type="radio" name="q3_8"> It allocates a single contiguous block and applies proper per-section memory permissions</label>
+<label data-opt="2"><input type="radio" name="q3_8"> It maps sections from a file on disk</label>
+<label data-opt="3"><input type="radio" name="q3_8"> It does not allocate memory at all</label>
+<div class="explain">bof-launcher allocates a single contiguous memory region for all sections, partitions it, copies section data, applies relocations, and then uses VirtualProtect to set proper per-section permissions (RX for code, RW for data, R for read-only). The contiguous allocation also ensures REL32 relocations always succeed (sections are close together), and proper permissions avoid the RWX detection signature.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Previous: The Beacon Compatibility Layer</a>
+<a class="primary" href="../COFFLoader_index.html">Back to Course Home</a>
+</div>
+</main>
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

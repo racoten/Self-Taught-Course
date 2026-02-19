@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: Thread Pool Internals - PoolParty Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F3CA;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f59e0b;--accent2:#d97706;--gradient:linear-gradient(135deg,#f59e0b,#d97706)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>PoolParty Course</h2>
+<span>Thread Pool Injection Masterclass</span>
+</div>
+<a class="home-link" href="../PoolParty_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Injection Landscape</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Thread Pool Architecture</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module3.html"><span>3. Thread Pool Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Worker Factory &amp; TP_WORK</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Wait, I/O &amp; ALPC</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Job &amp; Direct Variants</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. TP_TIMER Insertion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: Thread Pool Internals</h1>
+<p class="subtitle">TppWorkerThread, work item lifecycle, how the kernel dispatches callbacks, and TP_POOL deep dive.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the internal execution flow of a thread pool worker thread from the moment it is created by the worker factory, through its main loop waiting on the IOCP, to the point where it dispatches a callback. This understanding is critical for knowing exactly where PoolParty inserts its hooks into the dispatch chain.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. TppWorkerThread &mdash; The Worker Main Loop</h2>
+
+<p>Every worker thread in a Windows thread pool begins execution at <code>ntdll!TppWorkerThread</code>. This function contains the main dispatch loop that all work items pass through:</p>
+
+<pre><span class="lang-tag">C++ (Pseudocode)</span><code>// ntdll!TppWorkerThread - simplified pseudocode
+VOID TppWorkerThread(PTP_POOL Pool)
+{
+    // Register this thread with the worker factory
+    TppWorkerThreadInit(Pool);
+
+    while (TRUE)
+    {
+        IO_STATUS_BLOCK iosb;
+        PVOID completionKey;
+        PVOID overlapped;
+
+        // Wait on the pool's IOCP for the next work item
+        NTSTATUS status = NtRemoveIoCompletion(
+            Pool->CompletionPort,
+            &completionKey,
+            &overlapped,
+            &iosb,
+            NULL  // infinite wait
+        );
+
+        if (!NT_SUCCESS(status))
+            break;
+
+        // Determine work item type from the completion packet
+        TP_TASK_TYPE type = DecodeTaskType(completionKey, overlapped);
+
+        switch (type)
+        {
+            case TP_TASK_WORK:
+                TppWorkpExecuteCallback((PTP_WORK)overlapped);
+                break;
+            case TP_TASK_TIMER:
+                TppTimerpExecuteCallback((PTP_TIMER)overlapped);
+                break;
+            case TP_TASK_WAIT:
+                TppWaitpExecuteCallback((PTP_WAIT)overlapped);
+                break;
+            case TP_TASK_IO:
+                TppIopExecuteCallback((PTP_IO)overlapped);
+                break;
+            case TP_TASK_ALPC:
+                TppAlpcpExecuteCallback((PTP_ALPC)overlapped);
+                break;
+            case TP_TASK_DIRECT:
+                TppDirectpExecuteCallback((PTP_DIRECT)overlapped);
+                break;
+        }
+
+        // Notify the worker factory this thread is available again
+        TppWorkerThreadReady(Pool);
+    }
+}</code></pre>
+
+<div class="card green">
+<h4>Key Insight for PoolParty</h4>
+<p>The worker thread does not validate the origin of completion packets. If a completion packet arrives on the IOCP with a properly formatted work item, the worker thread will dispatch it. This is the fundamental trust assumption PoolParty exploits &mdash; completion packets are trusted implicitly.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Work Item Lifecycle</h2>
+
+<p>A normal work item goes through these stages from creation to callback execution:</p>
+
+<div class="diagram">
+<h4>Work Item Lifecycle</h4>
+<div class="flow">
+<div class="flow box">TpAllocWork<br><small>Allocate TP_WORK</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">TpPostWork<br><small>Queue to pool</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">NtSetIoCompletion<br><small>Post to IOCP</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Callback<br><small>Worker executes</small></div>
+</div>
+</div>
+
+<h3>2.1 Allocation (TpAllocWork)</h3>
+
+<p><code>TpAllocWork</code> allocates a <code>TP_WORK</code> structure on the heap, initializes the callback pointer and context, and associates it with a <code>TP_POOL</code>:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Creating a work item (normal usage)
+PTP_WORK workItem = NULL;
+TpAllocWork(&workItem, MyCallback, myContext, NULL);
+// workItem->Task.WorkCallback = MyCallback
+// workItem->Task.Context = myContext
+// workItem->Pool = default pool (or specified pool)</code></pre>
+
+<h3>2.2 Submission (TpPostWork)</h3>
+
+<p><code>TpPostWork</code> inserts the work item into the pool&rsquo;s task queue and posts a completion packet to the IOCP to wake a worker thread:</p>
+
+<pre><span class="lang-tag">C++ (Pseudocode)</span><code>VOID TpPostWork(PTP_WORK Work)
+{
+    // Insert into the pool's pending task queue
+    TppWorkInsertQueue(Work->Pool, Work, TP_PRIORITY_NORMAL);
+
+    // Post a completion packet to wake a worker thread
+    NtSetIoCompletion(
+        Work->Pool->CompletionPort,
+        (ULONG_PTR)Work,     // CompletionKey = work item pointer
+        NULL,                  // ApcContext
+        STATUS_SUCCESS,
+        0
+    );
+}</code></pre>
+
+<h3>2.3 Dispatch</h3>
+
+<p>A sleeping worker thread is woken by the IOCP, dequeues the completion packet, extracts the <code>TP_WORK</code> pointer, and calls the registered callback:</p>
+
+<pre><span class="lang-tag">C++ (Pseudocode)</span><code>VOID TppWorkpExecuteCallback(PTP_WORK Work)
+{
+    PTP_CALLBACK_INSTANCE instance;
+    TppInitCallbackInstance(&instance, Work);
+
+    // Call the user's callback function
+    Work->Task.WorkCallback(
+        instance,
+        Work->Task.Context,
+        Work
+    );
+
+    TppCleanupCallbackInstance(&instance);
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>3. The Worker Factory Kernel Object</h2>
+
+<p>The worker factory is a kernel-mode object type (<code>TpWorkerFactory</code>) that manages the lifecycle of worker threads. Key properties:</p>
+
+<table>
+<tr><th>Property</th><th>Description</th><th>Relevant To</th></tr>
+<tr><td><strong>StartRoutine</strong></td><td>Function pointer for new threads (<code>TppWorkerThread</code>)</td><td>Variant 1</td></tr>
+<tr><td><strong>StartParameter</strong></td><td>Parameter passed to StartRoutine (TP_POOL pointer)</td><td>Variant 1</td></tr>
+<tr><td><strong>MinThreadCount</strong></td><td>Minimum number of worker threads</td><td>Thread creation trigger</td></tr>
+<tr><td><strong>MaxThreadCount</strong></td><td>Maximum number of worker threads</td><td>Scaling limits</td></tr>
+<tr><td><strong>CompletionPort</strong></td><td>The IOCP that workers wait on</td><td>All IOCP variants</td></tr>
+<tr><td><strong>WorkerCount</strong></td><td>Current number of active workers</td><td>Scaling decisions</td></tr>
+</table>
+
+<h3>3.1 Querying the Worker Factory</h3>
+
+<p>The <code>NtQueryInformationWorkerFactory</code> syscall retrieves information about a worker factory, including its start routine and thread counts:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Query worker factory information
+typedef struct _WORKER_FACTORY_BASIC_INFORMATION {
+    LARGE_INTEGER Timeout;
+    LARGE_INTEGER RetryDelay;
+    ULONG         IdleWorkerCount;
+    ULONG         TotalWorkerCount;
+    ULONG         ActiveWorkerCount;
+    ULONG         WaitingWorkerCount;
+    ULONG         PendingWorkerCount;
+    PVOID         StartRoutine;        // TppWorkerThread normally
+    PVOID         StartParameter;      // TP_POOL pointer
+    HANDLE        CompletionPort;      // Pool IOCP
+    NTSTATUS      LastThreadCreationStatus;
+    PROCESS_ID    ProcessId;
+} WORKER_FACTORY_BASIC_INFORMATION;
+
+WORKER_FACTORY_BASIC_INFORMATION wfInfo;
+NtQueryInformationWorkerFactory(
+    hWorkerFactory,
+    WorkerFactoryBasicInformation,
+    &wfInfo,
+    sizeof(wfInfo),
+    NULL
+);</code></pre>
+
+<h3>3.2 Modifying the Worker Factory</h3>
+
+<p><code>NtSetInformationWorkerFactory</code> can modify worker factory properties. This is the API that Variant 1 uses to change the StartRoutine:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Change the StartRoutine (used by Variant 1)
+NtSetInformationWorkerFactory(
+    hWorkerFactory,
+    WorkerFactoryThreadMinimum,  // Information class
+    &newMinimum,                  // Trigger new thread creation
+    sizeof(ULONG)
+);</code></pre>
+
+<!-- ============================================================ -->
+<h2>4. How the Kernel Dispatches Callbacks</h2>
+
+<p>The flow from kernel to user-mode callback involves several layers:</p>
+
+<div class="diagram">
+<h4>Kernel-to-User Callback Dispatch</h4>
+<div class="flow">
+<div class="flow box">Source Event<br><small>Timer, I/O, signal</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Kernel IOCP<br><small>IoSetIoCompletion</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Worker Wakes<br><small>NtRemoveIoCompletion</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">User Callback<br><small>WorkCallback()</small></div>
+</div>
+</div>
+
+<ol>
+<li><strong>Event occurs</strong> &mdash; a timer fires, I/O completes, a wait object is signaled</li>
+<li><strong>Kernel posts to IOCP</strong> &mdash; the kernel calls <code>IoSetIoCompletion</code> (internal) to post a completion packet to the pool&rsquo;s IOCP</li>
+<li><strong>Worker thread wakes</strong> &mdash; <code>NtRemoveIoCompletion</code> returns with the completion packet data</li>
+<li><strong>Dispatch</strong> &mdash; <code>TppWorkerThread</code> decodes the packet type and calls the appropriate Tpp*ExecuteCallback function</li>
+<li><strong>Callback runs</strong> &mdash; the user&rsquo;s callback function executes in the context of the worker thread</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2>5. Locating the Target&rsquo;s TP_POOL</h2>
+
+<p>PoolParty needs to find the target process&rsquo;s <code>TP_POOL</code> to extract handle values (IOCP, Worker Factory). The approach used by PoolParty involves:</p>
+
+<h3>5.1 Handle Enumeration</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Enumerate handles in the target process using NtQueryInformationProcess
+// or NtQuerySystemInformation(SystemHandleInformation)
+typedef struct _SYSTEM_HANDLE_TABLE_ENTRY_INFO {
+    USHORT UniqueProcessId;
+    USHORT CreatorBackTraceIndex;
+    UCHAR  ObjectTypeIndex;
+    UCHAR  HandleAttributes;
+    USHORT HandleValue;
+    PVOID  Object;
+    ULONG  GrantedAccess;
+} SYSTEM_HANDLE_TABLE_ENTRY_INFO;
+
+// Filter for IoCompletion (IOCP) and TpWorkerFactory object types
+// Duplicate the handles into our process for inspection
+HANDLE dupHandle;
+DuplicateHandle(hTargetProcess, (HANDLE)entry.HandleValue,
+                GetCurrentProcess(), &dupHandle,
+                0, FALSE, DUPLICATE_SAME_ACCESS);</code></pre>
+
+<h3>5.2 Identifying the Thread Pool IOCP</h3>
+
+<p>Not every IOCP in a process belongs to the thread pool. PoolParty identifies the correct one by querying worker factory objects and checking which IOCP they reference:</p>
+
+<pre><span class="lang-tag">C++</span><code>// For each worker factory handle found:
+WORKER_FACTORY_BASIC_INFORMATION wfbi;
+NtQueryInformationWorkerFactory(dupWfHandle,
+    WorkerFactoryBasicInformation,
+    &wfbi, sizeof(wfbi), NULL);
+
+// wfbi.StartRoutine should be ntdll!TppWorkerThread
+// wfbi.CompletionPort is the thread pool IOCP
+// wfbi.StartParameter is the TP_POOL pointer in the target</code></pre>
+
+<!-- ============================================================ -->
+<h2>6. TP_POOL Deep Dive</h2>
+
+<p>The <code>TP_POOL</code> structure (reconstructed from reverse engineering) contains fields that each PoolParty variant targets:</p>
+
+<table>
+<tr><th>Field</th><th>Offset (x64)</th><th>Used By Variant</th><th>Purpose</th></tr>
+<tr><td><code>TaskQueue[High]</code></td><td>+0x...</td><td>2</td><td>High-priority work item linked list</td></tr>
+<tr><td><code>TaskQueue[Normal]</code></td><td>+0x...</td><td>2</td><td>Normal-priority work item linked list</td></tr>
+<tr><td><code>TaskQueue[Low]</code></td><td>+0x...</td><td>2</td><td>Low-priority work item linked list</td></tr>
+<tr><td><code>CompletionPort</code></td><td>+0x...</td><td>4, 5, 7</td><td>IOCP handle value</td></tr>
+<tr><td><code>TimerQueue</code></td><td>+0x...</td><td>8</td><td>Timer item ordered list</td></tr>
+<tr><td><code>WaitObjectList</code></td><td>+0x...</td><td>3</td><td>Wait item list</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Offsets Are Version-Dependent</h4>
+<p>The exact field offsets within <code>TP_POOL</code> and other internal structures vary between Windows versions. PoolParty uses pattern matching and heuristics rather than hardcoded offsets to maintain compatibility across Windows 10 and 11 builds.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. The TP_DIRECT Fast Path</h2>
+
+<p>In addition to the standard callback types, there is a special <code>TP_DIRECT</code> structure that provides a fast path for execution. Unlike <code>TP_WORK</code> or <code>TP_TIMER</code>, a <code>TP_DIRECT</code> item is dispatched directly from the IOCP completion packet without going through the standard task queue:</p>
+
+<pre><span class="lang-tag">C++ (Reconstructed)</span><code>struct TP_DIRECT {
+    TP_TASK Task;      // Callback and context
+    // Minimal structure - no pool linkage needed
+};
+
+// TP_DIRECT dispatch in TppWorkerThread:
+// If the completion packet has a specific signature,
+// treat the overlapped pointer as a TP_DIRECT and call
+// its callback immediately.</code></pre>
+
+<p>Variant 7 exploits this fast path. We will cover it in detail in Module 6.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What function do all worker threads begin executing at?</p>
+<div class="quiz-btn" data-choice="A">A) NtCreateThreadEx</div>
+<div class="quiz-btn" data-choice="B">B) TppWorkerThread</div>
+<div class="quiz-btn" data-choice="C">C) RtlUserThreadStart</div>
+<div class="quiz-btn" data-choice="D">D) CreateThread callback</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q2: Why does the worker thread trust completion packets from the IOCP?</p>
+<div class="quiz-btn" data-choice="A">A) Each packet is digitally signed by the kernel</div>
+<div class="quiz-btn" data-choice="B">B) The IOCP validates packet origins</div>
+<div class="quiz-btn" data-choice="C">C) Worker threads verify callback pointers before calling them</div>
+<div class="quiz-btn" data-choice="D">D) There is no validation - packets are trusted implicitly</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: How does PoolParty identify which IOCP handle belongs to the thread pool?</p>
+<div class="quiz-btn" data-choice="A">A) By querying worker factory objects and checking which IOCP they reference</div>
+<div class="quiz-btn" data-choice="B">B) The thread pool IOCP is always handle value 4</div>
+<div class="quiz-btn" data-choice="C">C) By reading the PEB directly</div>
+<div class="quiz-btn" data-choice="D">D) The IOCP has a special name attribute</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Prev: Thread Pool Architecture</a>
+<a class="primary" href="module4.html">Next: Worker Factory &amp; TP_WORK &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

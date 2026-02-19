@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: EDR Hooking & The Problem - HellsGate Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#e11d48;--accent2:#be123c;--gradient:linear-gradient(135deg,#e11d48,#be123c)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>HellsGate Course</h2>
+<span>Dynamic SSN &amp; Direct Syscalls</span>
+</div>
+<a class="home-link" href="../HellsGate_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span class="diff d1">1</span> EDR Hooking</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Syscall Architecture</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> SSN Basics</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> ntdll Stub Anatomy</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hell's Gate Algorithm</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Direct Syscall Exec</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Halo's &amp; Tartarus Gate</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: EDR Hooking &amp; The Problem</h1>
+<p class="subtitle">Why calling NtAllocateVirtualMemory normally is like walking through a metal detector.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>Before understanding Hell's Gate (by <strong>am0nsec</strong> &amp; <strong>RtlMateusz</strong>), you need to understand the problem it solves. Modern Endpoint Detection and Response (EDR) products hook critical Windows API functions in userland to inspect every sensitive operation your code performs. This module explains exactly how that hooking works, why it catches attackers, and why direct syscalls became necessary.</p>
+</div>
+
+<h2>The Windows API Call Chain</h2>
+<p>When your program calls a Windows API function, the call travels through multiple layers before reaching the kernel. Understanding this chain is critical because EDRs insert themselves at a strategic point in the middle.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Normal API Call Flow</h4>
+<div class="flow">
+<div class="box">Your Code<br><code>VirtualAlloc()</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box">kernel32.dll<br><code>VirtualAlloc</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">ntdll.dll<br><code>NtAllocateVirtualMemory</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Kernel<br>syscall</div>
+</div>
+</div>
+
+<p>The Win32 API (<code>kernel32.dll</code>, <code>kernelbase.dll</code>) provides the documented, user-friendly interface. These functions perform parameter validation and then call down to <strong>ntdll.dll</strong>, the lowest user-mode layer. The Nt* functions in ntdll.dll contain tiny stubs that execute the <code>syscall</code> instruction to transition into the kernel. The kernel then dispatches the request to the appropriate kernel function via the <strong>System Service Descriptor Table (SSDT)</strong>.</p>
+
+<h2>How EDR Hooking Works</h2>
+<p>EDR products inject a DLL into every process at startup (often via a kernel driver callback on process creation). This DLL modifies the <strong>first bytes of critical ntdll.dll functions</strong> in memory, replacing them with a <code>JMP</code> instruction that redirects execution into the EDR's own inspection code.</p>
+
+<pre><code><span class="lang-tag">ASM</span>; BEFORE hooking - clean NtAllocateVirtualMemory stub
+NtAllocateVirtualMemory:
+  4c 8b d1          mov r10, rcx        ; save 1st param
+  b8 18 00 00 00    mov eax, 0x18       ; SSN = 0x18 (Win10 1903)
+  0f 05             syscall             ; transition to kernel
+  c3                ret
+
+; AFTER EDR hooks - first bytes overwritten
+NtAllocateVirtualMemory:
+  e9 xx xx xx xx    jmp EDR_Hook_Func   ; 5-byte relative JMP
+  b8 18 00 00 00    mov eax, 0x18       ; (partially clobbered)
+  0f 05             syscall
+  c3                ret</code></pre>
+
+<p>When your code calls <code>NtAllocateVirtualMemory</code>, instead of executing the syscall stub, execution jumps to the EDR's hook function. The EDR inspects the parameters (what memory are you allocating? what permissions? which process?), makes a decision (allow, block, or alert), and then either calls the original function or denies the request.</p>
+
+<div class="card warn">
+<h4>What EDRs Actually Inspect</h4>
+<p>EDR hooks are not just logging calls. They perform deep inspection: checking if the target process is a different process (injection), whether the memory permissions include RWX (shellcode staging), whether the caller is a known legitimate module, and correlating multiple calls into behavioral chains. A single <code>NtAllocateVirtualMemory</code> + <code>NtWriteVirtualMemory</code> + <code>NtCreateThreadEx</code> sequence in a remote process is a classic injection pattern that will immediately trigger an alert.</p>
+</div>
+
+<h2>The Inline Hook Mechanism</h2>
+<p>The most common hooking technique used by EDRs is the <strong>inline hook</strong> (also called a trampoline hook). Here is how it works step by step:</p>
+
+<table>
+<tr><th>Step</th><th>Action</th><th>Detail</th></tr>
+<tr><td>1</td><td>Save original bytes</td><td>EDR copies the first 5+ bytes of the target function to a trampoline buffer</td></tr>
+<tr><td>2</td><td>Write JMP</td><td>EDR overwrites those bytes with <code>JMP rel32</code> (E9 + 4-byte offset) pointing to its handler</td></tr>
+<tr><td>3</td><td>Intercept call</td><td>When the function is called, execution jumps to the EDR handler</td></tr>
+<tr><td>4</td><td>Inspect &amp; decide</td><td>EDR analyzes parameters, context, and caller. Decides allow/block/alert</td></tr>
+<tr><td>5</td><td>Call trampoline</td><td>If allowed, EDR calls the trampoline (saved original bytes + JMP back) to execute the real function</td></tr>
+</table>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Hooked API Call Flow</h4>
+<div class="flow">
+<div class="box">Your Code<br><code>NtAllocateVirtualMemory()</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box r">JMP to<br>EDR Hook</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">EDR Inspection<br>(params, caller, behavior)</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Trampoline<br>&rarr; real syscall</div>
+</div>
+</div>
+
+<h2>Which Functions Get Hooked?</h2>
+<p>EDRs do not hook every function in ntdll.dll -- that would destroy performance. They focus on <strong>security-sensitive Nt* functions</strong>. Common targets include:</p>
+
+<pre><code><span class="lang-tag">C</span>// Memory operations (shellcode staging)
+NtAllocateVirtualMemory    // Allocate memory in a process
+NtWriteVirtualMemory       // Write data to process memory
+NtProtectVirtualMemory     // Change memory permissions (e.g., RW -> RX)
+NtMapViewOfSection         // Map shared memory (alternative injection)
+
+// Thread/process creation (code execution)
+NtCreateThreadEx           // Create a new thread (remote thread injection)
+NtQueueApcThread           // Queue APC to a thread (APC injection)
+NtResumeThread             // Resume a suspended thread
+NtCreateProcess/Ex         // Create a new process
+
+// Handle operations
+NtOpenProcess              // Open a handle to another process
+NtDuplicateObject          // Duplicate handles across processes
+
+// File and registry (persistence, payload drop)
+NtCreateFile               // Create or open files
+NtWriteFile                // Write to files</code></pre>
+
+<div class="card green">
+<h4>The Key Insight</h4>
+<p>All EDR userland hooks exist in <strong>user-mode memory</strong> inside your own process. The EDR DLL and its JMP patches are in your address space. This means your code has full read access to the hooked bytes -- and theoretically, write access too. This is the fundamental weakness that Hell's Gate and other direct syscall techniques exploit: if you can figure out the <strong>System Service Number (SSN)</strong> yourself, you can issue the <code>syscall</code> instruction directly without ever touching the hooked ntdll stub.</p>
+</div>
+
+<h2>Why Not Just Unhook ntdll?</h2>
+<p>One common evasion technique is to simply restore the original bytes of ntdll.dll functions by reading a clean copy from disk. While this works, it has several drawbacks:</p>
+
+<table>
+<tr><th>Approach</th><th>Pros</th><th>Cons</th></tr>
+<tr><td>Read ntdll from disk</td><td>Full clean copy of all stubs</td><td>File I/O is logged; re-mapping ntdll is detectable via ETW or kernel callbacks</td></tr>
+<tr><td>Read ntdll from <code>KnownDlls</code></td><td>Avoids disk I/O</td><td>Still requires <code>NtOpenSection</code> + <code>NtMapViewOfSection</code> which may be hooked</td></tr>
+<tr><td>Overwrite hooked bytes</td><td>Simple implementation</td><td>EDR may monitor for writes to ntdll pages; periodic integrity checks catch this</td></tr>
+<tr><td><strong>Direct syscalls (Hell's Gate)</strong></td><td><strong>Never touches hooked code at all</strong></td><td>Need to resolve SSN; syscall from non-ntdll region is detectable by kernel instrumentation</td></tr>
+</table>
+
+<p>Hell's Gate takes the approach of reading the SSN from the ntdll stub bytes (or neighboring stubs if hooked) and then executing the <code>syscall</code> instruction from its own assembly stub. The hooked function is never called at all -- the entire ntdll trampoline is bypassed.</p>
+
+<div class="card highlight">
+<h4>The Hell's Gate Philosophy</h4>
+<p>Instead of fighting the hook (unhooking, re-mapping), Hell's Gate <strong>reads through the hook</strong>. The EDR overwrites the first bytes of the stub, but the SSN (in the <code>mov eax, SSN</code> instruction) is often still intact at an offset beyond the JMP patch. Even when the SSN itself is clobbered, neighboring clean stubs can be used to calculate the target SSN. Once you have the number, you invoke the syscall instruction yourself. The hook is irrelevant because you never execute through it.</p>
+</div>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: EDR Hooking Fundamentals</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: Where in the API call chain do EDR inline hooks typically reside?</p>
+<label data-opt="0"><input type="radio" name="q1_0"> In the kernel32.dll wrapper functions</label>
+<label data-opt="1"><input type="radio" name="q1_0"> At the beginning of ntdll.dll Nt* stubs (the syscall stubs)</label>
+<label data-opt="2"><input type="radio" name="q1_0"> Inside the kernel SSDT dispatch table</label>
+<label data-opt="3"><input type="radio" name="q1_0"> In the CPU microcode for the syscall instruction</label>
+<div class="explain">EDRs patch the first bytes of ntdll.dll Nt* functions with JMP instructions that redirect to their inspection code. This is in user-mode memory, making it both effective and bypassable.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: What is the primary advantage of Hell's Gate over ntdll unhooking?</p>
+<label data-opt="0"><input type="radio" name="q2_0"> It is faster to execute</label>
+<label data-opt="1"><input type="radio" name="q2_0"> It works on Linux too</label>
+<label data-opt="2"><input type="radio" name="q2_0"> It never modifies or re-reads the hooked ntdll code, avoiding detection of unhooking activity</label>
+<label data-opt="3"><input type="radio" name="q2_0"> It uses kernel-mode code to bypass hooks</label>
+<div class="explain">Hell's Gate reads the SSN from the stub bytes (or calculates it from neighbors) and executes syscall directly. It never writes to ntdll memory or re-maps the DLL, so EDR integrity checks for unhooking activity see nothing suspicious.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: An EDR hook replaces the first 5 bytes of NtCreateThreadEx with <code>E9 xx xx xx xx</code>. What instruction is this?</p>
+<label data-opt="0"><input type="radio" name="q3_0"> A relative JMP (jump) to the EDR handler function</label>
+<label data-opt="1"><input type="radio" name="q3_0"> A CALL instruction to the EDR handler</label>
+<label data-opt="2"><input type="radio" name="q3_0"> An INT 3 breakpoint for debugging</label>
+<label data-opt="3"><input type="radio" name="q3_0"> A NOP sled to skip the function</label>
+<div class="explain">The opcode E9 is a 5-byte relative JMP instruction (1-byte opcode + 4-byte signed offset). This is the most common inline hook: it redirects execution to the EDR's interception function at a calculated relative address.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: Syscall Architecture &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

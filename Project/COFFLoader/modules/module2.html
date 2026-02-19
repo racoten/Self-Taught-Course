@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: COFF File Format Deep Dive - COFFLoader Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4E6;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f97316;--accent2:#ea580c;--gradient:linear-gradient(135deg,#f97316,#ea580c)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>COFFLoader Course</h2><span>BOF Loader Masterclass</span></div>
+  <a class="home-link" href="../COFFLoader_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> What Are BOFs?</a>
+  <a class="mod-link active" href="module2.html"><span class="diff d1">2</span> COFF Format Deep Dive</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> The BOF API Contract</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> COFF Section Loading</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Symbol Resolution</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Relocation Processing</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Beacon Compat Layer</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Security</a>
+</nav>
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: COFF File Format Deep Dive</h1>
+<p class="subtitle">Every byte matters: headers, sections, symbols, strings, and relocations in raw binary.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>COFFLoader is fundamentally a COFF parser. To understand how it loads and executes BOFs, you must first understand the binary layout it parses. This module walks through the five major components of a COFF object file: the file header, section table, symbol table, string table, and relocation entries. These are the exact structures defined in COFFLoader.h that the loader reads.</p>
+</div>
+
+<h2>COFF Binary Layout</h2>
+<p>A COFF object file has a well-defined binary layout. Unlike a PE, there is no DOS header, no PE signature, and no optional header. The file begins immediately with the COFF file header.</p>
+
+<pre><code><span class="lang-tag">TEXT</span>COFF Object File Layout:
+
+Offset 0x00:  +--------------------------+
+              | COFF File Header         |  20 bytes
+              | (coff_file_header_t)     |
+              +--------------------------+
+              | Section Header 1         |  40 bytes each
+              | (coff_sect_t)            |
+              +--------------------------+
+              | Section Header 2         |
+              +--------------------------+
+              | ...                      |
+              +--------------------------+
+              | Section Header N         |
+              +--------------------------+
+              | Section 1 Raw Data       |  variable size
+              +--------------------------+
+              | Section 1 Relocations    |  10 bytes each
+              +--------------------------+
+              | Section 2 Raw Data       |
+              +--------------------------+
+              | Section 2 Relocations    |
+              +--------------------------+
+              | ...                      |
+              +--------------------------+
+              | Symbol Table             |  18 bytes per symbol
+              +--------------------------+
+              | String Table             |  variable size
+              +--------------------------+</code></pre>
+
+<h2>The COFF File Header</h2>
+<p>The file header is always 20 bytes and sits at offset 0. COFFLoader defines it as <code>coff_file_header_t</code>:</p>
+
+<pre><code><span class="lang-tag">C</span>typedef struct coff_file_header {
+    uint16_t Machine;              // 0x8664 = AMD64, 0x14C = i386
+    uint16_t NumberOfSections;     // how many section headers follow
+    uint32_t TimeDateStamp;        // compilation timestamp (often zero)
+    uint32_t PointerToSymbolTable; // file offset to the symbol table
+    uint32_t NumberOfSymbols;      // total entries in symbol table
+    uint16_t SizeOfOptionalHeader; // always 0 for object files
+    uint16_t Characteristics;      // flags (usually 0 for .obj)
+} coff_file_header_t;</code></pre>
+
+<table>
+<tr><th>Field</th><th>Offset</th><th>Size</th><th>Purpose</th></tr>
+<tr><td>Machine</td><td>0x00</td><td>2</td><td>Target architecture. COFFLoader checks for <code>0x8664</code> (AMD64)</td></tr>
+<tr><td>NumberOfSections</td><td>0x02</td><td>2</td><td>Count of section headers immediately following this header</td></tr>
+<tr><td>TimeDateStamp</td><td>0x04</td><td>4</td><td>Unix timestamp of compilation. Not used by the loader</td></tr>
+<tr><td>PointerToSymbolTable</td><td>0x08</td><td>4</td><td>File offset to the symbol table. Critical for symbol resolution</td></tr>
+<tr><td>NumberOfSymbols</td><td>0x0C</td><td>4</td><td>Number of entries (including aux symbols). Used to locate the string table</td></tr>
+<tr><td>SizeOfOptionalHeader</td><td>0x10</td><td>2</td><td>Always 0 for object files (no optional header)</td></tr>
+<tr><td>Characteristics</td><td>0x12</td><td>2</td><td>Flags. Usually 0 for unlinked objects</td></tr>
+</table>
+
+<div class="card green">
+<h4>Key Insight: Finding the String Table</h4>
+<p>The string table immediately follows the symbol table. Since each symbol entry is exactly 18 bytes, the string table starts at: <code>PointerToSymbolTable + (NumberOfSymbols * 18)</code>. The first 4 bytes of the string table are a <code>uint32_t</code> giving the total size of the string table (including those 4 bytes). Symbol names longer than 8 characters are stored here and referenced by offset.</p>
+</div>
+
+<h2>The Section Table</h2>
+<p>Immediately following the 20-byte file header is an array of section headers. Each header is 40 bytes, defined as <code>coff_sect_t</code>:</p>
+
+<pre><code><span class="lang-tag">C</span>#pragma pack(push, 1)
+typedef struct coff_sect {
+    char     Name[8];                // section name (e.g., ".text\0\0\0")
+    uint32_t VirtualSize;            // 0 for object files
+    uint32_t VirtualAddress;         // 0 for object files
+    uint32_t SizeOfRawData;          // size of section data in the file
+    uint32_t PointerToRawData;       // file offset to the raw data
+    uint32_t PointerToRelocations;   // file offset to relocation entries
+    uint32_t PointerToLineNumbers;   // file offset to line numbers (usually 0)
+    uint16_t NumberOfRelocations;    // count of relocation entries for this section
+    uint16_t NumberOfLinenumbers;    // count of line number entries (usually 0)
+    uint32_t Characteristics;        // flags: executable, readable, writable, etc.
+} coff_sect_t;
+#pragma pack(pop)</code></pre>
+
+<h3>Common Sections in a BOF</h3>
+<table>
+<tr><th>Section</th><th>Characteristics</th><th>Content</th></tr>
+<tr><td><code>.text</code></td><td>CODE | EXECUTE | READ</td><td>Compiled machine code (the <code>go()</code> function and helpers)</td></tr>
+<tr><td><code>.data</code></td><td>INITIALIZED | READ | WRITE</td><td>Initialized global/static variables</td></tr>
+<tr><td><code>.rdata</code></td><td>INITIALIZED | READ</td><td>Read-only data: string literals, constant tables</td></tr>
+<tr><td><code>.bss</code></td><td>UNINITIALIZED | READ | WRITE</td><td>Zero-initialized globals. SizeOfRawData is 0 (no file data)</td></tr>
+<tr><td><code>.xdata</code></td><td>INITIALIZED | READ</td><td>Exception handling unwind data (x64)</td></tr>
+<tr><td><code>.pdata</code></td><td>INITIALIZED | READ</td><td>Function table for structured exception handling</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Section Characteristics Flags</h4>
+<p>The <code>Characteristics</code> field is a bitmask. COFFLoader defines the relevant flags:</p>
+</div>
+
+<pre><code><span class="lang-tag">C</span>#define IMAGE_SCN_CNT_CODE               0x00000020  // section contains code
+#define IMAGE_SCN_CNT_UNINITIALIZED_DATA 0x00000080  // section contains uninitialized data (.bss)
+#define IMAGE_SCN_MEM_EXECUTE            0x20000000  // section is executable
+#define IMAGE_SCN_MEM_READ               0x40000000  // section is readable
+#define IMAGE_SCN_MEM_WRITE              0x80000000  // section is writable
+#define IMAGE_SCN_MEM_DISCARDABLE        0x02000000  // section can be discarded</code></pre>
+
+<h2>The Symbol Table</h2>
+<p>The symbol table is an array of 18-byte entries located at the file offset specified by <code>PointerToSymbolTable</code>. Each entry is defined as <code>coff_sym_t</code>:</p>
+
+<pre><code><span class="lang-tag">C</span>typedef struct coff_sym {
+    union {
+        char     Name[8];      // short name (if <= 8 chars)
+        uint32_t value[2];     // value[0]==0 means value[1] is string table offset
+    } first;
+    uint32_t Value;            // value depends on StorageClass and SectionNumber
+    uint16_t SectionNumber;    // 1-based index of the section, or special values
+    uint16_t Type;             // symbol type (0x20 = function)
+    uint8_t  StorageClass;     // IMAGE_SYM_CLASS_EXTERNAL (2), STATIC (3), etc.
+    uint8_t  NumberOfAuxSymbols; // number of auxiliary symbol entries that follow
+} coff_sym_t;</code></pre>
+
+<h3>Symbol Name Resolution</h3>
+<p>Symbol names can be stored in two ways, depending on length:</p>
+
+<pre><code><span class="lang-tag">TEXT</span>If the name is 8 characters or shorter:
+  first.Name[0..7] contains the name directly (null-padded)
+
+If the name is longer than 8 characters:
+  first.value[0] == 0x00000000   (sentinel: first 4 bytes are zero)
+  first.value[1] == offset into string table
+
+Example: Symbol name "__imp_KERNEL32$GetCurrentProcessId"
+  first.value[0] = 0x00000000
+  first.value[1] = 0x0000004A  --> string table offset 0x4A</code></pre>
+
+<h3>Important Symbol Fields</h3>
+<table>
+<tr><th>Field</th><th>Key Values</th><th>Meaning</th></tr>
+<tr><td>SectionNumber</td><td>1, 2, 3...</td><td>1-based index of the section containing this symbol</td></tr>
+<tr><td>SectionNumber</td><td>0</td><td>IMAGE_SYM_UNDEFINED -- external symbol, must be resolved</td></tr>
+<tr><td>StorageClass</td><td>2 (EXTERNAL)</td><td>Symbol is globally visible or needs to be imported</td></tr>
+<tr><td>StorageClass</td><td>3 (STATIC)</td><td>Symbol is local to the section (e.g., section name)</td></tr>
+<tr><td>Value</td><td>(offset)</td><td>For defined symbols: offset within the section. For undefined: 0</td></tr>
+<tr><td>NumberOfAuxSymbols</td><td>0 or 1</td><td>Auxiliary entries follow (e.g., section definition aux records)</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>How COFFLoader Classifies Symbols</h4>
+<p>COFFLoader uses two helper functions to classify symbols. A symbol is <strong>defined</strong> if its SectionNumber is greater than 0 (it exists in a section). A symbol is <strong>external</strong> if its StorageClass is IMAGE_SYM_CLASS_EXTERNAL (2). An external symbol with SectionNumber == 0 is an unresolved import that must be linked at load time.</p>
+</div>
+
+<pre><code><span class="lang-tag">C</span>// From COFFLoader -- symbol classification helpers
+int coff_symbol_is_defined(coff_sym_t* sym) {
+    return (sym->SectionNumber > 0);
+}
+
+int coff_symbol_is_external(coff_sym_t* sym) {
+    return (sym->StorageClass == IMAGE_SYM_CLASS_EXTERNAL);  // StorageClass == 2
+}</code></pre>
+
+<h2>The String Table</h2>
+<p>The string table immediately follows the symbol table. Its structure is simple:</p>
+
+<pre><code><span class="lang-tag">TEXT</span>String Table Layout:
+  Offset 0: uint32_t Size;          // total size of string table (including this field)
+  Offset 4: char[] strings;         // null-terminated strings packed sequentially
+
+Example:
+  04 00 00 00  2E 74 65 78  74 00 5F 67  6F 00 5F 5F   ....text._go.__
+  69 6D 70 5F  4B 45 52 4E  45 4C 33 32  24 47 65 74   imp_KERNEL32$Get
+  ...
+
+Symbols reference strings by offset from the START of the string table.
+  value[1] = 4  --> ".text"
+  value[1] = 10 --> "_go"
+  value[1] = 14 --> "__imp_KERNEL32$GetCurrentProcessId"</code></pre>
+
+<p>The first 4 bytes are the size field itself, so valid string offsets start at 4. If the string table only contains the size field (size == 4), there are no long symbol names.</p>
+
+<h2>Relocation Entries</h2>
+<p>Each section can have its own relocation table. The relocation entries tell the loader which bytes in the section need to be patched once the final addresses of symbols are known. Each entry is 10 bytes:</p>
+
+<pre><code><span class="lang-tag">C</span>typedef struct coff_reloc {
+    uint32_t VirtualAddress;      // offset within the section to patch
+    uint32_t SymbolTableIndex;    // index into the symbol table
+    uint16_t Type;                // relocation type (architecture-specific)
+} coff_reloc_t;</code></pre>
+
+<table>
+<tr><th>Field</th><th>Size</th><th>Purpose</th></tr>
+<tr><td>VirtualAddress</td><td>4</td><td>Byte offset within the section where the fixup must be applied</td></tr>
+<tr><td>SymbolTableIndex</td><td>4</td><td>Index into the symbol table identifying the target symbol</td></tr>
+<tr><td>Type</td><td>2</td><td>How to compute the fixup value (architecture-dependent)</td></tr>
+</table>
+
+<h3>AMD64 Relocation Types (from COFFLoader.h)</h3>
+<pre><code><span class="lang-tag">C</span>#define IMAGE_REL_AMD64_ADDR64    0x0001  // 64-bit absolute address
+#define IMAGE_REL_AMD64_ADDR32NB  0x0003  // 32-bit address without image base (RVA)
+#define IMAGE_REL_AMD64_REL32     0x0004  // 32-bit relative (RIP-relative)
+#define IMAGE_REL_AMD64_REL32_1   0x0005  // REL32 + 1 byte displacement
+#define IMAGE_REL_AMD64_REL32_2   0x0006  // REL32 + 2 byte displacement
+#define IMAGE_REL_AMD64_REL32_3   0x0007  // REL32 + 3 bytes displacement
+#define IMAGE_REL_AMD64_REL32_4   0x0008  // REL32 + 4 bytes displacement
+#define IMAGE_REL_AMD64_REL32_5   0x0009  // REL32 + 5 bytes displacement</code></pre>
+
+<p>The <code>REL32</code> type is the most common in x64 BOFs. It computes: <code>target_address - (fixup_address + 4)</code>. The variants <code>REL32_1</code> through <code>REL32_5</code> add an additional displacement of 1-5 bytes to account for instruction encodings where the relocation is not the last part of the instruction.</p>
+
+<div class="card green">
+<h4>Putting It All Together</h4>
+<p>When the compiler generates a call to <code>BeaconPrintf</code>, it emits a CALL instruction with a placeholder 32-bit offset, a symbol table entry for <code>__imp_BeaconPrintf</code> (or the architecture-specific variant), and a relocation entry pointing from the CALL instruction to the symbol. At load time, COFFLoader resolves the symbol to an actual memory address and patches the CALL instruction's offset to reach that address.</p>
+</div>
+
+<h2>Visualizing a Real BOF</h2>
+<p>Here is what a minimal BOF looks like at the binary level after compilation:</p>
+
+<pre><code><span class="lang-tag">TEXT</span>Source: void go(char* a, int l) { BeaconPrintf(0, "hello"); }
+
+After compilation (x86_64-w64-mingw32-gcc -c):
+
+COFF Header:       Machine=0x8664, Sections=4, Symbols=12
+Section 1: .text   Size=0x2A, 1 relocation  (the go() code)
+Section 2: .data   Size=0x00, 0 relocations (empty)
+Section 3: .rdata  Size=0x06, 0 relocations ("hello\0")
+Section 4: .xdata  Size=0x08, 0 relocations (unwind info)
+
+Symbol Table:
+  [0] .text     Section=1, Class=STATIC, Value=0
+  [2] .data     Section=2, Class=STATIC, Value=0
+  [4] .rdata    Section=3, Class=STATIC, Value=0
+  [6] go        Section=1, Class=EXTERNAL, Value=0  <-- entry point
+  [7] __imp_BeaconPrintf  Section=0, Class=EXTERNAL  <-- unresolved import
+
+Relocations for .text:
+  Offset=0x0F, Symbol=4 (.rdata), Type=REL32   <-- reference to "hello" string
+  Offset=0x1A, Symbol=7 (__imp_BeaconPrintf), Type=REL32  <-- call to BeaconPrintf</code></pre>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: COFF Format</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: How does COFFLoader find the string table in a COFF file?</p>
+<label data-opt="0"><input type="radio" name="q1_2"> It is always at a fixed offset of 0x100</label>
+<label data-opt="1"><input type="radio" name="q1_2"> The file header contains a direct pointer to it</label>
+<label data-opt="2"><input type="radio" name="q1_2"> It calculates: PointerToSymbolTable + (NumberOfSymbols * 18)</label>
+<label data-opt="3"><input type="radio" name="q1_2"> It scans for a magic byte sequence</label>
+<div class="explain">The string table immediately follows the symbol table. Since each symbol entry is exactly 18 bytes, the string table offset is PointerToSymbolTable + (NumberOfSymbols * sizeof(coff_sym_t)). The first 4 bytes of the string table give its total size.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: A symbol has SectionNumber=0 and StorageClass=2. What does this mean?</p>
+<label data-opt="0"><input type="radio" name="q2_2"> The symbol is a static local variable</label>
+<label data-opt="1"><input type="radio" name="q2_2"> The symbol is an undefined external that must be resolved at load time</label>
+<label data-opt="2"><input type="radio" name="q2_2"> The symbol is a debug-only entry</label>
+<label data-opt="3"><input type="radio" name="q2_2"> The symbol is the section name itself</label>
+<div class="explain">StorageClass 2 is IMAGE_SYM_CLASS_EXTERNAL. SectionNumber 0 means IMAGE_SYM_UNDEFINED -- the symbol is not defined in any section of this object file. Combined, this means it is an external import that the loader must resolve (e.g., a DLL function or Beacon API call).</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: How are symbol names longer than 8 characters stored in the COFF symbol table?</p>
+<label data-opt="0"><input type="radio" name="q3_2"> The first 4 bytes of the Name field are zero, and the next 4 bytes are an offset into the string table</label>
+<label data-opt="1"><input type="radio" name="q3_2"> The name is truncated to 8 characters</label>
+<label data-opt="2"><input type="radio" name="q3_2"> An auxiliary symbol record holds the full name</label>
+<label data-opt="3"><input type="radio" name="q3_2"> The name is stored in a special .names section</label>
+<div class="explain">In the coff_sym_t union, if first.value[0] is zero, then first.value[1] is an offset into the string table where the full null-terminated name is stored. This is the standard COFF convention for long symbol names, and COFFLoader uses this to look up names like "__imp_KERNEL32$GetProcAddress".</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Previous: What Are BOFs?</a>
+<a class="primary" href="module3.html">Next: The BOF API Contract &rarr;</a>
+</div>
+</main>
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

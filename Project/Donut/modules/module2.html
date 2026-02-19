@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: PE Loader Fundamentals - Donut Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F369;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#ec4899;--accent2:#db2777;--gradient:linear-gradient(135deg,#ec4899,#db2777)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Donut Course</h2>
+<span>PE-to-Shellcode Masterclass</span>
+</div>
+<a class="home-link" href="../Donut_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. The PE-to-Shellcode Problem</span><span class="diff d1">B</span></a>
+<a class="mod-link active" href="module2.html"><span>2. PE Loader Fundamentals</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module3.html"><span>3. .NET CLR Hosting</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module4.html"><span>4. Module Architecture</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Donut Loader</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Anti-Detection</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module7.html"><span>7. Advanced Payload Types</span><span class="diff d3">A</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">A</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: PE Loader Fundamentals</h1>
+<p class="subtitle">Everything a PE loader must do to transform a flat file into a running image in memory &mdash; the foundation of Donut&rsquo;s <code>inmem_pe.c</code>.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the five core tasks every PE loader must perform: mapping sections, resolving imports, applying base relocations, executing TLS callbacks, and calling the entry point. These are the exact steps Donut&rsquo;s PIC loader implements in <code>inmem_pe.c</code> for native EXE/DLL payloads.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. PE Header Anatomy</h2>
+
+<p>Every PE file begins with a DOS header (<code>IMAGE_DOS_HEADER</code>) whose <code>e_lfanew</code> field points to the NT headers. The NT headers contain the actual PE metadata:</p>
+
+<pre><span class="lang-tag">C</span>// Navigating from a raw PE buffer to the critical headers
+PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)pe_buffer;
+PIMAGE_NT_HEADERS nt  = (PIMAGE_NT_HEADERS)((BYTE*)dos + dos-&gt;e_lfanew);
+
+// Optional header contains the key fields for loading
+DWORD image_base     = nt-&gt;OptionalHeader.ImageBase;
+DWORD size_of_image  = nt-&gt;OptionalHeader.SizeOfImage;
+DWORD entry_point    = nt-&gt;OptionalHeader.AddressOfEntryPoint;
+WORD  num_sections   = nt-&gt;FileHeader.NumberOfSections;
+DWORD section_align  = nt-&gt;OptionalHeader.SectionAlignment;
+DWORD file_align     = nt-&gt;OptionalHeader.FileAlignment;</pre>
+
+<table>
+<tr><th>Field</th><th>Purpose</th><th>Typical Value</th></tr>
+<tr><td><code>ImageBase</code></td><td>Preferred virtual address for the image</td><td><code>0x00400000</code> (EXE) / <code>0x10000000</code> (DLL)</td></tr>
+<tr><td><code>SizeOfImage</code></td><td>Total virtual size when fully mapped</td><td>Varies by binary</td></tr>
+<tr><td><code>AddressOfEntryPoint</code></td><td>RVA of the entry point function</td><td>Offset from image base</td></tr>
+<tr><td><code>SectionAlignment</code></td><td>Alignment of sections in memory</td><td><code>0x1000</code> (4 KB page)</td></tr>
+<tr><td><code>FileAlignment</code></td><td>Alignment of sections in the file on disk</td><td><code>0x200</code> (512 bytes)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. Step 1: Allocate and Map Sections</h2>
+
+<p>The first job of a PE loader is to allocate memory for the entire image and copy each section to its correct virtual offset. Sections in a PE file have different offsets on disk (file alignment) versus in memory (section alignment).</p>
+
+<pre><span class="lang-tag">C</span>// Allocate memory for the entire image
+LPVOID base = VirtualAlloc(
+    NULL,
+    nt-&gt;OptionalHeader.SizeOfImage,
+    MEM_COMMIT | MEM_RESERVE,
+    PAGE_READWRITE  // Start as RW, fix permissions later
+);
+
+// Copy PE headers (everything before the first section)
+memcpy(base, pe_buffer, nt-&gt;OptionalHeader.SizeOfHeaders);
+
+// Map each section to its virtual address
+PIMAGE_SECTION_HEADER sec = IMAGE_FIRST_SECTION(nt);
+for (WORD i = 0; i &lt; nt-&gt;FileHeader.NumberOfSections; i++) {
+    if (sec[i].SizeOfRawData &gt; 0) {
+        memcpy(
+            (BYTE*)base + sec[i].VirtualAddress,   // Destination: VA offset
+            pe_buffer   + sec[i].PointerToRawData,  // Source: file offset
+            sec[i].SizeOfRawData                     // Size on disk
+        );
+    }
+}</pre>
+
+<div class="card warn">
+<h4>Virtual vs. File Alignment</h4>
+<p>A section might start at file offset <code>0x400</code> but virtual address <code>0x1000</code>. The loader must use <code>VirtualAddress</code> for the destination (memory layout) and <code>PointerToRawData</code> for the source (file layout). Getting this wrong is the single most common PE loader bug.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Step 2: Apply Base Relocations</h2>
+
+<p>If the image cannot be loaded at its preferred <code>ImageBase</code> (which is almost always the case during injection), all absolute addresses in the code must be adjusted. The relocation table (<code>IMAGE_DIRECTORY_ENTRY_BASERELOC</code>) lists every location that needs patching.</p>
+
+<pre><span class="lang-tag">C</span>// Calculate the delta between actual and preferred base
+ULONG_PTR delta = (ULONG_PTR)base - nt-&gt;OptionalHeader.ImageBase;
+
+if (delta != 0) {
+    PIMAGE_DATA_DIRECTORY reloc_dir =
+        &amp;nt-&gt;OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    PIMAGE_BASE_RELOCATION reloc =
+        (PIMAGE_BASE_RELOCATION)((BYTE*)base + reloc_dir-&gt;VirtualAddress);
+
+    while (reloc-&gt;VirtualAddress &amp;&amp; reloc-&gt;SizeOfBlock) {
+        DWORD count = (reloc-&gt;SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / 2;
+        WORD *entry = (WORD*)(reloc + 1);
+
+        for (DWORD i = 0; i &lt; count; i++) {
+            WORD type   = entry[i] &gt;&gt; 12;
+            WORD offset = entry[i] &amp; 0x0FFF;
+
+            if (type == IMAGE_REL_BASED_DIR64) {
+                // 64-bit relocation: add delta to the 8-byte value
+                *(ULONG_PTR*)((BYTE*)base + reloc-&gt;VirtualAddress + offset) += delta;
+            } else if (type == IMAGE_REL_BASED_HIGHLOW) {
+                // 32-bit relocation: add delta to the 4-byte value
+                *(DWORD*)((BYTE*)base + reloc-&gt;VirtualAddress + offset) += (DWORD)delta;
+            }
+            // IMAGE_REL_BASED_ABSOLUTE (type 0) = padding, skip
+        }
+        reloc = (PIMAGE_BASE_RELOCATION)((BYTE*)reloc + reloc-&gt;SizeOfBlock);
+    }
+}</pre>
+
+<div class="diagram">
+<h4>Relocation Process</h4>
+<div class="flow">
+<div class="box">Preferred Base<br><small>0x00400000</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Actual Base<br><small>0x01A80000</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Delta<br><small>0x01680000</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Patch all entries<br><small>+= delta</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Step 3: Resolve Imports</h2>
+
+<p>The import table lists every external function the PE calls. The loader must walk the Import Directory, load each required DLL, and write the resolved function addresses into the Import Address Table (IAT).</p>
+
+<pre><span class="lang-tag">C</span>PIMAGE_DATA_DIRECTORY imp_dir =
+    &amp;nt-&gt;OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+PIMAGE_IMPORT_DESCRIPTOR imp =
+    (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)base + imp_dir-&gt;VirtualAddress);
+
+while (imp-&gt;Name) {
+    // Load the required DLL
+    char *dll_name = (char*)((BYTE*)base + imp-&gt;Name);
+    HMODULE hDll = LoadLibraryA(dll_name);
+
+    // Walk the thunk arrays
+    PIMAGE_THUNK_DATA orig = (PIMAGE_THUNK_DATA)((BYTE*)base + imp-&gt;OriginalFirstThunk);
+    PIMAGE_THUNK_DATA first = (PIMAGE_THUNK_DATA)((BYTE*)base + imp-&gt;FirstThunk);
+
+    while (orig-&gt;u1.AddressOfData) {
+        if (IMAGE_SNAP_BY_ORDINAL(orig-&gt;u1.Ordinal)) {
+            // Import by ordinal
+            first-&gt;u1.Function = (ULONG_PTR)GetProcAddress(
+                hDll, MAKEINTRESOURCEA(IMAGE_ORDINAL(orig-&gt;u1.Ordinal)));
+        } else {
+            // Import by name
+            PIMAGE_IMPORT_BY_NAME name =
+                (PIMAGE_IMPORT_BY_NAME)((BYTE*)base + orig-&gt;u1.AddressOfData);
+            first-&gt;u1.Function = (ULONG_PTR)GetProcAddress(hDll, name-&gt;Name);
+        }
+        orig++;
+        first++;
+    }
+    imp++;
+}</pre>
+
+<div class="card">
+<h4>Import by Name vs. Ordinal</h4>
+<p>Most imports are by name (a string like <code>"CreateFileW"</code>). Some imports use ordinals (numeric IDs). The high bit of the thunk value distinguishes the two cases: if set, it is an ordinal import; otherwise, it points to an <code>IMAGE_IMPORT_BY_NAME</code> structure containing the function name string.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Step 4: Set Section Permissions</h2>
+
+<p>After loading, each section must have its memory protection set according to its characteristics flags. The <code>.text</code> section needs <code>PAGE_EXECUTE_READ</code>, <code>.rdata</code> needs <code>PAGE_READONLY</code>, and <code>.data</code> needs <code>PAGE_READWRITE</code>.</p>
+
+<pre><span class="lang-tag">C</span>for (WORD i = 0; i &lt; nt-&gt;FileHeader.NumberOfSections; i++) {
+    DWORD protect = PAGE_READONLY;
+    DWORD chars   = sec[i].Characteristics;
+
+    BOOL is_exec  = (chars &amp; IMAGE_SCN_MEM_EXECUTE) != 0;
+    BOOL is_write = (chars &amp; IMAGE_SCN_MEM_WRITE)   != 0;
+    BOOL is_read  = (chars &amp; IMAGE_SCN_MEM_READ)    != 0;
+
+    if (is_exec &amp;&amp; is_write)      protect = PAGE_EXECUTE_READWRITE;
+    else if (is_exec &amp;&amp; is_read)   protect = PAGE_EXECUTE_READ;
+    else if (is_exec)               protect = PAGE_EXECUTE;
+    else if (is_write)              protect = PAGE_READWRITE;
+    else if (is_read)               protect = PAGE_READONLY;
+
+    DWORD old;
+    VirtualProtect(
+        (BYTE*)base + sec[i].VirtualAddress,
+        sec[i].Misc.VirtualSize,
+        protect, &amp;old
+    );
+}</pre>
+
+<!-- ============================================================ -->
+<h2>6. Step 5: TLS Callbacks and Entry Point</h2>
+
+<p>Before calling the main entry point, the loader must execute any Thread Local Storage (TLS) callbacks registered in the TLS directory. Then it calls the entry point, which differs based on the PE type:</p>
+
+<table>
+<tr><th>PE Type</th><th>Entry Point Signature</th><th>How Called</th></tr>
+<tr><td><strong>EXE</strong></td><td><code>int main()</code> / <code>WinMain()</code></td><td>Direct call, no arguments needed for basic execution</td></tr>
+<tr><td><strong>DLL</strong></td><td><code>BOOL DllMain(HINSTANCE, DWORD, LPVOID)</code></td><td>Called with <code>DLL_PROCESS_ATTACH</code> reason</td></tr>
+</table>
+
+<pre><span class="lang-tag">C</span>// Execute TLS callbacks if present
+PIMAGE_DATA_DIRECTORY tls_dir =
+    &amp;nt-&gt;OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+if (tls_dir-&gt;Size) {
+    PIMAGE_TLS_DIRECTORY tls =
+        (PIMAGE_TLS_DIRECTORY)((BYTE*)base + tls_dir-&gt;VirtualAddress);
+    PIMAGE_TLS_CALLBACK *callback =
+        (PIMAGE_TLS_CALLBACK*)tls-&gt;AddressOfCallBacks;
+    while (callback &amp;&amp; *callback) {
+        (*callback)((PVOID)base, DLL_PROCESS_ATTACH, NULL);
+        callback++;
+    }
+}
+
+// Call the entry point
+DWORD_PTR ep = (DWORD_PTR)base + nt-&gt;OptionalHeader.AddressOfEntryPoint;
+if (is_dll) {
+    typedef BOOL (WINAPI *DllMainFunc)(HINSTANCE, DWORD, LPVOID);
+    ((DllMainFunc)ep)((HINSTANCE)base, DLL_PROCESS_ATTACH, NULL);
+} else {
+    typedef int (*ExeMainFunc)(void);
+    ((ExeMainFunc)ep)();
+}</pre>
+
+<!-- ============================================================ -->
+<h2>7. How Donut Differs from a Standard Loader</h2>
+
+<p>Donut&rsquo;s PE loader in <code>inmem_pe.c</code> follows the same five steps, but with critical differences that make it work as PIC shellcode:</p>
+
+<div class="card green">
+<h4>PIC-Specific Adaptations</h4>
+<ul>
+<li><strong>No <code>LoadLibraryA</code> at first</strong> &mdash; the loader must resolve <code>LoadLibraryA</code> itself via PEB walking before it can use it to load import DLLs</li>
+<li><strong>Hash-based API resolution</strong> &mdash; instead of calling <code>GetProcAddress</code> by string, Donut uses API name hashes to find function addresses by walking DLL export tables directly</li>
+<li><strong>No global variables</strong> &mdash; all state is passed through the <code>DONUT_INSTANCE</code> structure pointer, making the code position-independent</li>
+<li><strong>Decryption first</strong> &mdash; the PE payload is Chaskey-encrypted inside <code>DONUT_MODULE</code>; the loader must decrypt and decompress before mapping</li>
+<li><strong>Optional export calling</strong> &mdash; for DLLs, Donut can call a specific exported function (not just <code>DllMain</code>) with user-supplied arguments</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. The Complete Loading Flow</h2>
+
+<div class="diagram">
+<h4>PE Loading Pipeline (Donut inmem_pe.c)</h4>
+<div class="flow">
+<div class="box hl">Decrypt<br><small>Chaskey CTR</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Decompress<br><small>aPLib / LZNT1</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Map Sections</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Relocations</div>
+<div class="arrow">&rarr;</div>
+<div class="box">Imports</div>
+<div class="arrow">&rarr;</div>
+<div class="box">Permissions</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Entry Point</div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="q2">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="1">
+<p>1. Why must base relocations be applied when loading a PE at a non-preferred address?</p>
+<label data-opt="0"><input type="radio" name="q2_1">Because the PE headers are corrupted</label>
+<label data-opt="1"><input type="radio" name="q2_1">Because absolute addresses in the code assume the preferred ImageBase</label>
+<label data-opt="2"><input type="radio" name="q2_1">Because the entry point changes with each load</label>
+<label data-opt="3"><input type="radio" name="q2_1">Because Windows requires relocations for all DLLs</label>
+<div class="explain">When a PE is compiled, the linker embeds absolute addresses assuming the image will load at ImageBase. If it loads elsewhere, the delta between actual and preferred base must be added to every relocated address.</div>
+</div>
+
+<div class="quiz-q" data-correct="2">
+<p>2. What is the correct order of PE loading operations?</p>
+<label data-opt="0"><input type="radio" name="q2_2">Imports &rarr; Sections &rarr; Relocations &rarr; Entry Point</label>
+<label data-opt="1"><input type="radio" name="q2_2">Entry Point &rarr; Sections &rarr; Imports &rarr; Relocations</label>
+<label data-opt="2"><input type="radio" name="q2_2">Sections &rarr; Relocations &rarr; Imports &rarr; Permissions &rarr; Entry Point</label>
+<label data-opt="3"><input type="radio" name="q2_2">Relocations &rarr; Imports &rarr; Sections &rarr; Entry Point</label>
+<div class="explain">Sections must be mapped first (so the image exists in memory), then relocations fix absolute addresses, then imports are resolved (requiring the relocated image), then permissions are set, and finally the entry point is called.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>3. How does Donut&rsquo;s PIC loader resolve API functions without calling GetProcAddress?</p>
+<label data-opt="0"><input type="radio" name="q2_3">By walking the PEB to find loaded DLLs and traversing their export tables using API name hashes</label>
+<label data-opt="1"><input type="radio" name="q2_3">By reading the IAT of the host process</label>
+<label data-opt="2"><input type="radio" name="q2_3">By parsing the SSDT from user mode</label>
+<label data-opt="3"><input type="radio" name="q2_3">By calling LdrGetProcedureAddress directly</label>
+<div class="explain">The PIC loader walks the PEB&rsquo;s InMemoryOrderModuleList to find loaded DLLs (like kernel32.dll and ntdll.dll), then traverses their export tables comparing function name hashes to pre-computed values stored in the DONUT_INSTANCE.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('q2')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Previous: The PE-to-Shellcode Problem</a>
+<a class="primary" href="module3.html">Next: .NET CLR Hosting &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

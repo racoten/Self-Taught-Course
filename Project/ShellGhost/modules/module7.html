@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: Background: x86 Trap Flag &amp; Single-Stepping - ShellGhost Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F47B;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#64748b;--accent2:#475569;--gradient:linear-gradient(135deg,#64748b,#475569)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ShellGhost Course</h2>
+<span>Single-Instruction Evasion</span>
+</div>
+<a class="home-link" href="../ShellGhost_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Memory Scanner Evasion Goals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Software Breakpoints &amp; INT3</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Vectored Exception Handling</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. The ShellGhost Concept</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. SystemFunction032 &amp; Shellcode Mapping</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. VEH Handler Implementation</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module7.html"><span>7. Background: Trap Flag &amp; Single-Stepping</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: Background: x86 Trap Flag &amp; Single-Stepping</h1>
+<p class="subtitle">General x86 knowledge for context &mdash; understanding the EFLAGS TF bit and EXCEPTION_SINGLE_STEP.</p>
+
+<div class="card warn">
+<h4>Important: ShellGhost Does NOT Use the Trap Flag</h4>
+<p>This module covers the x86/x64 trap flag (TF) as <strong>general background knowledge</strong>. While single-stepping is a well-known technique used by debuggers and some other evasion tools, <strong>ShellGhost itself does not use the trap flag or EXCEPTION_SINGLE_STEP</strong>. ShellGhost's one-exception model relies solely on EXCEPTION_BREAKPOINT: each breakpoint handler both re-encrypts the previous instruction and decrypts the current one. The next <code>0xCC</code> in the buffer naturally signals instruction completion. This module is included because understanding TF is valuable x86 knowledge that helps you appreciate why ShellGhost's simpler approach works and how it compares to trap-flag-based alternatives.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The EFLAGS Register</h2>
+
+<p>The EFLAGS register (RFLAGS on x64, though only the lower 32 bits are used for flags) is a 32-bit register containing status flags, control flags, and system flags. The trap flag is a <strong>system flag</strong> at bit position 8:</p>
+
+<pre><span class="lang-tag">Text</span>EFLAGS Register Layout (selected bits):
+
+Bit  Name   Description
+ 0   CF     Carry Flag
+ 2   PF     Parity Flag
+ 4   AF     Auxiliary Carry Flag
+ 6   ZF     Zero Flag
+ 7   SF     Sign Flag
+ 8   TF     Trap Flag          &lt;-- Used by debuggers (NOT by ShellGhost)
+ 9   IF     Interrupt Enable Flag
+10   DF     Direction Flag
+11   OF     Overflow Flag
+12-13 IOPL  I/O Privilege Level
+14   NT     Nested Task
+16   RF     Resume Flag         &lt;-- Important for single-step
+17   VM     Virtual-8086 Mode
+18   AC     Alignment Check
+21   ID     CPUID Available</pre>
+
+<div class="card">
+<h4>TF (Bit 8) Behavior</h4>
+<p>When TF is set to 1 in EFLAGS, the CPU executes <strong>exactly one instruction</strong> and then raises a debug exception (interrupt vector 1, <code>#DB</code>). The CPU automatically clears TF before delivering the exception, preventing infinite single-step loops. After the exception handler runs and returns, execution continues normally (without single-stepping) unless the handler sets TF again.</p>
+</div>
+
+<pre><span class="lang-tag">C</span>// Setting the trap flag via CONTEXT manipulation in a VEH handler
+#define TRAP_FLAG  0x100   // Bit 8 = 0x100 in hex
+
+// Set TF: enable single-step
+ctx->EFlags |= TRAP_FLAG;
+
+// Clear TF: disable single-step
+ctx->EFlags &= ~TRAP_FLAG;
+
+// Check TF: is single-stepping active?
+BOOL is_stepping = (ctx->EFlags & TRAP_FLAG) != 0;</pre>
+
+<!-- ============================================================ -->
+<h2>2. The Single-Step Exception Flow</h2>
+
+<p>When the CPU encounters a set TF, the following sequence occurs at the hardware level:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Trap Flag Exception Flow</h4>
+<div class="flow">
+<div class="flow box">TF Set in EFLAGS<br><small>Via CONTEXT restore</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">CPU Executes 1 Instr<br><small>Full instruction</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">CPU Clears TF<br><small>Auto-cleared</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">#DB Exception<br><small>Vector 1</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">KiDebugTrapOrFault<br><small>Kernel handler</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">EXCEPTION_SINGLE_STEP<br><small>0x80000004 to VEH</small></div>
+</div>
+</div>
+
+<table>
+<tr><th>Step</th><th>What Happens</th><th>Detail</th></tr>
+<tr><td>1</td><td>CONTEXT restored with TF=1</td><td>The kernel loads the modified CONTEXT (from VEH handler return) into the CPU registers, including EFLAGS with TF set</td></tr>
+<tr><td>2</td><td>CPU executes one instruction</td><td>The instruction at RIP executes fully (all bytes decoded and executed, RIP advanced past the instruction)</td></tr>
+<tr><td>3</td><td>CPU clears TF</td><td>Before raising the exception, the CPU clears bit 8 of EFLAGS. This is a hardware behavior, not OS behavior.</td></tr>
+<tr><td>4</td><td>#DB exception raised</td><td>The CPU traps to the kernel via IDT entry 1 (<code>KiDebugTrapOrFault</code>)</td></tr>
+<tr><td>5</td><td>Kernel dispatches to user mode</td><td>The kernel creates an EXCEPTION_RECORD with <code>ExceptionCode = 0x80000004</code> (EXCEPTION_SINGLE_STEP)</td></tr>
+<tr><td>6</td><td>VEH handler called</td><td>ShellGhost's handler receives the single-step exception and performs re-encryption</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. EXCEPTION_SINGLE_STEP Details</h2>
+
+<pre><span class="lang-tag">C</span>// From winnt.h / ntstatus.h
+#define EXCEPTION_SINGLE_STEP   0x80000004L
+#define STATUS_SINGLE_STEP      0x80000004L
+
+// When a single-step exception is delivered:
+// ExceptionRecord->ExceptionCode    = 0x80000004
+// ExceptionRecord->ExceptionAddress = RIP AFTER the executed instruction
+// ExceptionRecord->ExceptionFlags   = 0 (first-chance)
+// ContextRecord->Rip               = address of NEXT instruction
+// ContextRecord->EFlags            = TF already cleared by CPU</pre>
+
+<div class="card green">
+<h4>RIP Points to the Next Instruction</h4>
+<p>Unlike EXCEPTION_BREAKPOINT where RIP is only 1 byte past the trap instruction, EXCEPTION_SINGLE_STEP delivers RIP pointing to the <strong>next instruction</strong> that would execute. This is because the CPU fully executed the previous instruction (advancing RIP by the instruction's length) before raising the exception. ShellGhost uses the difference between the new RIP and the previous instruction address to determine how many bytes were consumed, and thus how many bytes need to be re-encrypted to <code>0xCC</code>.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. TF vs Debugger Single-Step</h2>
+
+<p>Debuggers like WinDbg use the exact same mechanism for their "step into" (F11 / <code>t</code>) command. Understanding this parallel illuminates how ShellGhost works:</p>
+
+<table>
+<tr><th>Aspect</th><th>Debugger Step-Into</th><th>Hypothetical TF-Based Tool</th><th>ShellGhost (Actual)</th></tr>
+<tr><td><strong>How TF is set</strong></td><td>Debugger modifies CONTEXT via <code>SetThreadContext</code></td><td>VEH handler sets TF in CONTEXT</td><td>TF is <strong>not used</strong></td></tr>
+<tr><td><strong>How instruction end is detected</strong></td><td>EXCEPTION_SINGLE_STEP</td><td>EXCEPTION_SINGLE_STEP</td><td>Next <code>0xCC</code> triggers EXCEPTION_BREAKPOINT</td></tr>
+<tr><td><strong>Exceptions per instruction</strong></td><td>1 (single-step)</td><td>2 (breakpoint + single-step)</td><td>1 (breakpoint only)</td></tr>
+<tr><td><strong>Performance</strong></td><td>User-controlled</td><td>2 kernel transitions per instruction</td><td>1 kernel transition per instruction</td></tr>
+</table>
+
+<div class="card">
+<h4>Debugger Interference</h4>
+<p>If a debugger is attached to a process running ShellGhost, the debugger intercepts EXCEPTION_BREAKPOINT events via the debug port before they reach user-mode VEH handlers. This means ShellGhost's VEH handler may never receive the breakpoint exceptions if a debugger is attached. This is both a limitation (cannot debug ShellGhost easily) and an incidental anti-debug behavior. Note that since ShellGhost does not use TF, there is no single-step conflict with the debugger.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. The Resume Flag (RF)</h2>
+
+<p>Bit 16 of EFLAGS is the <strong>Resume Flag (RF)</strong>. It plays an important role in single-step scenarios that ShellGhost must account for:</p>
+
+<pre><span class="lang-tag">C</span>#define RESUME_FLAG  0x10000  // Bit 16
+
+// The Resume Flag prevents repeated #DB exceptions on the same
+// instruction when hardware breakpoints (DR0-DR3) are in use.
+// When RF=1, the CPU suppresses #DB for one instruction.</pre>
+
+<div class="card">
+<h4>RF and ShellGhost</h4>
+<p>When the CPU delivers a #DB (single-step) exception, it sets RF in the saved EFLAGS on the stack. This ensures that when execution resumes, if a hardware breakpoint also matches the next instruction, the CPU does not immediately raise another #DB for the hardware breakpoint. ShellGhost generally does not use hardware breakpoints (DR0-DR3), so RF is not a concern for the normal execution cycle. However, if an EDR tool has set hardware breakpoints on the process, RF ensures they do not interfere with ShellGhost's TF-based single-stepping.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Edge Cases with the Trap Flag</h2>
+
+<p>Several x86/x64 instructions interact with TF in special ways that ShellGhost must handle:</p>
+
+<table>
+<tr><th>Instruction</th><th>TF Behavior</th><th>Impact on ShellGhost</th></tr>
+<tr><td><code>STI</code> (Set Interrupt Flag)</td><td>Single-step is delayed until after the instruction <strong>following</strong> STI</td><td>Rare in shellcode; minimal impact</td></tr>
+<tr><td><code>MOV SS</code> / <code>POP SS</code></td><td>Single-step is suppressed for one instruction after SS load</td><td>Very rare in x64 shellcode; minimal impact</td></tr>
+<tr><td><code>REP</code>-prefixed instructions</td><td>Single-step fires after each iteration, not after the entire REP loop</td><td>ShellGhost gets a single-step per iteration &mdash; re-encryption happens each time</td></tr>
+<tr><td><code>IRET</code></td><td>Loads new EFLAGS from stack, potentially changing TF</td><td>Not used in user-mode shellcode</td></tr>
+<tr><td><code>POPF</code> / <code>POPFQ</code></td><td>Can set or clear TF from stack value</td><td>If shellcode uses POPF, it could clear TF &mdash; ShellGhost loses control</td></tr>
+<tr><td><code>PUSHF</code> / <code>PUSHFQ</code></td><td>Pushes EFLAGS with VM and RF cleared (bits 16-17 masked), but TF is preserved</td><td>If shellcode reads EFLAGS via PUSHF while TF=1, it would see TF=1 in the pushed value</td></tr>
+</table>
+
+<div class="card warn">
+<h4>The POPFQ Risk</h4>
+<p>If the shellcode contains a <code>POPFQ</code> instruction that loads an EFLAGS value with TF=0, the trap flag is cleared and ShellGhost loses its single-step notification. The next instruction executes without triggering EXCEPTION_SINGLE_STEP, and the re-encryption step is skipped. However, the instruction after that will still be <code>0xCC</code> (triggering a breakpoint), so ShellGhost recovers at the cost of one instruction that is not re-encrypted immediately. In practice, most shellcode does not use POPFQ.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. PUSHF and Anti-Debug Detection</h2>
+
+<p>The PUSHF/PUSHFQ instructions have an important security consideration. Per the Intel SDM, PUSHF applies a mask of <code>00FCFFFFH</code> to the pushed EFLAGS value, which clears the VM (bit 17) and RF (bit 16) flags. However, <strong>TF (bit 8) is NOT cleared by PUSHF</strong> &mdash; it is preserved in the pushed value:</p>
+
+<pre><span class="lang-tag">x86 ASM</span>; Anti-debug technique (CAN detect single-stepping)
+pushfq                   ; Push EFLAGS onto stack
+pop rax                  ; RAX = EFLAGS value
+test rax, 0x100          ; Test trap flag bit
+jnz being_debugged       ; If TF=1, someone is single-stepping us
+
+; Per Intel SDM: PUSHF clears VM and RF (bits 16-17) via mask 00FCFFFFH
+; but TF (bit 8) is PRESERVED in the pushed value.
+; This means PUSHF CAN reveal active single-stepping.</pre>
+
+<div class="card green">
+<h4>ShellGhost Avoids This Entirely</h4>
+<p>Since ShellGhost does not use the trap flag at all (it relies solely on EXCEPTION_BREAKPOINT from 0xCC bytes), the PUSHF anti-debug detection is irrelevant. If shellcode contains PUSHF-based anti-debug checks, they will see TF=0 because ShellGhost never sets it. This is one of the advantages of ShellGhost's one-exception model over a trap-flag-based approach.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. TF Lifecycle in a Hypothetical Two-Exception Model</h2>
+
+<p>For educational context, here is how the trap flag lifecycle would work in a hypothetical two-exception-per-instruction model (breakpoint + single-step). Note: <strong>ShellGhost does NOT use this approach</strong>.</p>
+
+<pre><span class="lang-tag">Text</span>Hypothetical two-exception model (NOT how ShellGhost works):
+
+Phase 1: EXCEPTION_BREAKPOINT handler
+  +--> Handler sets:  ctx->EFlags |= 0x100   (TF = 1)
+  +--> Handler returns EXCEPTION_CONTINUE_EXECUTION
+  +--> Kernel calls NtContinue, loads CONTEXT into CPU registers
+  +--> EFLAGS now has TF = 1
+
+Phase 2: CPU executes one instruction
+  +--> CPU fully executes the instruction
+  +--> CPU auto-clears TF (EFLAGS bit 8 = 0)
+  +--> CPU raises #DB (debug exception, vector 1)
+
+Phase 3: EXCEPTION_SINGLE_STEP handler
+  +--> Handler re-encrypts the previous instruction
+  +--> Handler returns EXCEPTION_CONTINUE_EXECUTION
+
+Phase 4: CPU resumes at next 0xCC -> cycle repeats
+
+This approach generates TWO exceptions per instruction.
+ShellGhost instead uses a ONE-exception model where
+each EXCEPTION_BREAKPOINT handler does BOTH the re-encryption
+of the previous instruction AND decryption of the current one.</pre>
+
+<div class="card green">
+<h4>ShellGhost's Simpler Approach</h4>
+<p>ShellGhost avoids the trap flag entirely. After executing a decrypted instruction, the CPU naturally hits the next <code>0xCC</code> and raises EXCEPTION_BREAKPOINT. That breakpoint handler re-encrypts the previous instruction and decrypts the current one. This one-exception model is simpler, generates half the exceptions, and avoids all TF-related edge cases and detection vectors. Understanding the TF mechanism is still valuable because it is used by debuggers and other tools, but ShellGhost's approach is more elegant for this specific use case.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: At which bit position in the EFLAGS register is the Trap Flag (TF) located?</p>
+<div class="quiz-btn" data-choice="A">A) Bit 0 (0x001)</div>
+<div class="quiz-btn" data-choice="B">B) Bit 16 (0x10000)</div>
+<div class="quiz-btn" data-choice="C">C) Bit 8 (0x100)</div>
+<div class="quiz-btn" data-choice="D">D) Bit 9 (0x200)</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: What exception code does the CPU generate when TF triggers a single-step?</p>
+<div class="quiz-btn" data-choice="A">A) 0x80000004 (EXCEPTION_SINGLE_STEP)</div>
+<div class="quiz-btn" data-choice="B">B) 0x80000003 (EXCEPTION_BREAKPOINT)</div>
+<div class="quiz-btn" data-choice="C">C) 0xC0000005 (EXCEPTION_ACCESS_VIOLATION)</div>
+<div class="quiz-btn" data-choice="D">D) 0xC000001D (EXCEPTION_ILLEGAL_INSTRUCTION)</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q3: What does the CPU do with the Trap Flag after delivering the single-step exception?</p>
+<div class="quiz-btn" data-choice="A">A) Keeps it set for the next instruction</div>
+<div class="quiz-btn" data-choice="B">B) Sets it to an undefined value</div>
+<div class="quiz-btn" data-choice="C">C) Toggles it to the opposite state</div>
+<div class="quiz-btn" data-choice="D">D) Automatically clears it (sets TF = 0)</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Prev: VEH Handler Implementation (How ShellGhost Actually Works)</a>
+<a class="primary" href="module8.html">Next: Full Chain &amp; Detection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

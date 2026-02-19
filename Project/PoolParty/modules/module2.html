@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: Windows Thread Pool Architecture - PoolParty Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F3CA;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f59e0b;--accent2:#d97706;--gradient:linear-gradient(135deg,#f59e0b,#d97706)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>PoolParty Course</h2>
+<span>Thread Pool Injection Masterclass</span>
+</div>
+<a class="home-link" href="../PoolParty_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Injection Landscape</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module2.html"><span>2. Thread Pool Architecture</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Thread Pool Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Worker Factory &amp; TP_WORK</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Wait, I/O &amp; ALPC</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Job &amp; Direct Variants</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. TP_TIMER Insertion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: Windows Thread Pool Architecture</h1>
+<p class="subtitle">The user-mode thread pool API, its core data structures, and the I/O completion port that drives everything.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the Windows Thread Pool API surface, the relationship between TP_POOL, TP_WORK, TP_TIMER, TP_WAIT, TP_IO, and TP_ALPC objects, how worker threads are managed, and how I/O completion ports (IOCP) serve as the central dispatch mechanism. This is essential groundwork for understanding all 8 PoolParty variants.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Why Thread Pools Exist</h2>
+
+<p>Creating and destroying threads is expensive. Each thread requires kernel stack allocation, context initialization, and scheduler registration. Thread pools solve this by maintaining a set of <strong>pre-created worker threads</strong> that wait for work items to process:</p>
+
+<ul>
+<li><strong>Amortized cost</strong> &mdash; threads are created once and reused for many operations</li>
+<li><strong>Automatic scaling</strong> &mdash; the pool grows and shrinks based on workload</li>
+<li><strong>Unified dispatch</strong> &mdash; all async operations (work, timers, waits, I/O) use the same worker threads</li>
+<li><strong>Default pool</strong> &mdash; every Windows process has a default thread pool created automatically</li>
+</ul>
+
+<p>The fact that <strong>every Windows process has a thread pool</strong> is critical for PoolParty &mdash; it means every process has injectable infrastructure already running.</p>
+
+<!-- ============================================================ -->
+<h2>2. The Thread Pool API</h2>
+
+<p>Windows exposes the thread pool through both the public Win32 API and the internal <code>ntdll.dll</code> Tp* functions. The public API wraps the internal functions:</p>
+
+<table>
+<tr><th>Public API</th><th>Internal (ntdll)</th><th>Purpose</th></tr>
+<tr><td><code>CreateThreadpoolWork</code></td><td><code>TpAllocWork</code></td><td>Create a work callback item</td></tr>
+<tr><td><code>SubmitThreadpoolWork</code></td><td><code>TpPostWork</code></td><td>Submit work to the pool queue</td></tr>
+<tr><td><code>CreateThreadpoolTimer</code></td><td><code>TpAllocTimer</code></td><td>Create a timer callback item</td></tr>
+<tr><td><code>SetThreadpoolTimer</code></td><td><code>TpSetTimer</code></td><td>Arm the timer with a due time</td></tr>
+<tr><td><code>CreateThreadpoolWait</code></td><td><code>TpAllocWait</code></td><td>Create a wait callback item</td></tr>
+<tr><td><code>SetThreadpoolWait</code></td><td><code>TpSetWait</code></td><td>Associate a handle to wait on</td></tr>
+<tr><td><code>CreateThreadpoolIo</code></td><td><code>TpAllocIoCompletion</code></td><td>Create an I/O callback item</td></tr>
+<tr><td><code>StartThreadpoolIo</code></td><td><code>TpStartAsyncIoOperation</code></td><td>Begin async I/O tracking</td></tr>
+</table>
+
+<p>PoolParty works at the <strong>internal Tp* level</strong>, directly manipulating the structures these APIs create and manage.</p>
+
+<!-- ============================================================ -->
+<h2>3. Core Data Structures</h2>
+
+<h3>3.1 TP_POOL</h3>
+
+<p>The central structure representing a thread pool instance. Every process has at least one default <code>TP_POOL</code>. Key fields include:</p>
+
+<pre><span class="lang-tag">C++ (Reconstructed)</span><code>// Simplified TP_POOL structure (undocumented, reverse-engineered)
+struct TP_POOL {
+    TP_TASK_CALLBACKS  TaskCallbacks;
+    LIST_ENTRY         WorkerListHead;      // Linked list of worker threads
+    ULONG              NumWorkers;           // Current worker count
+    ULONG              MinWorkers;           // Minimum worker threads
+    ULONG              MaxWorkers;           // Maximum worker threads
+    HANDLE             CompletionPort;       // IOCP handle - THE dispatch mechanism
+    TP_QUEUE           TaskQueue[3];         // High, Normal, Low priority queues
+    HANDLE             WorkerFactory;        // Worker factory kernel object
+    // ... additional fields
+};</code></pre>
+
+<div class="card green">
+<h4>The IOCP Is Everything</h4>
+<p>The <code>CompletionPort</code> field is the I/O completion port that all worker threads wait on. Every work item, timer expiration, wait satisfaction, and I/O completion is dispatched through this single IOCP. If you can post a completion packet to this IOCP, you can trigger code execution on a worker thread. This is the insight behind several PoolParty variants.</p>
+</div>
+
+<h3>3.2 TP_WORK</h3>
+
+<p>Represents a work callback &mdash; a function pointer and context to be executed by a worker thread:</p>
+
+<pre><span class="lang-tag">C++ (Reconstructed)</span><code>struct TP_WORK {
+    TP_TASK        Task;           // Contains the callback + context
+    TP_POOL       *Pool;           // Owning pool
+    LIST_ENTRY     ListEntry;      // Queue linkage
+    ULONG          Flags;
+    // ...
+};
+
+struct TP_TASK {
+    TP_CALLBACK_ENVIRON_V3 *CallbackEnviron;
+    PTP_WORK_CALLBACK       WorkCallback;    // Function to call
+    PVOID                   Context;          // Argument to callback
+    // ...
+};</code></pre>
+
+<h3>3.3 TP_TIMER</h3>
+
+<p>A timer-based callback item. When the timer expires, the callback is dispatched through the IOCP:</p>
+
+<pre><span class="lang-tag">C++ (Reconstructed)</span><code>struct TP_TIMER {
+    TP_TASK        Task;            // Callback + context
+    TP_POOL       *Pool;
+    LARGE_INTEGER  DueTime;         // When to fire
+    ULONG          Period;          // Recurring interval (0 = one-shot)
+    ULONG          Window;          // Coalescing window
+    LIST_ENTRY     WindowListEntry; // Timer window list
+    // ...
+};</code></pre>
+
+<h3>3.4 TP_WAIT</h3>
+
+<p>Waits on a kernel object (event, mutex, semaphore, process). When the object is signaled, the callback fires:</p>
+
+<pre><span class="lang-tag">C++ (Reconstructed)</span><code>struct TP_WAIT {
+    TP_TASK        Task;         // Callback + context
+    TP_POOL       *Pool;
+    HANDLE         WaitObject;   // Object to wait on
+    HANDLE         WaitHandle;   // Registered wait handle
+    // ...
+};</code></pre>
+
+<h3>3.5 TP_IO</h3>
+
+<p>I/O completion callback. When an async I/O operation completes on a file handle bound to the thread pool, the callback fires:</p>
+
+<pre><span class="lang-tag">C++ (Reconstructed)</span><code>struct TP_IO {
+    TP_TASK        Task;            // Callback + context
+    TP_POOL       *Pool;
+    HANDLE         FileHandle;      // The I/O target
+    ULONG          PendingCount;    // Outstanding operations
+    // ...
+};</code></pre>
+
+<h3>3.6 TP_ALPC</h3>
+
+<p>ALPC (Advanced Local Procedure Call) port callback. When a message arrives on a bound ALPC port, the callback fires. This is used internally by Windows for RPC dispatch:</p>
+
+<pre><span class="lang-tag">C++ (Reconstructed)</span><code>struct TP_ALPC {
+    TP_TASK        Task;          // Callback + context
+    TP_POOL       *Pool;
+    HANDLE         AlpcPort;      // ALPC port handle
+    // ...
+};</code></pre>
+
+<!-- ============================================================ -->
+<h2>4. I/O Completion Ports (IOCP)</h2>
+
+<p>The IOCP is the backbone of the Windows thread pool. It is a kernel object that acts as a <strong>queue of completion packets</strong> and a <strong>thread wakeup mechanism</strong>:</p>
+
+<div class="diagram">
+<h4>IOCP as Central Dispatcher</h4>
+<div class="flow">
+<div class="flow box y">TP_WORK<br><small>Work callback</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">IOCP Queue<br><small>Completion packets</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Worker Thread<br><small>TppWorkerThread</small></div>
+</div>
+<div class="flow" style="margin-top:8px">
+<div class="flow box y">TP_TIMER<br><small>Timer expiry</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">IOCP Queue<br><small>Completion packets</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Worker Thread<br><small>TppWorkerThread</small></div>
+</div>
+<div class="flow" style="margin-top:8px">
+<div class="flow box y">TP_IO<br><small>I/O completion</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">IOCP Queue<br><small>Completion packets</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Worker Thread<br><small>TppWorkerThread</small></div>
+</div>
+</div>
+
+<p>Worker threads call <code>NtRemoveIoCompletion</code> (the native equivalent of <code>GetQueuedCompletionStatus</code>) to block until a completion packet arrives. When one does, the worker thread extracts the work item from the packet and calls the registered callback.</p>
+
+<pre><span class="lang-tag">C++</span><code>// How worker threads consume work (simplified)
+while (true) {
+    ULONG_PTR completionKey;
+    LPOVERLAPPED overlapped;
+    DWORD bytes;
+
+    // Block until work is available
+    NtRemoveIoCompletion(pool->CompletionPort,
+                         &completionKey,
+                         &overlapped,
+                         &ioStatusBlock,
+                         NULL);  // infinite timeout
+
+    // The completion key and overlapped encode the work item type
+    TP_TASK* task = DecodeWorkItem(completionKey, overlapped);
+    task->WorkCallback(task->Instance, task->Context);
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>5. Worker Threads and the Worker Factory</h2>
+
+<p>Worker threads are not created with <code>CreateThread</code>. Instead, Windows uses a <strong>Worker Factory</strong> kernel object that manages thread creation and destruction:</p>
+
+<table>
+<tr><th>Component</th><th>Description</th></tr>
+<tr><td><strong>Worker Factory</strong></td><td>Kernel object (<code>TpWorkerFactory</code>) that creates and manages worker threads for a pool</td></tr>
+<tr><td><strong>Start Routine</strong></td><td>The function new worker threads begin executing &mdash; typically <code>TppWorkerThread</code></td></tr>
+<tr><td><strong>Min/Max Threads</strong></td><td>The factory automatically scales between min and max based on load</td></tr>
+<tr><td><strong>NtCreateWorkerFactory</strong></td><td>Creates the factory, specifying the IOCP and start routine</td></tr>
+</table>
+
+<pre><span class="lang-tag">C++</span><code>// Worker factory creation (internal, during pool init)
+NTSTATUS NtCreateWorkerFactory(
+    PHANDLE WorkerFactoryHandle,
+    ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    HANDLE CompletionPortHandle,    // The pool's IOCP
+    HANDLE WorkerProcessHandle,     // Process the threads run in
+    PVOID StartRoutine,             // TppWorkerThread
+    PVOID StartParameter,           // Pool context
+    ULONG MaxThreadCount,
+    SIZE_T StackReserve,
+    SIZE_T StackCommit
+);</code></pre>
+
+<div class="card warn">
+<h4>Variant 1 Preview</h4>
+<p>The Worker Factory&rsquo;s <code>StartRoutine</code> determines what function new worker threads execute. PoolParty Variant 1 uses <code>NtSetInformationWorkerFactory</code> to <strong>change the StartRoutine</strong> to point at injected shellcode, then triggers creation of a new worker thread. The new thread starts executing the shellcode directly.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. The Default Thread Pool</h2>
+
+<p>Every Windows process automatically has a default thread pool. It is created lazily when any thread pool API is first called. Key characteristics:</p>
+
+<ul>
+<li><strong>Location</strong> &mdash; stored in the process&rsquo;s TEB/PEB structures, accessible via <code>NtQueryInformationProcess</code></li>
+<li><strong>Shared</strong> &mdash; all code in the process that uses <code>CreateThreadpoolWork(NULL, ...)</code> (without a custom pool) shares this pool</li>
+<li><strong>Always present</strong> &mdash; any non-trivial Windows process (services, GUI apps, browsers) uses it</li>
+<li><strong>Has an IOCP</strong> &mdash; the pool&rsquo;s I/O completion port is a handle that PoolParty needs to locate</li>
+</ul>
+
+<p>PoolParty&rsquo;s first challenge in each variant is to <strong>locate the target process&rsquo;s TP_POOL</strong> and extract the relevant handles (IOCP, Worker Factory) from it.</p>
+
+<!-- ============================================================ -->
+<h2>7. Object Relationships</h2>
+
+<div class="card">
+<h4>How the Pieces Fit Together</h4>
+<table>
+<tr><th>Object</th><th>Lives In</th><th>Connected To</th></tr>
+<tr><td><code>TP_POOL</code></td><td>User-mode heap</td><td>IOCP handle, Worker Factory handle, task queues</td></tr>
+<tr><td><code>TP_WORK</code></td><td>User-mode heap</td><td>Back-pointer to TP_POOL, callback + context</td></tr>
+<tr><td><code>TP_TIMER</code></td><td>User-mode heap</td><td>Back-pointer to TP_POOL, timer parameters</td></tr>
+<tr><td><code>TP_WAIT</code></td><td>User-mode heap</td><td>Back-pointer to TP_POOL, wait object handle</td></tr>
+<tr><td><code>TP_IO</code></td><td>User-mode heap</td><td>Back-pointer to TP_POOL, file handle</td></tr>
+<tr><td><code>TP_ALPC</code></td><td>User-mode heap</td><td>Back-pointer to TP_POOL, ALPC port handle</td></tr>
+<tr><td><code>Worker Factory</code></td><td>Kernel</td><td>IOCP handle, StartRoutine, thread counts</td></tr>
+<tr><td><code>IOCP</code></td><td>Kernel</td><td>Completion packet queue, waiting thread list</td></tr>
+</table>
+</div>
+
+<p>The key takeaway: all roads lead to the <strong>IOCP</strong>. Whether you inject a work item, fire a timer, signal a wait, complete an I/O, or send an ALPC message, the callback dispatch goes through the I/O completion port. Understanding this central role is essential for understanding every PoolParty variant.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="A">
+<p>Q1: What kernel object serves as the central dispatch mechanism for all thread pool callbacks?</p>
+<div class="quiz-btn" data-choice="A">A) I/O Completion Port (IOCP)</div>
+<div class="quiz-btn" data-choice="B">B) Event object</div>
+<div class="quiz-btn" data-choice="C">C) Mutex</div>
+<div class="quiz-btn" data-choice="D">D) Semaphore</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: What internal ntdll function do worker threads call to wait for work items?</p>
+<div class="quiz-btn" data-choice="A">A) NtWaitForSingleObject</div>
+<div class="quiz-btn" data-choice="B">B) NtDelayExecution</div>
+<div class="quiz-btn" data-choice="C">C) NtRemoveIoCompletion</div>
+<div class="quiz-btn" data-choice="D">D) NtWaitForMultipleObjects</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q3: Why is the default thread pool significant for PoolParty?</p>
+<div class="quiz-btn" data-choice="A">A) It has no security restrictions</div>
+<div class="quiz-btn" data-choice="B">B) Every Windows process has one, providing a universal injection target</div>
+<div class="quiz-btn" data-choice="C">C) It runs with SYSTEM privileges</div>
+<div class="quiz-btn" data-choice="D">D) It cannot be monitored by EDRs</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Prev: Process Injection Landscape</a>
+<a class="primary" href="module3.html">Next: Thread Pool Internals &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

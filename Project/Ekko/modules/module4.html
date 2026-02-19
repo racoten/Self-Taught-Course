@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: ROP Gadgets & NtContinue - Ekko Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x23F1;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#8b5cf6;--accent2:#6d28d9;--gradient:linear-gradient(135deg,#8b5cf6,#6d28d9)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Ekko Course</h2>
+<span>Sleep Obfuscation Masterclass</span>
+</div>
+<a class="home-link" href="../Ekko_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Why Sleep Obfuscation Matters</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Timer Queues &amp; Waitable Timers</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. RC4 Encryption in Evasion</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module4.html"><span>4. ROP Gadgets &amp; NtContinue</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Ekko Timer Chain</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Context Manipulation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Stack &amp; Return Address Handling</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain, Detection &amp; Variants</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 4: ROP Gadgets &amp; NtContinue</h1>
+<p class="subtitle">Redirecting execution by overwriting the thread context &mdash; one CONTEXT at a time.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand what Return-Oriented Programming (ROP) is conceptually, how <code>NtContinue</code> provides a clean mechanism for setting the thread context to execute arbitrary functions, and why Ekko uses NtContinue as the callback for every timer instead of calling API functions directly.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. What Is Return-Oriented Programming?</h2>
+
+<p><strong>Return-Oriented Programming (ROP)</strong> is a code-reuse exploitation technique that chains together small sequences of existing code (called "gadgets") that each end with a <code>RET</code> instruction. By controlling the stack, an attacker can make the CPU "return" from one gadget into the next, executing a sequence of operations without injecting any new code.</p>
+
+<p>In classical ROP exploitation, the attacker corrupts the stack so that each <code>RET</code> pops the address of the next gadget from the stack, forming a chain of tiny code snippets that together perform arbitrary operations (like calling <code>VirtualProtect</code> to mark memory as executable, then jumping to shellcode).</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Classical ROP Chain on the Stack</h4>
+<div class="flow">
+<div class="flow box">Gadget 1<br><small>pop rcx; ret</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Gadget 2<br><small>pop rdx; ret</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Gadget 3<br><small>pop r8; ret</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Target Function<br><small>VirtualProtect</small></div>
+</div>
+</div>
+
+<p>Ekko does not use classical stack-based ROP chains. Instead, it uses a more elegant mechanism: <strong>NtContinue</strong>. Rather than manipulating the stack to chain gadgets via <code>RET</code> instructions, Ekko sets up complete CONTEXT structures for each operation and uses NtContinue to atomically load them into the CPU. This is sometimes called <strong>"context-oriented programming"</strong> or a <strong>"ROP-like"</strong> approach because the concept is similar (redirect execution to existing code), but the mechanism is different (CONTEXT replacement instead of stack manipulation).</p>
+
+<!-- ============================================================ -->
+<h2>2. NtContinue &mdash; The Context Restorer</h2>
+
+<p><code>NtContinue</code> is an undocumented ntdll function that restores a thread's execution context from a CONTEXT structure. It is normally used internally by Windows for exception handling &mdash; after an exception handler runs, NtContinue restores the thread to continue execution from where the exception occurred (or a modified location).</p>
+
+<pre><span class="lang-tag">C</span>// NtContinue - restores thread context
+// Exported by ntdll.dll
+//
+// NTSTATUS NtContinue(
+//     PCONTEXT ThreadContext,   // Context to restore
+//     BOOLEAN  RaiseAlert       // Whether to test for alert delivery
+// );
+
+// Ekko resolves it at runtime:
+PVOID NtContinue = GetProcAddress(
+    GetModuleHandleA("Ntdll"),
+    "NtContinue"
+);</pre>
+
+<div class="card warn">
+<h4>What NtContinue Actually Does</h4>
+<p>When called, NtContinue takes the CONTEXT structure pointed to by its first argument and <strong>replaces the entire thread state</strong> with the values in that structure. This includes:</p>
+<ul>
+<li><strong>RIP</strong> &mdash; The instruction pointer (where execution resumes)</li>
+<li><strong>RSP</strong> &mdash; The stack pointer</li>
+<li><strong>RCX, RDX, R8, R9</strong> &mdash; Function argument registers (x64 calling convention)</li>
+<li><strong>All other general-purpose registers</strong> &mdash; RAX, RBX, RBP, RSI, RDI, R10-R15</li>
+<li><strong>RFLAGS</strong> &mdash; Processor flags</li>
+<li><strong>Segment registers</strong> &mdash; CS, DS, ES, FS, GS, SS</li>
+<li><strong>XMM registers</strong> &mdash; Floating-point state</li>
+</ul>
+<p>NtContinue <strong>does not return</strong> to its caller. Execution continues at whatever address RIP was set to in the CONTEXT structure. This is what makes it so powerful for Ekko &mdash; you can redirect execution to any function with any arguments without constructing a traditional call frame.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. NtContinue as a Timer Callback</h2>
+
+<p>Recall from Module 2 that <code>CreateTimerQueueTimer</code> expects a callback with the signature:</p>
+
+<pre><span class="lang-tag">C</span>VOID CALLBACK WaitOrTimerCallback(
+    PVOID lpParameter,
+    BOOLEAN TimerOrWaitFired
+);</pre>
+
+<p>Ekko exploits a critical alignment between this callback signature and NtContinue's signature:</p>
+
+<table>
+<tr><th>Parameter Position</th><th>Register (x64)</th><th>Callback Signature</th><th>NtContinue Signature</th></tr>
+<tr><td>1st argument</td><td>RCX</td><td><code>PVOID lpParameter</code></td><td><code>PCONTEXT ThreadContext</code></td></tr>
+<tr><td>2nd argument</td><td>RDX</td><td><code>BOOLEAN TimerOrWaitFired</code></td><td><code>BOOLEAN RaiseAlert</code></td></tr>
+</table>
+
+<div class="card green">
+<h4>The Signature Match</h4>
+<p>Both the timer callback and NtContinue take a pointer as their first argument (in RCX). When Ekko registers NtContinue as the timer callback and passes a CONTEXT* as the parameter, the timer infrastructure calls <code>NtContinue(&CtxStruct, TimerFired)</code>. NtContinue reads the CONTEXT from RCX, replaces the thread state with those register values, and execution jumps to whatever RIP was set to in that context. The second argument (RaiseAlert/TimerOrWaitFired) is effectively ignored for Ekko's purposes &mdash; it just needs to be a valid boolean value, which it is.</p>
+</div>
+
+<pre><span class="lang-tag">C</span>// Ekko's pattern: NtContinue as callback, CONTEXT* as parameter
+CreateTimerQueueTimer(
+    &hNewTimer,
+    hTimerQueue,
+    NtContinue,      // Callback = NtContinue
+    &RopProtRW,      // Parameter = CONTEXT* (loaded into RCX)
+    100, 0,
+    WT_EXECUTEINTIMERTHREAD );
+
+// When this timer fires:
+// 1. Timer system calls: NtContinue(&RopProtRW, TRUE)
+// 2. NtContinue reads RopProtRW context
+// 3. Sets RIP = VirtualProtect, RCX = ImageBase, etc.
+// 4. Execution jumps to VirtualProtect with correct arguments</pre>
+
+<!-- ============================================================ -->
+<h2>4. The CONTEXT Structure</h2>
+
+<p>The <code>CONTEXT</code> structure is a large Windows structure that holds the complete CPU register state for a thread. On x64, it is defined in <code>winnt.h</code> and contains over 50 fields:</p>
+
+<pre><span class="lang-tag">C</span>// Simplified view of CONTEXT (x64) - key fields for Ekko
+typedef struct _CONTEXT {
+    // Control registers
+    DWORD64 Rip;    // Instruction pointer
+    DWORD64 Rsp;    // Stack pointer
+    DWORD   EFlags; // Processor flags
+
+    // Segment registers
+    WORD SegCs, SegDs, SegEs, SegFs, SegGs, SegSs;
+
+    // General-purpose registers
+    DWORD64 Rax, Rcx, Rdx, Rbx;
+    DWORD64 Rbp, Rsi, Rdi;
+    DWORD64 R8, R9, R10, R11, R12, R13, R14, R15;
+
+    // Floating-point / SSE state
+    M128A Xmm0, Xmm1, /* ... */ Xmm15;
+
+    // ... additional fields (debug registers, vector registers, etc.)
+    DWORD ContextFlags;  // Which parts of the context are valid
+
+} CONTEXT;</pre>
+
+<p>The full CONTEXT structure on x64 is <strong>1232 bytes</strong>. Ekko allocates six of these on the stack (plus the initial capture context), totaling over 8.5 KB of stack space for the context structures alone.</p>
+
+<!-- ============================================================ -->
+<h2>5. Building a CONTEXT for an API Call</h2>
+
+<p>Each CONTEXT in Ekko's chain is constructed by copying the captured baseline context and modifying the registers needed for a specific function call. Here is how Ekko constructs the VirtualProtect(RW) context:</p>
+
+<pre><span class="lang-tag">C</span>// Step 1: Copy the baseline context (captured from timer thread)
+memcpy( &RopProtRW, &CtxThread, sizeof(CONTEXT) );
+
+// Step 2: Set RIP to the target function
+RopProtRW.Rip = (DWORD64)VirtualProtect;
+
+// Step 3: Set arguments per x64 calling convention
+RopProtRW.Rcx = (DWORD64)ImageBase;         // arg1: lpAddress
+RopProtRW.Rdx = (DWORD64)ImageSize;         // arg2: dwSize
+RopProtRW.R8  = PAGE_READWRITE;             // arg3: flNewProtect
+RopProtRW.R9  = (DWORD64)&OldProtect;       // arg4: lpflOldProtect
+
+// Step 4: Adjust RSP for stack alignment
+RopProtRW.Rsp -= 8;</pre>
+
+<div class="card">
+<h4>The x64 Calling Convention (Microsoft)</h4>
+<p>On x64 Windows, the first four integer/pointer arguments are passed in registers <strong>RCX, RDX, R8, R9</strong> (in that order). Additional arguments go on the stack. The caller must also provide 32 bytes of "shadow space" on the stack above the return address for the callee to use. The RSP adjustment (<code>Rsp -= 8</code>) in Ekko is related to stack alignment, which is covered in detail in Module 6.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Why Not Call Functions Directly?</h2>
+
+<p>A natural question is: why go through all this complexity with CONTEXT structures and NtContinue instead of just calling VirtualProtect and SystemFunction032 directly?</p>
+
+<div class="card highlight">
+<h4>The Self-Encryption Paradox (Revisited)</h4>
+<p>Direct function calls cannot work because:</p>
+<ol>
+<li><strong>VirtualProtect(PAGE_READWRITE)</strong> would remove execute permission from the page containing the calling code, causing an immediate access violation</li>
+<li><strong>SystemFunction032</strong> would encrypt the code that is currently executing, turning the next instruction into encrypted garbage</li>
+<li>The calling code is <strong>inside the image region</strong> being protected and encrypted</li>
+</ol>
+<p>NtContinue solves this because it lives in <strong>ntdll.dll</strong>, which is outside the encrypted region. When the timer fires and calls NtContinue, execution is inside ntdll's code, not the implant's code. NtContinue then sets RIP to VirtualProtect (in kernel32.dll) or SystemFunction032 (in advapi32.dll) &mdash; all of which are system DLLs that are never encrypted by Ekko.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. NtContinue vs. SetThreadContext</h2>
+
+<p>Windows also provides <code>SetThreadContext</code> / <code>NtSetContextThread</code> for modifying a thread's registers. Why does Ekko use NtContinue instead?</p>
+
+<table>
+<tr><th>Aspect</th><th>NtContinue</th><th>NtSetContextThread</th></tr>
+<tr><td><strong>Self-modification</strong></td><td>Can modify the calling thread's own context</td><td>Requires the thread to be suspended (cannot modify self while running)</td></tr>
+<tr><td><strong>Return behavior</strong></td><td>Does not return &mdash; execution continues at new RIP</td><td>Returns to caller after setting context</td></tr>
+<tr><td><strong>Thread requirement</strong></td><td>Operates on current thread</td><td>Requires a thread handle</td></tr>
+<tr><td><strong>Use in callbacks</strong></td><td>Natural fit &mdash; callback calls NtContinue, context is replaced</td><td>Would need a second thread to suspend and modify the first</td></tr>
+</table>
+
+<p>NtContinue is the natural choice for timer callbacks because it allows the timer thread to modify its <strong>own</strong> context. The timer infrastructure calls NtContinue, which replaces the timer thread's registers, and execution seamlessly continues at the target function. No thread suspension or cross-thread manipulation is needed.</p>
+
+<!-- ============================================================ -->
+<h2>8. Security Implications of NtContinue</h2>
+
+<p>From a defensive perspective, NtContinue is a powerful primitive because it allows arbitrary code execution without creating new threads or injecting shellcode. The execution happens within the context of an existing, legitimate thread (the timer thread), using code that already exists in loaded system DLLs.</p>
+
+<div class="card warn">
+<h4>Detection Challenges</h4>
+<p>NtContinue-based execution is difficult to detect because:</p>
+<ul>
+<li>No new threads are created (the timer thread already exists)</li>
+<li>No shellcode is injected (all executed code is in signed system DLLs)</li>
+<li>The call stack appears legitimate (ntdll &rarr; timer dispatch &rarr; NtContinue &rarr; target API)</li>
+<li>Each operation is a legitimate Windows API call (VirtualProtect, SystemFunction032, WaitForSingleObject)</li>
+</ul>
+<p>The primary detection vector is monitoring for <code>CreateTimerQueueTimer</code> calls where the callback is set to NtContinue with a CONTEXT* parameter &mdash; a highly unusual pattern that no legitimate software uses.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>9. Putting It Together: The NtContinue Execution Model</h2>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">NtContinue Execution Flow (Single Timer)</h4>
+<div class="flow">
+<div class="flow box">Timer Fires<br><small>DueTime reached</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Timer Dispatch<br><small>Calls callback(param)</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">NtContinue(ctx)<br><small>Loads CONTEXT</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Target API<br><small>RIP = VirtualProtect</small></div>
+</div>
+</div>
+
+<p>Each timer follows the same pattern: the timer infrastructure calls NtContinue with a CONTEXT pointer, NtContinue replaces all registers, and execution jumps to the target API with the correct arguments already in registers. The target API executes normally and returns &mdash; but since the RSP and return address were set up by the context, the return flows back into the timer infrastructure, which then waits for the next timer to fire.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What does NtContinue do when called?</p>
+<div class="quiz-btn" data-choice="A">A) Creates a new thread with the specified context</div>
+<div class="quiz-btn" data-choice="B">B) Replaces the current thread's entire register state with the provided CONTEXT and resumes execution at the new RIP</div>
+<div class="quiz-btn" data-choice="C">C) Suspends the current thread and saves its context</div>
+<div class="quiz-btn" data-choice="D">D) Copies the current context into the provided CONTEXT structure</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: Why does Ekko use NtContinue as the timer callback instead of calling target APIs directly?</p>
+<div class="quiz-btn" data-choice="A">A) Direct API calls are slower than NtContinue</div>
+<div class="quiz-btn" data-choice="B">B) Windows does not allow VirtualProtect to be called from timer callbacks</div>
+<div class="quiz-btn" data-choice="C">C) Direct calls would execute from within the region being encrypted/protected, causing crashes</div>
+<div class="quiz-btn" data-choice="D">D) NtContinue provides built-in encryption functionality</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: On x64 Windows, which registers hold the first four function arguments?</p>
+<div class="quiz-btn" data-choice="A">A) RCX, RDX, R8, R9</div>
+<div class="quiz-btn" data-choice="B">B) RAX, RBX, RCX, RDX</div>
+<div class="quiz-btn" data-choice="C">C) RDI, RSI, RDX, RCX</div>
+<div class="quiz-btn" data-choice="D">D) R8, R9, R10, R11</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Prev: RC4 Encryption in Evasion</a>
+<a class="primary" href="module5.html">Next: The Ekko Timer Chain &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

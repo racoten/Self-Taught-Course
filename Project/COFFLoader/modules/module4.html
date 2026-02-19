@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: COFF Section Loading - COFFLoader Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4E6;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f97316;--accent2:#ea580c;--gradient:linear-gradient(135deg,#f97316,#ea580c)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>COFFLoader Course</h2><span>BOF Loader Masterclass</span></div>
+  <a class="home-link" href="../COFFLoader_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> What Are BOFs?</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> COFF Format Deep Dive</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> The BOF API Contract</a>
+  <a class="mod-link active" href="module4.html"><span class="diff d2">4</span> COFF Section Loading</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Symbol Resolution</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Relocation Processing</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Beacon Compat Layer</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Security</a>
+</nav>
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 4: COFF Section Loading</h1>
+<p class="subtitle">Parsing section headers, allocating memory, and copying raw section data into executable pages.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>Before COFFLoader can resolve symbols or apply relocations, it must load the raw section data into memory. This module covers exactly how COFFLoader parses the COFF file header, locates the section table, allocates memory for each section, and copies the raw data. This is the first phase of the <code>RunCOFF()</code> function.</p>
+</div>
+
+<h2>RunCOFF Entry Point</h2>
+<p>The main function that orchestrates everything is <code>RunCOFF()</code>. Its signature:</p>
+
+<pre><code><span class="lang-tag">C</span>int RunCOFF(
+    char*          functionname,   // entry function name (e.g., "go")
+    unsigned char* coff_data,      // raw COFF file bytes in memory
+    uint32_t       filesize,       // size of the COFF data
+    unsigned char* argumentdata,   // packed argument buffer (or NULL)
+    int            argumentSize    // size of argument buffer
+);</code></pre>
+
+<p>The first thing <code>RunCOFF()</code> does is cast the raw buffer to the COFF header structure and extract the critical offsets:</p>
+
+<pre><code><span class="lang-tag">C</span>// Step 1: Parse the COFF file header
+coff_file_header_t* coff_header = (coff_file_header_t*)coff_data;
+
+// Step 2: Locate the section table (immediately after the file header)
+coff_sect_t* sections = (coff_sect_t*)(coff_data + sizeof(coff_file_header_t));
+
+// Step 3: Locate the symbol table
+coff_sym_t* symbols = (coff_sym_t*)(coff_data + coff_header->PointerToSymbolTable);
+
+// Step 4: Locate the string table (immediately after symbol table)
+char* string_table = ((char*)symbols) + (coff_header->NumberOfSymbols * sizeof(coff_sym_t));</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Pointer Setup in RunCOFF</h4>
+<div class="flow">
+<div class="box">coff_data<br><small>raw buffer start</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">coff_header<br><small>+0 (20 bytes)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">sections[]<br><small>+20 (40 bytes each)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">raw data<br><small>variable</small></div>
+</div>
+</div>
+
+<h2>Section Memory Allocation</h2>
+<p>COFFLoader allocates a separate memory region for each section using <code>VirtualAlloc</code>. The key detail: all sections are allocated with <code>PAGE_EXECUTE_READWRITE</code> permissions, regardless of whether they contain code or data.</p>
+
+<pre><code><span class="lang-tag">C</span>// COFFLoader allocates memory for each section
+// sectionMapping[] stores the base address of each allocated region
+char** sectionMapping = (char**)calloc(
+    coff_header->NumberOfSections,
+    sizeof(char*)
+);
+
+for (int i = 0; i < coff_header->NumberOfSections; i++) {
+    sectionMapping[i] = (char*)VirtualAlloc(
+        NULL,                         // let OS choose the address
+        sections[i].SizeOfRawData,    // size of this section
+        MEM_COMMIT | MEM_RESERVE,     // commit the pages immediately
+        PAGE_EXECUTE_READWRITE        // RWX permissions
+    );
+
+    // Copy the raw section data from the COFF file into the new allocation
+    if (sections[i].SizeOfRawData > 0) {
+        memcpy(
+            sectionMapping[i],
+            coff_data + sections[i].PointerToRawData,
+            sections[i].SizeOfRawData
+        );
+    }
+}</code></pre>
+
+<div class="card warn">
+<h4>Why RWX for Everything?</h4>
+<p>COFFLoader allocates all sections as PAGE_EXECUTE_READWRITE. This is a simplification: ideally, .text would be RX, .rdata would be R, and .data/.bss would be RW. Using RWX for everything avoids the complexity of tracking per-section permissions but creates a larger detection surface. RWX memory regions are uncommon in legitimate applications and are flagged by many EDR heuristics. Production-quality loaders (like bof-launcher) apply proper per-section protections after relocations are applied.</p>
+</div>
+
+<h2>Handling Different Section Types</h2>
+<p>Different sections require different handling during the loading phase:</p>
+
+<table>
+<tr><th>Section</th><th>SizeOfRawData</th><th>PointerToRawData</th><th>Loading Behavior</th></tr>
+<tr><td>.text</td><td>Non-zero</td><td>Non-zero</td><td>Copy raw bytes (compiled machine code)</td></tr>
+<tr><td>.data</td><td>Non-zero or 0</td><td>Non-zero or 0</td><td>Copy initialized data, or allocate zero-filled</td></tr>
+<tr><td>.rdata</td><td>Non-zero</td><td>Non-zero</td><td>Copy read-only data (string literals, constants)</td></tr>
+<tr><td>.bss</td><td>0</td><td>0</td><td>Allocate zero-filled memory (VirtualAlloc zero-initializes)</td></tr>
+<tr><td>.xdata</td><td>Non-zero</td><td>Non-zero</td><td>Copy exception unwind data</td></tr>
+<tr><td>.pdata</td><td>Non-zero</td><td>Non-zero</td><td>Copy function table entries</td></tr>
+</table>
+
+<h3>The .bss Section</h3>
+<p>The <code>.bss</code> section is special: it contains uninitialized data (global variables declared without an initial value). It has <code>SizeOfRawData == 0</code> because there is nothing to store in the file -- all values are zero at startup. The section's <code>VirtualSize</code> field indicates how much memory to allocate. Since <code>VirtualAlloc</code> zero-initializes committed pages, the .bss data is automatically correct after allocation.</p>
+
+<pre><code><span class="lang-tag">C</span>// For .bss sections:
+//   sections[i].SizeOfRawData == 0
+//   sections[i].Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA
+//
+// COFFLoader checks: if SizeOfRawData > 0, copy data.
+// Otherwise, the VirtualAlloc already provides zero-filled memory.
+if (sections[i].SizeOfRawData > 0) {
+    memcpy(sectionMapping[i],
+           coff_data + sections[i].PointerToRawData,
+           sections[i].SizeOfRawData);
+}</code></pre>
+
+<h2>Section Characteristics Deep Dive</h2>
+<p>The <code>Characteristics</code> field in each section header is a bitmask that describes the section's properties. COFFLoader defines these flags:</p>
+
+<pre><code><span class="lang-tag">C</span>// Content type flags
+#define IMAGE_SCN_CNT_CODE               0x00000020  // contains executable code
+#define IMAGE_SCN_CNT_UNINITIALIZED_DATA 0x00000080  // contains uninitialized data
+
+// Memory permission flags
+#define IMAGE_SCN_MEM_EXECUTE            0x20000000  // can be executed
+#define IMAGE_SCN_MEM_READ               0x40000000  // can be read
+#define IMAGE_SCN_MEM_WRITE              0x80000000  // can be written
+
+// Other flags
+#define IMAGE_SCN_MEM_DISCARDABLE        0x02000000  // can be discarded after loading
+#define IMAGE_SCN_ALIGN_16BYTES          0x00500000  // 16-byte alignment requirement</code></pre>
+
+<h3>Determining Section Purpose from Characteristics</h3>
+<pre><code><span class="lang-tag">C</span>// How to identify section types from characteristics:
+
+// .text section: code + execute + read
+// Characteristics = 0x60000020
+//   IMAGE_SCN_CNT_CODE (0x20) | IMAGE_SCN_MEM_EXECUTE (0x20000000) | IMAGE_SCN_MEM_READ (0x40000000)
+
+// .data section: initialized + read + write
+// Characteristics = 0xC0000040
+//   IMAGE_SCN_CNT_INITIALIZED_DATA (0x40) | IMAGE_SCN_MEM_READ (0x40000000) | IMAGE_SCN_MEM_WRITE (0x80000000)
+
+// .rdata section: initialized + read only
+// Characteristics = 0x40000040
+//   IMAGE_SCN_CNT_INITIALIZED_DATA (0x40) | IMAGE_SCN_MEM_READ (0x40000000)
+
+// .bss section: uninitialized + read + write
+// Characteristics = 0xC0000080
+//   IMAGE_SCN_CNT_UNINITIALIZED_DATA (0x80) | IMAGE_SCN_MEM_READ (0x40000000) | IMAGE_SCN_MEM_WRITE (0x80000000)</code></pre>
+
+<h2>The sectionMapping Array</h2>
+<p>After loading, the <code>sectionMapping</code> array is the bridge between the COFF file's section indices (0-based) and the actual memory addresses where those sections live. Every subsequent operation (symbol resolution, relocation application) uses this array to convert section references to real pointers.</p>
+
+<pre><code><span class="lang-tag">TEXT</span>sectionMapping[] after loading a typical BOF:
+
+  Index  Section    Base Address          Size
+  [0]    .text      0x00007FF8A1230000    0x15C  (348 bytes of code)
+  [1]    .rdata     0x00007FF8A1240000    0x02A  (42 bytes of strings)
+  [2]    .data      0x00007FF8A1250000    0x010  (16 bytes of globals)
+  [3]    .xdata     0x00007FF8A1260000    0x00C  (12 bytes of unwind info)
+  [4]    .pdata     0x00007FF8A1270000    0x00C  (12 bytes of func table)
+
+Each address is independent (VirtualAlloc does not guarantee contiguous pages).
+Relocations must account for the actual distance between sections.</code></pre>
+
+<div class="card green">
+<h4>Why Separate Allocations?</h4>
+<p>COFFLoader allocates each section independently rather than as one contiguous block. This means sections can be at arbitrary addresses, potentially far apart in the virtual address space. This is important for relocation processing: <code>REL32</code> relocations encode a 32-bit signed offset, which has a range of +/- 2 GB. If sections are more than 2 GB apart, REL32 relocations will fail. In practice, VirtualAlloc typically returns addresses in the same region, but a production loader should allocate a single contiguous block and partition it into sections to guarantee proximity.</p>
+</div>
+
+<h2>Function Pointer Table Allocation</h2>
+<p>After loading sections, COFFLoader allocates a <strong>function pointer table</strong> -- a block of memory that stores resolved addresses for external function call relocations. This is where the <code>__imp_</code> prefix convention connects: when the BOF code references <code>__imp_KERNEL32$GetProcAddress</code>, it expects to read a function pointer from a known memory location. COFFLoader allocates this table based on the total number of relocations across all sections and fills it during relocation processing (Module 6).</p>
+
+<pre><code><span class="lang-tag">C</span>// Count total relocations across all sections
+int totalRelocations = 0;
+for (int i = 0; i < coff_header->NumberOfSections; i++) {
+    totalRelocations += sections[i].NumberOfRelocations;
+}
+
+// Allocate the function pointer table
+// One 8-byte slot per relocation (on x64)
+char* functionMapping = (char*)VirtualAlloc(
+    NULL,
+    totalRelocations * sizeof(uint64_t),  // 8 bytes per relocation
+    MEM_COMMIT | MEM_RESERVE,
+    PAGE_EXECUTE_READWRITE  // needs to be readable for pointer dereference
+);</code></pre>
+
+<p>The <code>functionMapping</code> buffer is indexed by a sequential counter that increments each time an external function call relocation is processed. When the <code>N</code>-th external function relocation is resolved to address <code>0x00007FFA12340000</code>, that address is stored at <code>functionMapping[N * 8]</code>. The relocation is then patched to reference this slot. Note: the index is NOT the symbol table index -- it is a counter that tracks how many external function relocations have been processed so far.</p>
+
+<h2>Complete Loading Phase Summary</h2>
+<pre><code><span class="lang-tag">TEXT</span>Section Loading Phase (RunCOFF steps 1-5):
+
+1. Cast coff_data to coff_file_header_t*
+2. Compute pointers: sections[], symbols[], string_table
+3. Allocate sectionMapping[NumberOfSections] array
+4. For each section i:
+   a. VirtualAlloc(NULL, SizeOfRawData, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+   b. if SizeOfRawData > 0: memcpy(sectionMapping[i], coff_data + PointerToRawData, SizeOfRawData)
+5. Count total relocations across all sections (relocationCount)
+6. Allocate functionMapping[relocationCount * 8] for resolved function pointers
+
+After this phase:
+  - All section data is in RWX memory
+  - sectionMapping[] maps section index -> memory address
+  - functionMapping is allocated but empty (filled during relocation processing in Module 6)
+  - No relocations applied yet (code contains placeholder offsets)</code></pre>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: Section Loading</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: What memory protection does COFFLoader use when allocating section memory?</p>
+<label data-opt="0"><input type="radio" name="q1_4"> PAGE_READONLY for all sections</label>
+<label data-opt="1"><input type="radio" name="q1_4"> PAGE_EXECUTE_READ for .text, PAGE_READWRITE for .data</label>
+<label data-opt="2"><input type="radio" name="q1_4"> PAGE_EXECUTE_READWRITE for all sections regardless of type</label>
+<label data-opt="3"><input type="radio" name="q1_4"> PAGE_NOACCESS initially, then changed after relocation</label>
+<div class="explain">COFFLoader simplifies memory management by allocating all sections with PAGE_EXECUTE_READWRITE. While this works correctly, it creates detectable RWX memory regions. A hardened loader would apply proper per-section protections after relocations are complete.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: How does COFFLoader handle .bss sections that have SizeOfRawData == 0?</p>
+<label data-opt="0"><input type="radio" name="q2_4"> VirtualAlloc zero-initializes the pages, so no memcpy is needed</label>
+<label data-opt="1"><input type="radio" name="q2_4"> It explicitly calls memset to zero the memory</label>
+<label data-opt="2"><input type="radio" name="q2_4"> It skips .bss sections entirely</label>
+<label data-opt="3"><input type="radio" name="q2_4"> It reads zero-data from a special section in the COFF file</label>
+<div class="explain">VirtualAlloc with MEM_COMMIT always returns zero-initialized pages. Since .bss contains uninitialized (zero) data and SizeOfRawData is 0, COFFLoader simply does not copy anything -- the allocation is already correct. The check "if SizeOfRawData > 0" naturally skips the memcpy for .bss sections.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q3: What is the purpose of the functionMapping buffer?</p>
+<label data-opt="0"><input type="radio" name="q3_4"> It stores the compiled machine code for each function</label>
+<label data-opt="1"><input type="radio" name="q3_4"> It stores resolved function pointers for external call relocations, indexed by a sequential counter</label>
+<label data-opt="2"><input type="radio" name="q3_4"> It maps section names to section indices</label>
+<label data-opt="3"><input type="radio" name="q3_4"> It holds the Beacon API callback addresses</label>
+<div class="explain">The functionMapping buffer is a table of function pointers, one slot per external function call relocation processed. When an external symbol like __imp_KERNEL32$GetProcAddress is resolved during relocation processing, the resolved address is stored in the next available functionMapping slot (indexed by a sequential counter, not by symbol table index). The relocation then points the BOF's code at this table slot so the indirect call reaches the correct function.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Previous: The BOF API Contract</a>
+<a class="primary" href="module5.html">Next: Symbol Resolution &amp; Linking &rarr;</a>
+</div>
+</main>
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

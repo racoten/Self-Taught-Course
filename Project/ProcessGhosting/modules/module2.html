@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: PE Tampering Techniques Overview - ProcessGhosting Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A8;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#6366f1;--accent2:#4f46e5;--gradient:linear-gradient(135deg,#6366f1,#4f46e5)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ProcessGhosting</h2>
+<span>Ghost Process Evasion</span>
+</div>
+<a class="home-link" href="../ProcessGhosting_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Creation Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module2.html"><span>2. PE Tampering Overview</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. File States &amp; Delete-Pending</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Creating the Ghost File</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Section Mapping from Ghost</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Process &amp; Thread Creation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. AV/EDR Scan Timing</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: PE Tampering Techniques Overview</h1>
+<p class="subtitle">The evolution of PE image tampering &mdash; from Process Hollowing to Ghosting, each technique exploiting a different gap in the process creation chain.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Survey the four major PE tampering techniques &mdash; Process Hollowing, Process Doppelg&auml;nging, Process Herpaderping, and Process Ghosting &mdash; understanding how each one manipulates a different stage of the file &rarr; section &rarr; process pipeline, what weaknesses each addresses, and the evolutionary progression that led to Ghosting.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Core Problem All Techniques Share</h2>
+
+<p>All PE tampering techniques try to solve the same problem: <strong>execute malicious code in a process that appears legitimate to security tools</strong>. The Windows process creation chain (file &rarr; section &rarr; process &rarr; thread) gives security tools multiple inspection points. Each tampering technique targets a different gap between these inspection points.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Inspection Points in Process Creation</h4>
+<div class="flow">
+<div class="flow box">File Written<br><small>AV scans file</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Section Created<br><small>Kernel callback</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">First Thread Inserted<br><small>PsSetCreateProcessNotifyRoutineEx fires</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Thread Starts<br><small>Execution begins</small></div>
+</div>
+</div>
+
+<p>The trick is to ensure that at each inspection point, security tools either see a clean file, see no file at all, or cannot access the file to scan it.</p>
+
+<!-- ============================================================ -->
+<h2>2. Process Hollowing (2004+)</h2>
+
+<p>Process Hollowing is the oldest and most well-known technique. It creates a legitimate process in a suspended state, then replaces its memory contents with malicious code before resuming.</p>
+
+<div class="card">
+<h4>Hollowing Flow</h4>
+<ol>
+<li>Create a legitimate process (e.g., <code>svchost.exe</code>) in a <strong>suspended</strong> state using <code>CreateProcessW</code> with <code>CREATE_SUSPENDED</code></li>
+<li>Unmap the original executable image using <code>NtUnmapViewOfSection</code></li>
+<li>Allocate new memory in the target process with <code>VirtualAllocEx</code></li>
+<li>Write the malicious PE into the allocated memory with <code>WriteProcessMemory</code></li>
+<li>Update the PEB image base and thread context (entry point in <code>EAX</code>/<code>RCX</code>) to point to the new image</li>
+<li>Resume the main thread with <code>ResumeThread</code></li>
+</ol>
+</div>
+
+<pre><code>// Simplified Process Hollowing pseudocode
+CreateProcessW(L"svchost.exe", ..., CREATE_SUSPENDED, ..., &pi);
+
+// Unmap the original image
+NtUnmapViewOfSection(pi.hProcess, pImageBase);
+
+// Allocate and write malicious PE
+LPVOID pNewBase = VirtualAllocEx(pi.hProcess,
+    pPreferredBase, imageSize,
+    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(pi.hProcess, pNewBase, maliciousPE, imageSize, NULL);
+
+// Fix up PEB and thread context
+// ... update ImageBaseAddress in PEB ...
+// ... set thread context RCX to new entry point ...
+
+ResumeThread(pi.hThread);</code></pre>
+
+<div class="card warn">
+<h4>Why Hollowing Is Detected</h4>
+<ul>
+<li><strong>Memory mismatch</strong>: The in-memory image does not match the file on disk. Memory scanning tools compare mapped sections to their backing files.</li>
+<li><strong>Unmapped original</strong>: The original image is unmapped, which is highly unusual and detectable.</li>
+<li><strong>RWX memory</strong>: The new allocation often uses <code>PAGE_EXECUTE_READWRITE</code>, a red flag.</li>
+<li><strong>PEB modification</strong>: Changing the image base in the PEB is detectable.</li>
+<li><strong>No file change</strong>: The original file on disk is untouched &mdash; the mismatch between file and memory is easy to spot.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Process Doppelg&auml;nging (2017)</h2>
+
+<p>Presented by Tal Liberman and Eugene Kogan of enSilo at Black Hat Europe 2017, Process Doppelg&auml;nging uses <strong>NTFS transactions</strong> (TxF) to create a process from a file that never actually exists on disk in its malicious form.</p>
+
+<div class="card">
+<h4>Doppelg&auml;nging Flow</h4>
+<ol>
+<li>Create an NTFS transaction using <code>NtCreateTransaction</code></li>
+<li>Open a file <strong>within the transaction</strong> using <code>NtCreateFile</code> &mdash; this file is transacted, meaning changes are only visible within the transaction context</li>
+<li>Write the malicious PE content to the transacted file</li>
+<li>Create a <code>SEC_IMAGE</code> section from the transacted file handle using <code>NtCreateSection</code></li>
+<li><strong>Rollback</strong> the transaction using <code>NtRollbackTransaction</code> &mdash; the file reverts to its original state (or never existed), but the section object persists</li>
+<li>Create a process from the section using <code>NtCreateProcessEx</code></li>
+</ol>
+</div>
+
+<pre><code>// Process Doppelganging key steps
+HANDLE hTransaction, hFile, hSection;
+
+// 1. Create NTFS transaction
+NtCreateTransaction(&hTransaction, ...);
+
+// 2. Create file within transaction
+NtCreateFile(&hFile, ...,
+    hTransaction,  // transacted operation
+    FILE_SUPERSEDE, ...);
+
+// 3. Write malicious PE to transacted file
+NtWriteFile(hFile, ..., maliciousPE, peSize, ...);
+
+// 4. Create image section from transacted file
+NtCreateSection(&hSection, ..., SEC_IMAGE, hFile);
+
+// 5. Rollback - file disappears, section remains
+NtRollbackTransaction(hTransaction, TRUE);
+
+// 6. Create process from the persisted section
+NtCreateProcessEx(&hProcess, ..., hSection, ...);</code></pre>
+
+<div class="card green">
+<h4>Doppelg&auml;nging Advantages</h4>
+<ul>
+<li>The malicious file <strong>never exists on disk</strong> in a committed state &mdash; it only exists within the rolled-back transaction</li>
+<li>No process is created in a suspended state and then modified</li>
+<li>No <code>NtUnmapViewOfSection</code> calls</li>
+<li>The process image appears file-backed with a valid path</li>
+</ul>
+</div>
+
+<div class="card warn">
+<h4>Doppelg&auml;nging Limitations</h4>
+<ul>
+<li><strong>TxF is deprecated</strong>: Microsoft deprecated NTFS transactions starting in Windows 10, and monitoring for TxF API usage became a strong detection signal</li>
+<li><strong>Kernel callbacks</strong>: <code>PsSetCreateProcessNotifyRoutineEx</code> fires when the first thread is inserted (via <code>NtCreateThreadEx</code>), providing the <code>FileObject</code> for inspection of the transacted file</li>
+<li><strong>Stability issues</strong>: TxF interactions with antivirus minifilter drivers can cause BSODs on some systems</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Process Herpaderping (2020)</h2>
+
+<p>Created by Johnny Shaw (jxy-s), Process Herpaderping exploits the gap between when the section is created from a file and when AV/EDR gets around to scanning that file in response to process creation notifications.</p>
+
+<div class="card">
+<h4>Herpaderping Flow</h4>
+<ol>
+<li>Create a new file on disk using <code>NtCreateFile</code></li>
+<li>Write the <strong>malicious</strong> PE content to the file</li>
+<li>Create a <code>SEC_IMAGE</code> section from the file using <code>NtCreateSection</code> &mdash; the section now contains the malicious image</li>
+<li><strong>Overwrite</strong> the file on disk with <strong>benign</strong> content (e.g., a clean copy of <code>notepad.exe</code>)</li>
+<li>Close the file handle</li>
+<li>Create a process from the section &mdash; process runs malicious code, but the file on disk is now benign</li>
+</ol>
+</div>
+
+<pre><code>// Process Herpaderping key steps
+HANDLE hFile, hSection;
+
+// 1. Create file, write malicious PE
+NtCreateFile(&hFile, ..., FILE_SUPERSEDE, ...);
+NtWriteFile(hFile, ..., maliciousPE, peSize, ...);
+
+// 2. Create section while file has malicious content
+NtCreateSection(&hSection, ..., SEC_IMAGE, hFile);
+
+// 3. Overwrite file with benign content AFTER section creation
+SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+NtWriteFile(hFile, ..., benignPE, benignSize, ...);
+
+// 4. Close file - on-disk content is now benign
+NtClose(hFile);
+
+// 5. Process runs from the malicious section
+NtCreateProcessEx(&hProcess, ..., hSection, ...);</code></pre>
+
+<p>The key insight is that the section captures the file&rsquo;s content at creation time. Modifying the file afterward does not change the section. When AV scans the file in response to the process creation callback, it sees benign content.</p>
+
+<div class="card warn">
+<h4>Herpaderping Limitations</h4>
+<ul>
+<li><strong>File still exists on disk</strong>: The file is present and scannable &mdash; the AV just sees benign content. But sophisticated EDR can detect the mismatch between the section&rsquo;s content and the current file content by comparing the section&rsquo;s <code>CONTROL_AREA</code> to the file.</li>
+<li><strong>Minifilter detection</strong>: NTFS minifilter drivers that intercept <code>IRP_MJ_WRITE</code> can detect the overwrite of an image file after section creation.</li>
+<li><strong>File on disk is evidence</strong>: Even though the file contains benign content, its presence, creation time, and metadata may be suspicious.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Process Ghosting (2021)</h2>
+
+<p>Process Ghosting, discovered by Gabriel Landau of Elastic Security and implemented as a proof-of-concept by hasherezade (<code>process_ghosting</code> on GitHub), takes the evolution one step further. Instead of modifying the file after section creation (Herpaderping), it <strong>deletes</strong> the file entirely. The process runs from a section whose backing file no longer exists.</p>
+
+<div class="card green">
+<h4>Ghosting Flow</h4>
+<ol>
+<li>Create a new file on disk using <code>NtCreateFile</code></li>
+<li>Put the file into the <strong>delete-pending</strong> state using <code>NtSetInformationFile</code> with <code>FileDispositionInformation</code></li>
+<li>Write the malicious PE content to the file (the file is delete-pending but the handle is still valid for writes)</li>
+<li>Create a <code>SEC_IMAGE</code> section from the delete-pending file handle</li>
+<li>Close the file handle &mdash; the file is deleted from disk because it was marked delete-pending</li>
+<li>Create a process from the section using <code>NtCreateProcessEx</code></li>
+</ol>
+</div>
+
+<div class="card highlight">
+<h4>Why Ghosting Beats Herpaderping</h4>
+<p>In Herpaderping, the file on disk still exists (with benign content). A sophisticated scanner could notice the discrepancy between the section&rsquo;s content and the file, or flag the overwrite pattern. In Ghosting, <strong>there is no file on disk at all</strong>. When AV tries to open the file for scanning, it either gets <code>STATUS_FILE_DELETED</code> (if the delete has completed) or <code>STATUS_DELETE_PENDING</code> (if the file is still in the delete-pending state). Either way, the scan cannot proceed.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Evolution Comparison</h2>
+
+<table>
+<tr><th>Technique</th><th>Year</th><th>File State at Process Creation</th><th>What AV Sees</th><th>Key Weakness</th></tr>
+<tr><td><strong>Hollowing</strong></td><td>~2004</td><td>Original file intact on disk</td><td>Memory/file mismatch</td><td>Unmapped sections, PEB mods, RWX</td></tr>
+<tr><td><strong>Doppelg&auml;nging</strong></td><td>2017</td><td>Transaction rolled back; file reverted</td><td>Clean file (original or non-existent)</td><td>TxF deprecated, driver conflicts</td></tr>
+<tr><td><strong>Herpaderping</strong></td><td>2020</td><td>File overwritten with benign content</td><td>Benign file content</td><td>File still exists, overwrite detectable</td></tr>
+<tr><td><strong>Ghosting</strong></td><td>2021</td><td>File deleted (or delete-pending)</td><td>No file to scan at all</td><td>Delete-pending state detectable by kernel drivers</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>7. The Technique Family Tree</h2>
+
+<p>Each technique builds on the lessons of the previous one:</p>
+
+<div class="card">
+<h4>Evolutionary Progression</h4>
+<table>
+<tr><th>Problem</th><th>Solution</th><th>Next Problem</th></tr>
+<tr><td>Need to run malicious code in a process</td><td><strong>Hollowing</strong>: Replace process memory</td><td>Memory/file mismatch is obvious</td></tr>
+<tr><td>File and memory must match</td><td><strong>Doppelg&auml;nging</strong>: Use TxF so file never commits</td><td>TxF is deprecated, driver issues</td></tr>
+<tr><td>Need non-TxF approach</td><td><strong>Herpaderping</strong>: Overwrite file after section creation</td><td>File still on disk, overwrite detectable</td></tr>
+<tr><td>File on disk is still evidence</td><td><strong>Ghosting</strong>: Delete file after section creation</td><td>Delete-pending state can be detected at kernel level</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. What They All Have in Common</h2>
+
+<p>Despite their differences, all four techniques share core principles:</p>
+
+<ul>
+<li>They all exploit the separation between <code>NtCreateSection</code> and <code>NtCreateProcessEx</code></li>
+<li>They all rely on the fact that sections persist independently of their backing files</li>
+<li>They all use native NT APIs (<code>NtCreateFile</code>, <code>NtCreateSection</code>, <code>NtCreateProcessEx</code>, <code>NtCreateThreadEx</code>) rather than the higher-level Win32 API</li>
+<li>They all require setting up process parameters and the PEB manually</li>
+<li>They all target the gap between when the kernel captures the image content and when security tools inspect the file</li>
+</ul>
+
+<p>Process Ghosting represents the current state of the art in this family, eliminating the backing file entirely rather than modifying it.</p>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="D">
+<p>Q1: Which technique uses NTFS transactions (TxF) to create a process from a file that was never committed to disk?</p>
+<div class="quiz-btn" data-choice="A">A) Process Hollowing</div>
+<div class="quiz-btn" data-choice="B">B) Process Herpaderping</div>
+<div class="quiz-btn" data-choice="C">C) Process Ghosting</div>
+<div class="quiz-btn" data-choice="D">D) Process Doppelg&auml;nging</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q2: What is the key difference between Herpaderping and Ghosting?</p>
+<div class="quiz-btn" data-choice="A">A) Herpaderping uses NtCreateSection while Ghosting does not</div>
+<div class="quiz-btn" data-choice="B">B) Herpaderping overwrites the file with benign content; Ghosting deletes the file entirely</div>
+<div class="quiz-btn" data-choice="C">C) Herpaderping works on Windows 10; Ghosting only works on Windows 7</div>
+<div class="quiz-btn" data-choice="D">D) Herpaderping modifies the section; Ghosting modifies the process</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: What is the main weakness of Process Hollowing that all later techniques sought to address?</p>
+<div class="quiz-btn" data-choice="A">A) It requires administrator privileges</div>
+<div class="quiz-btn" data-choice="B">B) It only works with 32-bit processes</div>
+<div class="quiz-btn" data-choice="C">C) The in-memory image does not match the file on disk, making the mismatch easily detectable</div>
+<div class="quiz-btn" data-choice="D">D) It requires a kernel driver to function</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Prev: Process Creation Internals</a>
+<a class="primary" href="module3.html">Next: File System States &amp; Delete-Pending &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

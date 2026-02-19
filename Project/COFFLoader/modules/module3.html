@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: The BOF API Contract - COFFLoader Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4E6;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f97316;--accent2:#ea580c;--gradient:linear-gradient(135deg,#f97316,#ea580c)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>COFFLoader Course</h2><span>BOF Loader Masterclass</span></div>
+  <a class="home-link" href="../COFFLoader_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> What Are BOFs?</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> COFF Format Deep Dive</a>
+  <a class="mod-link active" href="module3.html"><span class="diff d1">3</span> The BOF API Contract</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> COFF Section Loading</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Symbol Resolution</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Relocation Processing</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Beacon Compat Layer</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Security</a>
+</nav>
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: The BOF API Contract</h1>
+<p class="subtitle">The API that every BOF author must know: data parsing, output, and the contract between BOF and loader.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>BOFs cannot use the C runtime library (printf, malloc, etc.) because the CRT is never initialized. Instead, BOFs communicate with the loader through the <strong>Beacon API</strong> -- a set of functions declared in <code>beacon.h</code>. COFFLoader implements a compatibility layer for these functions so BOFs written for Cobalt Strike work unchanged. This module covers the API contract from the BOF author's perspective.</p>
+</div>
+
+<h2>The beacon.h Header</h2>
+<p>Every BOF includes <code>beacon.h</code>, which declares the Beacon API functions. These functions are not defined in the BOF -- they are <strong>external symbols</strong> that the loader resolves at load time. The BOF calls them through function pointers that the loader patches via relocations.</p>
+
+<p>The API falls into four categories:</p>
+<table>
+<tr><th>Category</th><th>Functions</th><th>Purpose</th></tr>
+<tr><td>Data Parsing</td><td>BeaconDataParse, BeaconDataInt, BeaconDataShort, BeaconDataLength, BeaconDataExtract</td><td>Parse the argument buffer passed to <code>go()</code></td></tr>
+<tr><td>Output</td><td>BeaconPrintf, BeaconOutput</td><td>Send text/data back to the operator</td></tr>
+<tr><td>Formatting</td><td>BeaconFormatAlloc, BeaconFormatFree, BeaconFormatAppend, BeaconFormatPrintf, BeaconFormatToString, BeaconFormatInt, BeaconFormatReset</td><td>Build structured output buffers</td></tr>
+<tr><td>Process/Token</td><td>BeaconUseToken, BeaconRevertToken, BeaconIsAdmin, BeaconGetSpawnTo, BeaconSpawnTemporaryProcess, BeaconInjectProcess, BeaconCleanupProcess</td><td>Token manipulation and process spawning</td></tr>
+</table>
+
+<h2>The datap Structure</h2>
+<p>Arguments are passed to a BOF as a raw byte buffer. The <code>datap</code> structure is a cursor-based parser that walks through this buffer extracting typed values:</p>
+
+<pre><code><span class="lang-tag">C</span>typedef struct {
+    char* original;   // pointer to the start of the buffer
+    char* buffer;     // current read position (advances as you extract)
+    int   length;     // remaining bytes from buffer to end
+    int   size;       // total size of the parseable region
+} datap;</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">datap Parsing Model</h4>
+<div class="flow">
+<div class="box">original<br><small>start of buffer</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">buffer<br><small>current cursor</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">remaining<br><small>length bytes left</small></div>
+</div>
+</div>
+
+<h2>Data Parsing Functions</h2>
+
+<h3>BeaconDataParse</h3>
+<pre><code><span class="lang-tag">C</span>void BeaconDataParse(datap* parser, char* buffer, int size);
+
+// Initializes the parser with a buffer.
+// IMPORTANT: Skips the first 4 bytes (size prefix in CS argument format).
+// After this call:
+//   parser->original = buffer
+//   parser->buffer   = buffer + 4
+//   parser->length   = size - 4
+//   parser->size     = size - 4</code></pre>
+
+<div class="card warn">
+<h4>The 4-Byte Skip</h4>
+<p>Cobalt Strike's argument packing format prepends a 4-byte little-endian length prefix to the argument buffer. <code>BeaconDataParse</code> skips these 4 bytes automatically. If you are building argument buffers manually for COFFLoader, you must include this 4-byte prefix or your data will be misaligned.</p>
+</div>
+
+<h3>BeaconDataInt</h3>
+<pre><code><span class="lang-tag">C</span>int BeaconDataInt(datap* parser);
+
+// Extracts a 4-byte (32-bit) integer from the current cursor position.
+// Advances parser->buffer by 4 and decrements parser->length by 4.
+// Returns 0 if insufficient data remains.</code></pre>
+
+<h3>BeaconDataShort</h3>
+<pre><code><span class="lang-tag">C</span>short BeaconDataShort(datap* parser);
+
+// Extracts a 2-byte (16-bit) short from the current cursor position.
+// Advances parser->buffer by 2 and decrements parser->length by 2.
+// Returns 0 if insufficient data remains.</code></pre>
+
+<h3>BeaconDataLength</h3>
+<pre><code><span class="lang-tag">C</span>int BeaconDataLength(datap* parser);
+
+// Returns the number of bytes remaining in the buffer (parser->length).
+// Does not modify the cursor position.</code></pre>
+
+<h3>BeaconDataExtract</h3>
+<pre><code><span class="lang-tag">C</span>char* BeaconDataExtract(datap* parser, int* size);
+
+// Extracts a length-prefixed binary blob:
+//   1. Reads a 4-byte length prefix from the current position
+//   2. Returns a pointer to the data immediately after the prefix
+//   3. Advances the cursor past the data
+//   4. Sets *size to the extracted length
+// This is how strings and byte arrays are packed in CS argument format.</code></pre>
+
+<h2>Argument Buffer Format</h2>
+<p>When Cobalt Strike (or COFFLoader with hex arguments) passes data to a BOF, the buffer is packed in a specific format:</p>
+
+<pre><code><span class="lang-tag">TEXT</span>Argument Buffer Layout:
+
++---4 bytes---+---4 bytes---+---N bytes---+---4 bytes---+---M bytes---+
+| total_size  | len_of_str1 |   string1   | len_of_str2 |   string2   |
++-------------+-------------+-------------+-------------+-------------+
+
+Example: Two strings "hello" and "world"
+  0x12000000   // total size (18 bytes of payload)
+  0x06000000   // length 6 (including null terminator)
+  68656C6C6F00 // "hello\0"
+  0x06000000   // length 6
+  776F726C6400 // "world\0"
+
+The first 4 bytes (total_size) are skipped by BeaconDataParse.
+Each subsequent value is extracted by BeaconDataInt, BeaconDataShort,
+or BeaconDataExtract depending on the expected type.</code></pre>
+
+<h2>A Complete Data Parsing Example</h2>
+<pre><code><span class="lang-tag">C</span>#include &lt;windows.h&gt;
+#include "beacon.h"
+
+// BOF that takes a hostname (string) and port (int)
+void go(char* args, int len) {
+    datap parser;
+    BeaconDataParse(&parser, args, len);
+
+    // Extract a length-prefixed string
+    int hostname_len;
+    char* hostname = BeaconDataExtract(&parser, &hostname_len);
+
+    // Extract a 4-byte integer
+    int port = BeaconDataInt(&parser);
+
+    BeaconPrintf(CALLBACK_OUTPUT, "Connecting to %s:%d\n", hostname, port);
+
+    // ... do work with hostname and port ...
+}</code></pre>
+
+<h2>Output Functions</h2>
+
+<h3>BeaconPrintf</h3>
+<pre><code><span class="lang-tag">C</span>void BeaconPrintf(int type, char* fmt, ...);
+
+// Printf-style output. In Cobalt Strike, this sends output back to
+// the operator console. In COFFLoader, it prints to stdout and
+// appends to an internal buffer (beacon_compatibility_output).
+//
+// type values:
+//   CALLBACK_OUTPUT      = 0x00   // normal output
+//   CALLBACK_OUTPUT_OEM  = 0x1e   // OEM-encoded output
+//   CALLBACK_ERROR       = 0x0d   // error output
+//   CALLBACK_OUTPUT_UTF8 = 0x20   // UTF-8 output</code></pre>
+
+<h3>BeaconOutput</h3>
+<pre><code><span class="lang-tag">C</span>void BeaconOutput(int type, char* data, int len);
+
+// Sends raw bytes as output (not printf-formatted).
+// Useful for binary data or pre-formatted strings.
+// Same type constants as BeaconPrintf.</code></pre>
+
+<h2>The formatp Structure &amp; Format Functions</h2>
+<p>The <code>formatp</code> structure is identical to <code>datap</code> but used for building output buffers incrementally:</p>
+
+<pre><code><span class="lang-tag">C</span>typedef struct {
+    char* original;   // allocated buffer base
+    char* buffer;     // current write position
+    int   length;     // bytes written so far
+    int   size;       // total allocated capacity
+} formatp;</code></pre>
+
+<h3>Format API Usage Pattern</h3>
+<pre><code><span class="lang-tag">C</span>void go(char* args, int len) {
+    formatp buffer;
+
+    // Allocate a format buffer (512 bytes capacity)
+    BeaconFormatAlloc(&buffer, 512);
+
+    // Append formatted text
+    BeaconFormatPrintf(&buffer, "User: %s\n", "SYSTEM");
+    BeaconFormatPrintf(&buffer, "PID:  %d\n", GetCurrentProcessId());
+
+    // Append a big-endian integer (for structured data)
+    BeaconFormatInt(&buffer, 42);
+
+    // Append raw bytes
+    BeaconFormatAppend(&buffer, "raw", 3);
+
+    // Extract the built buffer and send it
+    int output_size;
+    char* output = BeaconFormatToString(&buffer, &output_size);
+    BeaconOutput(CALLBACK_OUTPUT, output, output_size);
+
+    // Free the format buffer
+    BeaconFormatFree(&buffer);
+}</code></pre>
+
+<div class="card green">
+<h4>BeaconFormatInt: Endian Swap</h4>
+<p><code>BeaconFormatInt</code> appends a 4-byte integer in <strong>big-endian</strong> (network byte order), not native little-endian. This matches Cobalt Strike's internal data format for structured output. The COFFLoader compatibility layer implements this with a byte-swap before writing.</p>
+</div>
+
+<h2>Token and Process Functions</h2>
+<p>These functions are available but have limited or stub implementations in COFFLoader's compatibility layer. They are primarily useful in the context of a real Cobalt Strike Beacon:</p>
+
+<table>
+<tr><th>Function</th><th>Signature</th><th>Purpose</th></tr>
+<tr><td>BeaconUseToken</td><td><code>void BeaconUseToken(HANDLE token)</code></td><td>Impersonate using the given token</td></tr>
+<tr><td>BeaconRevertToken</td><td><code>void BeaconRevertToken(void)</code></td><td>Revert to original token</td></tr>
+<tr><td>BeaconIsAdmin</td><td><code>BOOL BeaconIsAdmin(void)</code></td><td>Check if current context is elevated</td></tr>
+<tr><td>BeaconGetSpawnTo</td><td><code>void BeaconGetSpawnTo(BOOL x86, char* buf, int len)</code></td><td>Get the spawnto path for process creation</td></tr>
+<tr><td>BeaconSpawnTemporaryProcess</td><td><code>BOOL BeaconSpawnTemporaryProcess(...)</code></td><td>Create a sacrificial process for post-ex</td></tr>
+<tr><td>BeaconInjectProcess</td><td><code>void BeaconInjectProcess(HANDLE hProc, int pid, char* pay, int pay_len, int offset, char* arg, int arg_len)</code></td><td>Inject payload into a process</td></tr>
+<tr><td>BeaconCleanupProcess</td><td><code>void BeaconCleanupProcess(PROCESS_INFORMATION* pi)</code></td><td>Clean up a spawned process</td></tr>
+</table>
+
+<h2>The DLL Import Convention</h2>
+<p>BOFs cannot use standard C library imports. To call a Windows API function, a BOF must declare it using a special naming convention that tells the loader which DLL to load and which function to resolve:</p>
+
+<pre><code><span class="lang-tag">C</span>// In beacon.h or the BOF source:
+// DECLSPEC_IMPORT tells the compiler this is a DLL import
+// The function is declared as a regular prototype
+
+// For x64, the symbol name becomes: __imp_KERNEL32$GetCurrentProcessId
+// For x86, the symbol name becomes: __imp__KERNEL32$GetCurrentProcessId
+DECLSPEC_IMPORT DWORD WINAPI KERNEL32$GetCurrentProcessId(void);
+DECLSPEC_IMPORT HANDLE WINAPI KERNEL32$OpenProcess(DWORD, BOOL, DWORD);
+DECLSPEC_IMPORT BOOL WINAPI ADVAPI32$OpenProcessToken(HANDLE, DWORD, PHANDLE);
+DECLSPEC_IMPORT NTSTATUS NTAPI NTDLL$NtQuerySystemInformation(ULONG, PVOID, ULONG, PULONG);
+
+// Usage in the BOF:
+void go(char* args, int len) {
+    DWORD pid = KERNEL32$GetCurrentProcessId();
+    BeaconPrintf(CALLBACK_OUTPUT, "My PID: %d\n", pid);
+}</code></pre>
+
+<div class="card highlight">
+<h4>The LIBRARY$Function Convention</h4>
+<p>The <code>LIBRARY$Function</code> naming convention is not a Windows convention -- it is specific to BOFs. The loader parses the symbol name, splits on <code>$</code>, calls <code>LoadLibraryA("LIBRARY")</code> to load the DLL, and then <code>GetProcAddress(hLib, "Function")</code> to resolve the function. The <code>__imp_</code> prefix (or <code>__imp__</code> on x86) is added automatically by the compiler because of <code>DECLSPEC_IMPORT</code> (<code>__declspec(dllimport)</code>).</p>
+</div>
+
+<h2>Callback Type Constants</h2>
+<pre><code><span class="lang-tag">C</span>// Defined in beacon_compatibility.h
+#define CALLBACK_OUTPUT      0x00   // standard output
+#define CALLBACK_OUTPUT_OEM  0x1e   // OEM codepage output
+#define CALLBACK_ERROR       0x0d   // error output (shown in red in CS)
+#define CALLBACK_OUTPUT_UTF8 0x20   // UTF-8 encoded output</code></pre>
+
+<p>In Cobalt Strike, these control how the output is displayed in the operator console. In COFFLoader, <code>CALLBACK_OUTPUT</code> and <code>CALLBACK_ERROR</code> both go to stdout, but the type is preserved in the output buffer for frameworks that consume COFFLoader's output programmatically.</p>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: BOF API Contract</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: Why does BeaconDataParse skip the first 4 bytes of the argument buffer?</p>
+<label data-opt="0"><input type="radio" name="q1_3"> Those bytes are a magic number for validation</label>
+<label data-opt="1"><input type="radio" name="q1_3"> Cobalt Strike prepends a 4-byte size prefix to the argument buffer</label>
+<label data-opt="2"><input type="radio" name="q1_3"> The first 4 bytes are a version identifier</label>
+<label data-opt="3"><input type="radio" name="q1_3"> It is a compiler alignment requirement</label>
+<div class="explain">Cobalt Strike's argument packing format includes a 4-byte little-endian total size prefix at the start of the buffer. BeaconDataParse skips this prefix so subsequent calls to BeaconDataInt/BeaconDataExtract read the actual argument data.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: How does a BOF call GetCurrentProcessId from KERNEL32.dll?</p>
+<label data-opt="0"><input type="radio" name="q2_3"> By calling it directly as GetCurrentProcessId()</label>
+<label data-opt="1"><input type="radio" name="q2_3"> By using GetProcAddress at runtime in the BOF code</label>
+<label data-opt="2"><input type="radio" name="q2_3"> By declaring KERNEL32$GetCurrentProcessId with DECLSPEC_IMPORT, letting the loader resolve it</label>
+<label data-opt="3"><input type="radio" name="q3_3"> By including kernel32.lib in the compilation</label>
+<div class="explain">BOFs declare DLL imports using the LIBRARY$Function convention with DECLSPEC_IMPORT. The compiler generates a symbol like __imp_KERNEL32$GetCurrentProcessId. At load time, the COFF loader splits the symbol on $, loads the DLL with LoadLibraryA, and resolves the function with GetProcAddress.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: What byte order does BeaconFormatInt use when appending an integer?</p>
+<label data-opt="0"><input type="radio" name="q3_3"> Big-endian (network byte order)</label>
+<label data-opt="1"><input type="radio" name="q3_3"> Little-endian (native x86/x64 order)</label>
+<label data-opt="2"><input type="radio" name="q3_3"> The system's native endianness</label>
+<label data-opt="3"><input type="radio" name="q3_3"> It varies based on the CALLBACK type</label>
+<div class="explain">BeaconFormatInt swaps the byte order to big-endian before appending the 4-byte integer. This matches Cobalt Strike's internal structured data format (network byte order) for consistency in data exchange between Beacon and the team server.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Previous: COFF Format Deep Dive</a>
+<a class="primary" href="module4.html">Next: COFF Section Loading &rarr;</a>
+</div>
+</main>
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

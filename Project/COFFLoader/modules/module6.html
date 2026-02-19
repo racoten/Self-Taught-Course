@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Relocation Processing - COFFLoader Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4E6;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f97316;--accent2:#ea580c;--gradient:linear-gradient(135deg,#f97316,#ea580c)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>COFFLoader Course</h2><span>BOF Loader Masterclass</span></div>
+  <a class="home-link" href="../COFFLoader_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> What Are BOFs?</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> COFF Format Deep Dive</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> The BOF API Contract</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> COFF Section Loading</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Symbol Resolution</a>
+  <a class="mod-link active" href="module6.html"><span class="diff d2">6</span> Relocation Processing</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Beacon Compat Layer</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Security</a>
+</nav>
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 6: Relocation Processing</h1>
+<p class="subtitle">Patching live code: turning placeholder offsets into valid addresses with ADDR64, REL32, and ADDR32NB fixups.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>After sections are loaded and symbols are resolved, the BOF's machine code still contains placeholder values. A <code>CALL</code> instruction might reference offset <code>0x00000000</code> where the real target is at <code>0x00007FFA1A2B3C4D</code>. Relocation entries tell COFFLoader <em>exactly which bytes</em> to patch and <em>how</em> to compute the correct value. This is the final step before the code becomes executable.</p>
+</div>
+
+<h2>The Relocation Processing Loop</h2>
+<p>COFFLoader iterates over every section, and for each section, processes its relocation entries. Each relocation identifies a location in the section that needs patching, the target symbol, and the type of fixup to apply:</p>
+
+<pre><code><span class="lang-tag">C</span>// Relocation processing: for each section, apply all relocations
+for (int secIdx = 0; secIdx < coff_header->NumberOfSections; secIdx++) {
+
+    // Get the relocation table for this section
+    coff_reloc_t* relocs = (coff_reloc_t*)(
+        coff_data + sections[secIdx].PointerToRelocations
+    );
+
+    for (int relIdx = 0; relIdx < sections[secIdx].NumberOfRelocations; relIdx++) {
+
+        // 1. Where to patch: base of loaded section + VirtualAddress
+        char* fixupAddress = sectionMapping[secIdx] + relocs[relIdx].VirtualAddress;
+
+        // 2. What symbol is referenced
+        int symIdx = relocs[relIdx].SymbolTableIndex;
+
+        // 3. Resolve the symbol to an address (internal, Beacon, or DLL)
+        void* symbolAddress = resolve_symbol(symIdx, ...);
+
+        // 4. Apply the fixup based on relocation Type
+        apply_relocation(relocs[relIdx].Type, fixupAddress, symbolAddress);
+    }
+}</code></pre>
+
+<h2>Resolving the Target Address</h2>
+<p>The target address depends on the symbol category. COFFLoader determines this during the relocation loop:</p>
+
+<pre><code><span class="lang-tag">C</span>// Determine the target address for a relocation
+void* symbolAddress;
+int symIdx = relocs[relIdx].SymbolTableIndex;
+
+if (coff_symbol_is_defined(&symbols[symIdx])) {
+    // Internal symbol: address is section base + symbol value
+    int targetSection = symbols[symIdx].SectionNumber - 1;
+    symbolAddress = sectionMapping[targetSection] + symbols[symIdx].Value;
+}
+else if (/* symbol starts with __imp_ */) {
+    // External symbol with __imp_ prefix:
+    // The address points to the functionMapping SLOT (indirect reference)
+    // functionMappingCount is a sequential counter, NOT the symbol index
+    symbolAddress = functionMapping + (functionMappingCount * sizeof(uint64_t));
+    // Store the resolved address in this slot
+    *(uint64_t*)symbolAddress = (uint64_t)process_symbol(symbolName);
+    functionMappingCount++;  // advance to next slot
+    // The slot now contains the resolved function pointer
+}
+else {
+    // External symbol WITHOUT __imp_ prefix (direct reference):
+    // Use the resolved address directly from process_symbol()
+    symbolAddress = process_symbol(symbolName);
+}</code></pre>
+
+<div class="card warn">
+<h4>Internal vs. External: Where the Address Points</h4>
+<p>For <strong>internal symbols</strong>, the address points directly into loaded section memory (e.g., a string in .rdata or a helper function in .text). For <strong>external __imp_ symbols</strong>, the address points to a slot in <code>functionMapping</code> that <em>contains</em> the real address. The BOF code dereferences this slot at runtime via an indirect CALL. This distinction is critical: patching an indirect call target with a direct address (or vice versa) will crash.</p>
+</div>
+
+<h2>AMD64 Relocation Types</h2>
+<p>COFFLoader handles the following AMD64 relocation types. These are the most common types found in x64 BOFs:</p>
+
+<h3>IMAGE_REL_AMD64_ADDR64 (Type 0x0001)</h3>
+<p>A 64-bit absolute address. The fixup location receives the full 8-byte address of the target symbol. This is used for data pointers, function pointer tables, and any reference that needs a full virtual address.</p>
+
+<pre><code><span class="lang-tag">C</span>case IMAGE_REL_AMD64_ADDR64:
+    // Write the full 64-bit address of the symbol at the fixup location
+    *(uint64_t*)fixupAddress = (uint64_t)symbolAddress;
+    break;</code></pre>
+
+<pre><code><span class="lang-tag">TEXT</span>Example: ADDR64 relocation
+
+Before: fixupAddress contains 0x0000000000000000 (placeholder)
+Symbol resolves to: 0x00007FFA1A2B3C4D
+
+After:  fixupAddress contains 0x00007FFA1A2B3C4D (absolute 64-bit address)
+
+Use case: Global function pointer variable
+  void (*fnPtr)(void) = SomeFunction;
+  // The compiler emits an ADDR64 relocation for the initializer</code></pre>
+
+<h3>IMAGE_REL_AMD64_ADDR32NB (Type 0x0003)</h3>
+<p>A 32-bit relative virtual address (RVA) -- the address of the target minus the image base. In COFFLoader's context (no image base), this is used for references that need a 32-bit address without a base adjustment. It is commonly seen in exception handling data (.pdata/.xdata).</p>
+
+<pre><code><span class="lang-tag">C</span>case IMAGE_REL_AMD64_ADDR32NB:
+    // Write a 32-bit address (no base, typically for exception tables)
+    *(uint32_t*)fixupAddress = (uint32_t)(
+        (uint64_t)symbolAddress - (uint64_t)sectionMapping[0]
+    );
+    break;</code></pre>
+
+<h3>IMAGE_REL_AMD64_REL32 (Type 0x0004)</h3>
+<p>The most common relocation type in x64 code. A <strong>32-bit RIP-relative offset</strong>. The x64 instruction set uses RIP-relative addressing extensively. The fixup computes the signed 32-bit distance from the end of the instruction to the target:</p>
+
+<pre><code><span class="lang-tag">C</span>case IMAGE_REL_AMD64_REL32:
+    // 32-bit relative offset: target - (fixup_location + 4)
+    // The +4 accounts for the 4-byte fixup field itself
+    *(int32_t*)fixupAddress = (int32_t)(
+        (uint64_t)symbolAddress - ((uint64_t)fixupAddress + 4)
+    );
+    break;</code></pre>
+
+<pre><code><span class="lang-tag">TEXT</span>Example: REL32 relocation for a CALL instruction
+
+Instruction: E8 00 00 00 00    (CALL with placeholder offset)
+fixupAddress points to the 00 00 00 00 bytes (offset field of CALL)
+symbolAddress = 0x00007FF8A1230100 (target function)
+fixupAddress  = 0x00007FF8A1230050 (location of the offset bytes)
+
+Calculation:
+  offset = symbolAddress - (fixupAddress + 4)
+         = 0x00007FF8A1230100 - (0x00007FF8A1230050 + 4)
+         = 0x00007FF8A1230100 - 0x00007FF8A1230054
+         = 0xAC
+
+After patching: E8 AC 00 00 00    (CALL +0xAC)
+When executed at fixupAddress-1, RIP after fetching = fixupAddress+4,
+so target = RIP + 0xAC = fixupAddress + 4 + 0xAC = symbolAddress. Correct!</code></pre>
+
+<h3>IMAGE_REL_AMD64_REL32_1 through REL32_5 (Types 0x0005-0x0009)</h3>
+<p>Variants of REL32 with additional displacement. These handle instructions where the 32-bit relocation field is not at the end of the instruction. The <code>_N</code> suffix means there are N more bytes of instruction after the relocation field:</p>
+
+<pre><code><span class="lang-tag">C</span>case IMAGE_REL_AMD64_REL32_1:
+    // REL32 + 1: the instruction has 1 extra byte after the relocation field
+    *(int32_t*)fixupAddress = (int32_t)(
+        (uint64_t)symbolAddress - ((uint64_t)fixupAddress + 4 + 1)
+    );
+    break;
+
+case IMAGE_REL_AMD64_REL32_2:
+    *(int32_t*)fixupAddress = (int32_t)(
+        (uint64_t)symbolAddress - ((uint64_t)fixupAddress + 4 + 2)
+    );
+    break;
+
+case IMAGE_REL_AMD64_REL32_3:
+    *(int32_t*)fixupAddress = (int32_t)(
+        (uint64_t)symbolAddress - ((uint64_t)fixupAddress + 4 + 3)
+    );
+    break;
+
+case IMAGE_REL_AMD64_REL32_4:
+    *(int32_t*)fixupAddress = (int32_t)(
+        (uint64_t)symbolAddress - ((uint64_t)fixupAddress + 4 + 4)
+    );
+    break;
+
+case IMAGE_REL_AMD64_REL32_5:
+    *(int32_t*)fixupAddress = (int32_t)(
+        (uint64_t)symbolAddress - ((uint64_t)fixupAddress + 4 + 5)
+    );
+    break;</code></pre>
+
+<div class="card highlight">
+<h4>When Do REL32_N Variants Appear?</h4>
+<p>The REL32_1 variant commonly appears with <code>MOV</code> instructions that have a ModR/M byte after the 32-bit displacement, or with <code>LEA</code> instructions that use RIP-relative addressing with an additional immediate byte. For example, <code>mov [rip+disp32], imm8</code> would use REL32_1 because the 1-byte immediate follows the relocation field. REL32_2 through REL32_5 are progressively rarer but handle instructions with larger trailing data.</p>
+</div>
+
+<h2>i386 Relocation Types</h2>
+<p>COFFLoader also supports 32-bit x86 relocations for x86 BOFs:</p>
+
+<pre><code><span class="lang-tag">C</span>case IMAGE_REL_I386_DIR32:   // 0x0006
+    // 32-bit absolute address (direct)
+    *(uint32_t*)fixupAddress += (uint32_t)(uintptr_t)symbolAddress;
+    break;
+
+case IMAGE_REL_I386_REL32:   // 0x0014
+    // 32-bit relative offset
+    *(int32_t*)fixupAddress = (int32_t)(
+        (uint32_t)(uintptr_t)symbolAddress -
+        ((uint32_t)(uintptr_t)fixupAddress + 4)
+    );
+    break;</code></pre>
+
+<h2>Complete Relocation Example</h2>
+<p>Let us trace through a complete relocation for a BOF that calls <code>KERNEL32$GetCurrentProcessId</code>:</p>
+
+<pre><code><span class="lang-tag">TEXT</span>Step-by-step: Resolving a CALL to KERNEL32$GetCurrentProcessId
+
+1. Section .text is loaded at sectionMapping[0] = 0x1A0000
+2. Symbol table entry #7: "__imp_KERNEL32$GetCurrentProcessId"
+   - SectionNumber = 0 (undefined/external)
+   - StorageClass = 2 (EXTERNAL)
+
+3. Relocation entry in .text:
+   - VirtualAddress = 0x1C (offset within .text)
+   - SymbolTableIndex = 7
+   - Type = IMAGE_REL_AMD64_REL32 (0x0004)
+
+4. Symbol resolution:
+   - process_symbol("__imp_KERNEL32$GetCurrentProcessId")
+   - Strip __imp_ -> "KERNEL32$GetCurrentProcessId"
+   - Not in InternalFunctions table
+   - Split on $ -> library="KERNEL32", function="GetCurrentProcessId"
+   - LoadLibraryA("KERNEL32") -> hKernel32
+   - GetProcAddress(hKernel32, "GetCurrentProcessId") -> 0x7FFA1A2B0000
+
+5. Store in functionMapping (using sequential counter, not symbol index):
+   - Suppose this is the 3rd external function relocation processed
+   - functionMapping[3 * 8] = 0x7FFA1A2B0000
+   - The symbolAddress for relocation = &functionMapping[3*8] = 0x2A0018
+
+6. Apply REL32 fixup:
+   - fixupAddress = sectionMapping[0] + 0x1C = 0x1A001C
+   - offset = 0x2A0018 - (0x1A001C + 4) = 0x0FFFF8
+   - *(int32_t*)0x1A001C = 0x000FFFF8
+
+7. Machine code at 0x1A001A:
+   Before: FF 15 00 00 00 00    CALL [rip + 0x0]
+   After:  FF 15 F8 FF 0F 00    CALL [rip + 0x0FFFF8]
+
+   When executed: RIP = 0x1A0020, target = 0x1A0020 + 0x0FFFF8 = 0x2A0018
+   At 0x2A0018: the 8-byte value 0x7FFA1A2B0000 (the real function address)
+   CPU reads the pointer -> calls GetCurrentProcessId at 0x7FFA1A2B0000</code></pre>
+
+<div class="card green">
+<h4>The Two-Level Indirection</h4>
+<p>For <code>__imp_</code> symbols, there are two levels of indirection. The REL32 relocation patches the code to point at a <code>functionMapping</code> slot. That slot contains the actual function address. The CPU's <code>CALL [rip+offset]</code> instruction dereferences the pointer automatically. This is identical to how the PE loader handles DLL imports via the Import Address Table (IAT) -- the <code>functionMapping</code> buffer is COFFLoader's equivalent of the IAT.</p>
+</div>
+
+<h2>Error Handling in Relocations</h2>
+<p>COFFLoader prints a debug message for unrecognized relocation types but does not abort. It also handles the case where <code>process_symbol()</code> returns NULL (unresolvable symbol) by logging the error. In practice, an unresolved symbol usually means the BOF references a DLL function from a library that is not present on the system.</p>
+
+<pre><code><span class="lang-tag">C</span>// COFFLoader handles unknown relocation types with a debug message
+default:
+    printf("ERROR: Unhandled relocation type: 0x%x\n", relocs[relIdx].Type);
+    break;</code></pre>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: Relocation Processing</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: An IMAGE_REL_AMD64_REL32 relocation has fixupAddress=0x5000, symbolAddress=0x6100. What 32-bit value is written?</p>
+<label data-opt="0"><input type="radio" name="q1_6"> 0x00006100</label>
+<label data-opt="1"><input type="radio" name="q1_6"> 0x00001100</label>
+<label data-opt="2"><input type="radio" name="q1_6"> 0x000010FC (calculated as 0x6100 - (0x5000 + 4))</label>
+<label data-opt="3"><input type="radio" name="q1_6"> 0xFFFFEF00</label>
+<div class="explain">REL32 computes: symbolAddress - (fixupAddress + 4) = 0x6100 - 0x5004 = 0x10FC. The +4 accounts for the 4-byte relocation field itself. When the CPU executes the instruction, RIP has advanced past the field (RIP = fixupAddress + 4), so RIP + 0x10FC = 0x5004 + 0x10FC = 0x6100, correctly reaching the target.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: What is the difference between IMAGE_REL_AMD64_ADDR64 and IMAGE_REL_AMD64_REL32?</p>
+<label data-opt="0"><input type="radio" name="q2_6"> ADDR64 writes the full 64-bit absolute address; REL32 writes a 32-bit signed offset relative to the instruction pointer</label>
+<label data-opt="1"><input type="radio" name="q2_6"> ADDR64 is for code; REL32 is for data</label>
+<label data-opt="2"><input type="radio" name="q2_6"> ADDR64 is faster; REL32 is more compatible</label>
+<label data-opt="3"><input type="radio" name="q3_6"> They are the same but for different architectures</label>
+<div class="explain">ADDR64 writes the complete 64-bit virtual address of the symbol into the fixup location. REL32 writes a 32-bit signed displacement calculated as (target - (fixup + 4)). REL32 is more common because x64 instructions use RIP-relative addressing, which only needs a 32-bit offset. ADDR64 is used for data references that need the full address (e.g., initializing a function pointer variable).</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q3: IMAGE_REL_AMD64_REL32_2 differs from REL32 how?</p>
+<label data-opt="0"><input type="radio" name="q3_6"> It uses a 16-bit offset instead of 32-bit</label>
+<label data-opt="1"><input type="radio" name="q3_6"> It subtracts an extra 2 from the offset to account for 2 trailing instruction bytes after the relocation field</label>
+<label data-opt="2"><input type="radio" name="q3_6"> It is applied twice to handle 64-bit addresses</label>
+<label data-opt="3"><input type="radio" name="q3_6"> It only applies to CALL instructions, not MOV</label>
+<div class="explain">REL32_2 computes: symbolAddress - (fixupAddress + 4 + 2). The extra +2 accounts for 2 bytes of instruction data that follow the 32-bit relocation field. The RIP at execution time has advanced past both the relocation field AND the trailing bytes, so the offset must be reduced accordingly to still reach the target.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Previous: Symbol Resolution &amp; Linking</a>
+<a class="primary" href="module7.html">Next: The Beacon Compatibility Layer &rarr;</a>
+</div>
+</main>
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

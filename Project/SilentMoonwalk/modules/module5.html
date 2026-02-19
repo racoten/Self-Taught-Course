@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: Gadget Discovery &amp; Selection - SilentMoonwalk Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F319;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#06b6d4;--accent2:#0891b2;--gradient:linear-gradient(135deg,#06b6d4,#0891b2)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>SilentMoonwalk Course</h2><span>Call Stack Spoofing Masterclass</span></div>
+  <a class="home-link" href="../SilentMoonwalk_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Stack Telemetry</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> x64 Stack Frames</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> ROP Fundamentals</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> Desync Theory</a>
+  <a class="mod-link active" href="module5.html"><span class="diff d2">5</span> Gadget Discovery</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Synthetic Frames</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Full Spoof Engine</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Detection &amp; Counters</a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 5: Gadget Discovery &amp; Selection</h1>
+<p class="subtitle">Finding the right instruction sequences in a sea of legitimate code.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>SilentMoonwalk's ROP chain is only as good as the gadgets it uses. Unlike exploit ROP where any gadget will do, SilentMoonwalk requires gadgets that reside inside functions with valid <code>RUNTIME_FUNCTION</code> entries, have matching unwind codes, and produce predictable side effects. This module covers how to find and evaluate suitable gadgets in ntdll.dll and kernel32.dll.</p>
+</div>
+
+<h2>Gadget Sources: Why ntdll and kernel32?</h2>
+<p>SilentMoonwalk restricts gadget searches to specific system DLLs for good reasons:</p>
+
+<table>
+<tr><th>Module</th><th>Why It's Ideal</th><th>Key Properties</th></tr>
+<tr><td><strong>ntdll.dll</strong></td><td>Always loaded in every process, mapped at the same base per boot session (ASLR applied per-boot). Contains thousands of functions with rich unwind data.</td><td>First DLL loaded, provides native API layer, trusted by all EDRs</td></tr>
+<tr><td><strong>kernel32.dll</strong></td><td>Nearly always loaded, provides Win32 API wrappers. Return addresses here are completely normal for any process.</td><td>Contains BaseThreadInitThunk (thread entry), common call chain terminal</td></tr>
+<tr><td><strong>kernelbase.dll</strong></td><td>Backend implementation for many kernel32 and advapi32 functions. Also always loaded.</td><td>Large code base with many gadget candidates</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Avoid Application-Specific Modules</h4>
+<p>Using gadgets from application-specific DLLs or the main executable creates two problems: (1) the gadget addresses change between targets, making the tool less portable, and (2) return addresses in uncommon DLLs may themselves trigger heuristics. EDRs expect to see ntdll, kernel32, and kernelbase on every call stack &mdash; these are invisible by nature.</p>
+</div>
+
+<h2>The Gadget Search Algorithm</h2>
+<p>SilentMoonwalk scans the <code>.text</code> section of target modules looking for specific byte patterns. The search must also verify that any candidate gadget falls within a function that has valid unwind metadata:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Simplified gadget search: find all JMP [RBX] gadgets in a module
+// Byte pattern for JMP QWORD PTR [RBX]: FF 23
+// Byte pattern for JMP [RBX] with SIB:   FF 63 XX (with displacement)
+
+struct Gadget {
+    PVOID   address;           // Address of the gadget instruction
+    DWORD   functionRva;       // RVA of containing function
+    DWORD   offsetInFunction;  // Offset from function start
+    DWORD   frameSize;         // Frame size from UNWIND_INFO
+    PRUNTIME_FUNCTION pRtFunc; // Pointer to RUNTIME_FUNCTION entry
+};
+
+std::vector&lt;Gadget&gt; FindJmpRbxGadgets(HMODULE hModule) {
+    std::vector&lt;Gadget&gt; results;
+    DWORD64 imageBase = (DWORD64)hModule;
+
+    // Get .text section bounds
+    PIMAGE_NT_HEADERS pNt = RtlImageNtHeader(hModule);
+    PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+    PBYTE textStart = NULL;
+    DWORD textSize = 0;
+
+    for (WORD i = 0; i &lt; pNt->FileHeader.NumberOfSections; i++) {
+        if (memcmp(pSec[i].Name, ".text", 5) == 0) {
+            textStart = (PBYTE)imageBase + pSec[i].VirtualAddress;
+            textSize = pSec[i].Misc.VirtualSize;
+            break;
+        }
+    }
+
+    // Scan for FF 23 (jmp [rbx]) pattern
+    for (DWORD offset = 0; offset &lt; textSize - 1; offset++) {
+        if (textStart[offset] == 0xFF && textStart[offset + 1] == 0x23) {
+            PVOID gadgetAddr = textStart + offset;
+            DWORD rva = (DWORD)((DWORD64)gadgetAddr - imageBase);
+
+            // CRITICAL: verify this address has a RUNTIME_FUNCTION
+            DWORD64 imgBase;
+            PRUNTIME_FUNCTION pFunc = RtlLookupFunctionEntry(
+                (DWORD64)gadgetAddr, &imgBase, NULL
+            );
+
+            if (pFunc != NULL) {
+                Gadget g;
+                g.address = gadgetAddr;
+                g.functionRva = pFunc->BeginAddress;
+                g.offsetInFunction = rva - pFunc->BeginAddress;
+                g.pRtFunc = pFunc;
+                g.frameSize = ComputeFrameSize(
+                    (PUNWIND_INFO)(imageBase + pFunc->UnwindData)
+                );
+                results.push_back(g);
+            }
+        }
+    }
+    return results;
+}</code></pre>
+
+<h2>Key Gadget Patterns</h2>
+<p>SilentMoonwalk needs several specific gadget types. Each serves a distinct purpose in the spoofing chain:</p>
+
+<h3>1. JMP [RBX] &mdash; The Trampoline Gadget</h3>
+<p>This is the most critical gadget. It transfers control to a function pointer stored at the address in RBX without pushing a return address. This allows the target API call to be made with a fully controlled stack.</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; Pattern: FF 23
+; Disassembly: jmp qword ptr [rbx]
+;
+; Before execution:
+;   RBX = pointer to memory containing target API address
+;   RSP = points to our fake return address on the spoofed stack
+;
+; After execution:
+;   RIP = target API (e.g., NtWaitForSingleObject)
+;   RSP = unchanged (no push occurred)
+;   When target API hits RET, it pops our controlled return address</code></pre>
+
+<div class="card">
+<h4>Why JMP [RBX] Specifically?</h4>
+<p>RBX is a <strong>non-volatile register</strong> on x64 Windows. This means it survives across function calls &mdash; if you set RBX before the ROP chain executes, it will still contain that value when the JMP [RBX] gadget fires. Volatile registers (RAX, RCX, RDX, R8-R11) may be clobbered by intermediate gadgets. Other non-volatile registers (RBP, RSI, RDI, R12-R15) could also work, but JMP [RBX] gadgets are common in ntdll because many functions use RBX as a pointer to a function table or dispatch structure.</p>
+</div>
+
+<h3>2. ADD RSP, N; RET &mdash; Stack Frame Gadgets</h3>
+<p>These gadgets advance RSP by a fixed amount and then return. They serve as the "body" of each synthetic frame, consuming exactly the right number of stack bytes to match a target function's unwind allocation:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; Pattern: 48 83 C4 XX C3  (ADD RSP, imm8; RET)
+; Or:      48 81 C4 XX XX XX XX C3  (ADD RSP, imm32; RET)
+
+; Example: add rsp, 0x28; ret
+; Bytes:   48 83 C4 28 C3
+;
+; This gadget creates a "frame" of 0x28 bytes:
+;   RSP += 0x28   (skip over frame data)
+;   RET           (pop next gadget address, RSP += 8)
+;   Total RSP change: 0x30 bytes
+
+; For SilentMoonwalk, the ADD RSP value must match the
+; UWOP_ALLOC_SMALL or UWOP_ALLOC_LARGE in the containing
+; function's UNWIND_INFO.</code></pre>
+
+<h3>3. POP REG; RET &mdash; Register Setup Gadgets</h3>
+<p>Used to load values into specific registers from the stack before the target API call:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; pop rcx; ret  -->  Bytes: 59 C3
+; pop rdx; ret  -->  Bytes: 5A C3
+; pop r8; ret   -->  Bytes: 41 58 C3
+; pop r9; ret   -->  Bytes: 41 59 C3
+
+; These are essential for setting up function arguments.
+; The x64 calling convention passes the first 4 integer args
+; in RCX, RDX, R8, R9. Before calling the target API via
+; JMP [RBX], these registers must contain the correct values.</code></pre>
+
+<h2>Gadget Validation Criteria</h2>
+<p>Not every instruction sequence that matches a byte pattern is a usable gadget. SilentMoonwalk applies strict validation:</p>
+
+<table>
+<tr><th>Criterion</th><th>Why It Matters</th><th>How to Check</th></tr>
+<tr><td>Has RUNTIME_FUNCTION</td><td>Without unwind metadata, the gadget's frame breaks stack walking</td><td><code>RtlLookupFunctionEntry()</code> returns non-NULL</td></tr>
+<tr><td>Unwind codes match behavior</td><td>ADD RSP, N in the gadget must align with UWOP_ALLOC_SMALL/LARGE in UNWIND_INFO</td><td>Parse UNWIND_INFO and compare allocation size</td></tr>
+<tr><td>No harmful side effects</td><td>Gadget shouldn't write to unexpected memory, trigger exceptions, or clobber critical state</td><td>Manual review or emulation of gadget bytes</td></tr>
+<tr><td>No chained unwind info</td><td>UNW_FLAG_CHAININFO adds complexity; simpler functions are preferred</td><td>Check UNWIND_INFO.Flags &amp; UNW_FLAG_CHAININFO</td></tr>
+<tr><td>Gadget at valid offset</td><td>The instruction must be at an offset where unwind codes apply correctly</td><td>Gadget offset must be &ge; SizeOfProlog in UNWIND_INFO</td></tr>
+<tr><td>Inside module code section</td><td>Must be in executable, file-backed memory</td><td>Verify address falls within .text section bounds</td></tr>
+</table>
+
+<div class="card warn">
+<h4>The Offset Constraint</h4>
+<p>This is subtle but critical. A gadget at offset 5 in a function whose <code>SizeOfProlog</code> is 20 bytes would be <em>inside the prologue</em>. When RtlVirtualUnwind processes this frame, it only applies unwind codes whose <code>CodeOffset</code> is less than or equal to the instruction's offset within the function. If the gadget is inside the prologue, only a subset of unwind codes apply, changing the computed frame size. The gadget must be at an offset <strong>past the end of the prologue</strong> for all unwind codes to be in effect.</p>
+</div>
+
+<h2>Building a Gadget Database</h2>
+<p>SilentMoonwalk pre-scans target modules at initialization to build a database of usable gadgets, indexed by type and frame size:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Gadget database structure
+struct GadgetDB {
+    // JMP [RBX] gadgets indexed by frame size
+    std::map&lt;DWORD, std::vector&lt;Gadget&gt;&gt; jmpRbxByFrameSize;
+
+    // ADD RSP, N; RET gadgets indexed by N value
+    std::map&lt;DWORD, std::vector&lt;Gadget&gt;&gt; addRspBySize;
+
+    // POP REG; RET gadgets indexed by register
+    std::map&lt;int, std::vector&lt;Gadget&gt;&gt;  popRegByReg;
+
+    void Build(HMODULE hModule) {
+        // Scan .pdata to enumerate all functions with unwind info
+        PIMAGE_NT_HEADERS pNt = RtlImageNtHeader(hModule);
+        DWORD64 imageBase = (DWORD64)hModule;
+
+        // Get .pdata (exception directory)
+        DWORD pdataRva = pNt->OptionalHeader
+            .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION].VirtualAddress;
+        DWORD pdataSize = pNt->OptionalHeader
+            .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION].Size;
+
+        PRUNTIME_FUNCTION pFuncs = (PRUNTIME_FUNCTION)(imageBase + pdataRva);
+        DWORD numFuncs = pdataSize / sizeof(RUNTIME_FUNCTION);
+
+        for (DWORD i = 0; i &lt; numFuncs; i++) {
+            PRUNTIME_FUNCTION pFunc = &pFuncs[i];
+            PUNWIND_INFO pUnwind = (PUNWIND_INFO)(
+                imageBase + pFunc->UnwindData
+            );
+
+            // Skip chained unwind info for simplicity
+            if (pUnwind->Flags & UNW_FLAG_CHAININFO) continue;
+
+            DWORD frameSize = ComputeFrameSize(pUnwind);
+            DWORD funcSize = pFunc->EndAddress - pFunc->BeginAddress;
+
+            // Scan function body (after prologue) for gadgets
+            PBYTE funcStart = (PBYTE)(imageBase + pFunc->BeginAddress);
+            DWORD scanStart = pUnwind->SizeOfProlog;
+
+            for (DWORD off = scanStart; off &lt; funcSize - 1; off++) {
+                // Check for JMP [RBX]: FF 23
+                if (funcStart[off] == 0xFF && funcStart[off+1] == 0x23) {
+                    Gadget g = { funcStart + off, pFunc->BeginAddress,
+                                 off, frameSize, pFunc };
+                    jmpRbxByFrameSize[frameSize].push_back(g);
+                }
+                // Check for ADD RSP, imm8; RET: 48 83 C4 XX C3
+                if (off + 4 &lt; funcSize &&
+                    funcStart[off]   == 0x48 &&
+                    funcStart[off+1] == 0x83 &&
+                    funcStart[off+2] == 0xC4 &&
+                    funcStart[off+4] == 0xC3) {
+                    BYTE addVal = funcStart[off+3];
+                    Gadget g = { funcStart + off, pFunc->BeginAddress,
+                                 off, frameSize, pFunc };
+                    addRspBySize[addVal].push_back(g);
+                }
+            }
+        }
+    }
+};</code></pre>
+
+<h2>Practical Considerations</h2>
+
+<div class="card">
+<h4>ASLR and Gadget Addresses</h4>
+<p>ntdll.dll is randomized per boot session, but its base address is the same across all processes within a single boot. SilentMoonwalk resolves gadget addresses at runtime by scanning the loaded ntdll in the current process. Since the spoofer runs in-process, the addresses are always correct. However, gadget byte offsets within functions remain stable across processes in the same boot session.</p>
+</div>
+
+<div class="card">
+<h4>Windows Version Sensitivity</h4>
+<p>Function layouts and unwind info can change between Windows builds. A gadget that exists at offset 0x42 in ntdll on Windows 10 21H2 may be at offset 0x45 on Windows 11 22H2, or may not exist at all. SilentMoonwalk's runtime scanning approach handles this automatically &mdash; it discovers whatever gadgets are available in the currently loaded modules rather than relying on hardcoded offsets.</p>
+</div>
+
+<h2>Gadget Chain Assembly Order</h2>
+<p>Once the gadget database is built, SilentMoonwalk assembles gadgets in a specific order for the complete spoofing chain. Here is the logical sequence:</p>
+
+<ol>
+<li><strong>Parameter setup gadgets</strong> &mdash; POP RCX/RDX/R8/R9 to load API arguments</li>
+<li><strong>RBX setup</strong> &mdash; Load address of target API into memory pointed to by RBX</li>
+<li><strong>Frame body gadgets</strong> &mdash; ADD RSP, N; RET gadgets matched to target function frame sizes</li>
+<li><strong>Trampoline gadget</strong> &mdash; JMP [RBX] to invoke the target API with the spoofed stack active</li>
+<li><strong>Recovery gadgets</strong> &mdash; After API returns, restore original stack state</li>
+</ol>
+
+<div class="quiz" id="quiz5">
+<h4>Pop Quiz: Gadget Discovery</h4>
+<div class="quiz-q" data-correct="0">
+<p>Q1: Why must gadgets reside inside functions with valid RUNTIME_FUNCTION entries?</p>
+<label data-opt="0"><input type="radio" name="q5_0"> Because RtlVirtualUnwind needs UNWIND_INFO to compute frame sizes during stack walking; without it, the frame breaks the unwind chain</label>
+<label data-opt="1"><input type="radio" name="q5_0"> Because gadgets without RUNTIME_FUNCTION entries will crash the process</label>
+<label data-opt="2"><input type="radio" name="q5_0"> Because Windows only allows execution of functions with RUNTIME_FUNCTION entries</label>
+<label data-opt="3"><input type="radio" name="q5_0"> Because RUNTIME_FUNCTION entries are required for ASLR</label>
+<div class="explain">When an EDR walks the stack, it calls RtlLookupFunctionEntry for each return address. If no RUNTIME_FUNCTION is found, either the frame is treated as a leaf (which may not produce the right RSP adjustment) or the walk fails. Having valid unwind metadata ensures the unwinder processes the frame correctly and moves to the next frame with the right RSP.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: Why must a gadget be located AFTER the function's prologue (offset &ge; SizeOfProlog)?</p>
+<label data-opt="0"><input type="radio" name="q5_1"> Because the prologue code might be encrypted</label>
+<label data-opt="1"><input type="radio" name="q5_1"> Because gadgets in the prologue are slower</label>
+<label data-opt="2"><input type="radio" name="q5_1"> Because RtlVirtualUnwind only applies unwind codes whose CodeOffset &le; the instruction offset; a gadget inside the prologue would cause only partial unwind, changing the computed frame size</label>
+<label data-opt="3"><input type="radio" name="q5_1"> Because the prologue always contains INT 3 instructions</label>
+<div class="explain">Unwind codes are associated with specific prologue instructions via CodeOffset. RtlVirtualUnwind only processes codes where CodeOffset is less than or equal to the current instruction's offset within the function. If the gadget is inside the prologue, not all allocation and push operations have occurred yet, so the computed frame size will be smaller than expected.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q3: Why is RBX preferred over RCX for the JMP [REG] trampoline?</p>
+<label data-opt="0"><input type="radio" name="q5_2"> Because JMP [RCX] is an invalid instruction</label>
+<label data-opt="1"><input type="radio" name="q5_2"> Because RBX is non-volatile and preserved across function calls, while RCX is volatile and may be clobbered by intermediate gadgets</label>
+<label data-opt="2"><input type="radio" name="q5_2"> Because RBX is larger than RCX</label>
+<label data-opt="3"><input type="radio" name="q5_2"> Because only RBX can hold function pointers</label>
+<div class="explain">In the x64 Windows calling convention, RBX is callee-saved (non-volatile), meaning any function that modifies it must restore it. RCX is the first argument register and is freely modified by any function call. Since the ROP chain may pass through multiple gadgets before reaching JMP [RBX], using a non-volatile register ensures the value survives.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz5')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Previous: Desync Theory</a>
+<a class="primary" href="module6.html">Next: Synthetic Frame Construction &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

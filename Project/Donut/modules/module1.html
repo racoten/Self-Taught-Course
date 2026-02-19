@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: The PE-to-Shellcode Problem - Donut Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F369;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#ec4899;--accent2:#db2777;--gradient:linear-gradient(135deg,#ec4899,#db2777)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Donut Course</h2>
+<span>PE-to-Shellcode Masterclass</span>
+</div>
+<a class="home-link" href="../Donut_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span>1. The PE-to-Shellcode Problem</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Loader Fundamentals</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module3.html"><span>3. .NET CLR Hosting</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module4.html"><span>4. Module Architecture</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Donut Loader</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Anti-Detection</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module7.html"><span>7. Advanced Payload Types</span><span class="diff d3">A</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">A</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: The PE-to-Shellcode Problem</h1>
+<p class="subtitle">Why you would want to convert a PE file into position-independent shellcode, and the fundamental challenges involved.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand what PE-to-shellcode conversion means, why offensive operators need it, how Donut fits into the landscape alongside tools like sRDI and ReflectiveDLLInjection, and the fundamental distinction between a loader and a converter.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. What Is a PE File?</h2>
+
+<p>The Portable Executable (PE) format is the standard binary format on Windows. Every <code>.exe</code>, <code>.dll</code>, <code>.sys</code>, and <code>.NET</code> assembly is a PE file. When you compile a C program with MSVC or MinGW, the output is a PE file that the Windows loader (<code>ntdll!LdrLoadDll</code>) knows how to map into memory.</p>
+
+<p>A PE file is <strong>not position-independent</strong> by default. It contains:</p>
+
+<ul>
+<li><strong>Absolute addresses</strong> &mdash; code references assume a preferred base address (e.g., <code>0x00400000</code>)</li>
+<li><strong>Import tables</strong> &mdash; references to external DLLs and functions that must be resolved at load time</li>
+<li><strong>Section alignment</strong> &mdash; sections have different file vs. memory alignment requirements</li>
+<li><strong>Relocation entries</strong> &mdash; fixup tables needed when the image loads at a non-preferred base</li>
+</ul>
+
+<p>Shellcode, by contrast, is a raw blob of machine code that can execute from any address in memory with no external dependencies. Converting a PE into shellcode means solving all of these problems in a self-contained way.</p>
+
+<!-- ============================================================ -->
+<h2>2. Why Convert PE to Shellcode?</h2>
+
+<p>Shellcode is the universal unit of code injection on Windows. Nearly every injection technique &mdash; <code>VirtualAllocEx</code> + <code>WriteProcessMemory</code> + <code>CreateRemoteThread</code>, APC injection, thread hijacking, fiber injection &mdash; expects a blob of position-independent code. If your payload is a PE file, you cannot directly inject it without a loader.</p>
+
+<table>
+<tr><th>Scenario</th><th>Why Shellcode?</th></tr>
+<tr><td><strong>Process injection</strong></td><td>Injection primitives expect a function pointer to PIC code, not a structured PE</td></tr>
+<tr><td><strong>In-memory execution</strong></td><td>Avoid dropping files to disk; execute payloads entirely in memory</td></tr>
+<tr><td><strong>.NET in unmanaged processes</strong></td><td>Run C# assemblies in processes that don&rsquo;t host the CLR, without spawning new processes</td></tr>
+<tr><td><strong>Staged payloads</strong></td><td>Download shellcode over HTTP/DNS and execute without touching the filesystem</td></tr>
+<tr><td><strong>Exploit payloads</strong></td><td>Exploits deliver shellcode; wrapping your tool as shellcode makes it exploit-deliverable</td></tr>
+<tr><td><strong>Loader diversity</strong></td><td>Same shellcode works with any injection technique &mdash; decouple payload from delivery</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. Loaders vs. Converters</h2>
+
+<p>Two fundamentally different approaches exist for running PE files in-memory without the Windows loader:</p>
+
+<div class="card">
+<h4>Reflective Loader (Embedded in the PE)</h4>
+<p>A reflective loader is compiled <em>into</em> the DLL itself. The DLL contains a special exported function (e.g., <code>ReflectiveLoader</code>) that, when called, maps itself into memory, resolves its own imports, and calls <code>DllMain</code>. The seminal work is Stephen Fewer&rsquo;s <strong>Reflective DLL Injection</strong>.</p>
+<p>Limitation: only works for DLLs you compile yourself. You must modify the source to include the reflective loader. Does not support EXEs, .NET assemblies, or third-party binaries.</p>
+</div>
+
+<div class="card">
+<h4>Shellcode Converter (External Tool)</h4>
+<p>A converter takes an <em>arbitrary</em> PE file as input and produces standalone shellcode as output. The shellcode contains a PIC loader stub plus the original PE payload. At runtime, the stub performs all the steps the Windows loader would: map sections, resolve imports, apply relocations, and transfer control.</p>
+<p>This is what Donut does. It supports EXEs, DLLs, .NET assemblies, VBS/JS scripts, and XSL files &mdash; without modifying the original binary.</p>
+</div>
+
+<div class="diagram">
+<h4>Reflective Loader vs. Shellcode Converter</h4>
+<div class="flow">
+<div class="box y">Your DLL<br><small>+ ReflectiveLoader()</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Inject DLL blob<br><small>Call export</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Self-loads</div>
+</div>
+<br>
+<div class="flow">
+<div class="box hl">Any PE / .NET</div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Donut</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">PIC Shellcode<br><small>Loader + Payload</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. The Donut Approach</h2>
+
+<p>Donut, created by <strong>TheWover</strong> and <strong>Odzhan</strong>, is a shellcode generation framework that takes the converter approach to its logical conclusion. It supports the widest range of input formats of any public tool:</p>
+
+<table>
+<tr><th>Input Type</th><th>How Donut Handles It</th></tr>
+<tr><td><strong>Native EXE (x86/x64)</strong></td><td>PIC loader maps sections, resolves imports, applies relocations, calls entry point</td></tr>
+<tr><td><strong>Native DLL (x86/x64)</strong></td><td>Same as EXE, plus calls <code>DllMain</code> and optionally a named export with arguments</td></tr>
+<tr><td><strong>.NET EXE</strong></td><td>Hosts the CLR, creates an AppDomain, loads the assembly via <code>Assembly::Load</code>, invokes <code>Main()</code></td></tr>
+<tr><td><strong>.NET DLL</strong></td><td>Same CLR hosting, invokes a specified class method with arguments</td></tr>
+<tr><td><strong>VBScript / JScript</strong></td><td>Creates scripting engine via COM, loads and executes the script in-memory</td></tr>
+<tr><td><strong>XSL files</strong></td><td>Uses <code>IXMLDOMDocument</code> and <code>IXSLProcessor</code> COM interfaces to process the stylesheet</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. sRDI &mdash; The Other Major Converter</h2>
+
+<p>Before Donut, the most popular shellcode converter was <strong>sRDI</strong> (Shellcode Reflective DLL Injection) by <strong>monoxgas</strong>. sRDI takes a DLL and wraps it with a PIC loader stub. Key differences from Donut:</p>
+
+<table>
+<tr><th>Feature</th><th>sRDI</th><th>Donut</th></tr>
+<tr><td><strong>Input types</strong></td><td>DLL only</td><td>EXE, DLL, .NET, VBS, JS, XSL</td></tr>
+<tr><td><strong>Encryption</strong></td><td>None (plaintext payload)</td><td>Chaskey cipher with random keys</td></tr>
+<tr><td><strong>Compression</strong></td><td>None</td><td>aPLib, LZNT1, or Xpress</td></tr>
+<tr><td><strong>AMSI/ETW bypass</strong></td><td>No</td><td>Built-in bypass stubs</td></tr>
+<tr><td><strong>.NET support</strong></td><td>No</td><td>Full CLR hosting</td></tr>
+<tr><td><strong>Staging</strong></td><td>No</td><td>HTTP/DNS staging support</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>6. How Donut Shellcode Is Structured</h2>
+
+<p>The output shellcode from Donut has a layered structure:</p>
+
+<div class="diagram">
+<h4>Donut Shellcode Layout</h4>
+<div class="flow">
+<div class="box hl">PIC Loader<br><small>~4-8 KB</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">DONUT_INSTANCE<br><small>Config + Keys</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">DONUT_MODULE<br><small>Encrypted + Compressed<br>Payload</small></div>
+</div>
+</div>
+
+<ol>
+<li><strong>PIC Loader</strong> &mdash; position-independent C code compiled to resolve APIs via PEB walking, decrypt the instance, decompress the module, and dispatch to the correct handler based on payload type</li>
+<li><strong>DONUT_INSTANCE</strong> &mdash; a configuration structure containing API hashes, decryption keys, module size, compression type, bypass flags, and other runtime parameters</li>
+<li><strong>DONUT_MODULE</strong> &mdash; the encrypted (and optionally compressed) payload with metadata like class name, method name, and arguments</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2>7. The Generation Pipeline</h2>
+
+<p>When you run <code>donut -f payload.exe</code>, the following steps occur:</p>
+
+<div class="card">
+<h4>Step-by-Step Generation</h4>
+<ol>
+<li><strong>Parse the input</strong> &mdash; identify file type (PE, .NET, VBS, JS, XSL), architecture, and characteristics</li>
+<li><strong>Build DONUT_MODULE</strong> &mdash; serialize the payload with metadata (class, method, arguments, runtime version)</li>
+<li><strong>Compress</strong> (optional) &mdash; compress the module using aPLib, LZNT1, or Xpress Huffman</li>
+<li><strong>Generate random keys</strong> &mdash; create random Chaskey key, nonce, and counter for encryption</li>
+<li><strong>Encrypt DONUT_MODULE</strong> &mdash; encrypt the compressed module with Chaskey in CTR mode</li>
+<li><strong>Build DONUT_INSTANCE</strong> &mdash; populate with API hashes, keys, bypass flags, module metadata</li>
+<li><strong>Encrypt DONUT_INSTANCE</strong> &mdash; encrypt the instance with a separate Chaskey key</li>
+<li><strong>Concatenate</strong> &mdash; prepend the PIC loader, append the encrypted instance + module</li>
+<li><strong>Output</strong> &mdash; write the final shellcode to <code>loader.bin</code></li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Course Roadmap</h2>
+
+<div class="card">
+<h4>What Comes Next</h4>
+<table>
+<tr><th>Module</th><th>Topic</th><th>Focus</th></tr>
+<tr><td>1 (this)</td><td>The PE-to-Shellcode Problem</td><td>Motivation and landscape</td></tr>
+<tr><td>2</td><td>PE Loader Fundamentals</td><td>Sections, imports, relocations</td></tr>
+<tr><td>3</td><td>.NET CLR Hosting</td><td>In-memory .NET execution</td></tr>
+<tr><td>4</td><td>Module Architecture</td><td>DONUT_MODULE and DONUT_INSTANCE</td></tr>
+<tr><td>5</td><td>The Donut Loader</td><td>PIC loader internals</td></tr>
+<tr><td>6</td><td>Encryption &amp; Anti-Detection</td><td>Chaskey, AMSI/WLDP/ETW bypass</td></tr>
+<tr><td>7</td><td>Advanced Payload Types</td><td>COM-based script execution, exit options</td></tr>
+<tr><td>8</td><td>Full Chain &amp; Detection</td><td>Integration, YARA, forensics</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="q1">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="2">
+<p>1. What is the primary advantage of a shellcode converter (like Donut) over a reflective loader?</p>
+<label data-opt="0"><input type="radio" name="q1_1">It produces smaller output files</label>
+<label data-opt="1"><input type="radio" name="q1_1">It runs faster at execution time</label>
+<label data-opt="2"><input type="radio" name="q1_1">It works with arbitrary input binaries without source modification</label>
+<label data-opt="3"><input type="radio" name="q1_1">It does not require any memory allocation</label>
+<div class="explain">A converter like Donut can take any PE, .NET assembly, or script as input without needing to modify the original binary. A reflective loader must be compiled into the DLL source code.</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>2. Why can&rsquo;t a standard PE file be directly injected as shellcode?</p>
+<label data-opt="0"><input type="radio" name="q1_2">PE files are too large for process injection</label>
+<label data-opt="1"><input type="radio" name="q1_2">PE files contain absolute addresses, imports, and section alignment requirements</label>
+<label data-opt="2"><input type="radio" name="q1_2">PE files are encrypted by the Windows loader</label>
+<label data-opt="3"><input type="radio" name="q1_2">PE files can only run in kernel mode</label>
+<div class="explain">PE files are not position-independent: they contain absolute addresses, import references to external DLLs, and sections with different alignment requirements. All of these must be resolved by a loader before the code can execute.</div>
+</div>
+
+<div class="quiz-q" data-correct="3">
+<p>3. Which encryption cipher does Donut use to protect the payload?</p>
+<label data-opt="0"><input type="radio" name="q1_3">AES-256-CBC</label>
+<label data-opt="1"><input type="radio" name="q1_3">RC4 via SystemFunction032</label>
+<label data-opt="2"><input type="radio" name="q1_3">ChaCha20-Poly1305</label>
+<label data-opt="3"><input type="radio" name="q1_3">Chaskey block cipher in CTR mode</label>
+<div class="explain">Donut uses the Chaskey lightweight block cipher (designed by Nicky Mouha) in CTR mode with randomly generated keys for each shellcode generation. This was chosen for its small code footprint and suitability for PIC code.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('q1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: PE Loader Fundamentals &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

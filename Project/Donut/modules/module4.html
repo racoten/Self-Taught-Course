@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: Donut Module Architecture - Donut Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F369;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#ec4899;--accent2:#db2777;--gradient:linear-gradient(135deg,#ec4899,#db2777)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Donut Course</h2>
+<span>PE-to-Shellcode Masterclass</span>
+</div>
+<a class="home-link" href="../Donut_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. The PE-to-Shellcode Problem</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Loader Fundamentals</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module3.html"><span>3. .NET CLR Hosting</span><span class="diff d1">B</span></a>
+<a class="mod-link active" href="module4.html"><span>4. Module Architecture</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Donut Loader</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module6.html"><span>6. Encryption &amp; Anti-Detection</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module7.html"><span>7. Advanced Payload Types</span><span class="diff d3">A</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">A</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 4: Donut Module Architecture</h1>
+<p class="subtitle">The internal data structures that define how Donut packages, encrypts, and configures payloads &mdash; <code>DONUT_INSTANCE</code> and <code>DONUT_MODULE</code>.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the two core data structures at the heart of Donut: the <code>DONUT_MODULE</code> (which wraps the payload with metadata) and the <code>DONUT_INSTANCE</code> (which configures the loader with API hashes, keys, and runtime parameters). Learn how compression with aPLib and LZNT1/Xpress reduces shellcode size.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Two-Layer Architecture</h2>
+
+<p>Donut uses a two-layer data structure design. The outer layer (<code>DONUT_INSTANCE</code>) configures the loader itself &mdash; which APIs to resolve, what keys to use, where the module is. The inner layer (<code>DONUT_MODULE</code>) wraps the actual payload with execution metadata.</p>
+
+<div class="diagram">
+<h4>Data Structure Nesting</h4>
+<div class="flow">
+<div class="box">PIC Loader Code</div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">DONUT_INSTANCE<br><small>Encrypted (Key 1)<br>API hashes, config, Key 2</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">DONUT_MODULE<br><small>Encrypted (Key 2)<br>Compressed payload + metadata</small></div>
+</div>
+</div>
+
+<p>The loader first decrypts <code>DONUT_INSTANCE</code> using a key derived from its position in the shellcode. This gives it the API hashes needed to resolve functions, plus the key to decrypt <code>DONUT_MODULE</code>. It then decrypts the module, decompresses the payload, and dispatches to the correct handler.</p>
+
+<!-- ============================================================ -->
+<h2>2. The DONUT_MODULE Structure</h2>
+
+<p>The <code>DONUT_MODULE</code> contains everything the loader needs to execute the payload. It is defined in <code>donut.h</code>:</p>
+
+<pre><span class="lang-tag">C</span>typedef struct _DONUT_MODULE {
+    DWORD   type;           // Module type: DLL, EXE, .NET, VBS, JS, XSL
+    DWORD   thread;         // Run payload in a new thread?
+    DWORD   compress;       // Compression engine used (aPLib, LZNT1, Xpress, None)
+
+    // .NET-specific fields
+    CHAR    runtime[DONUT_MAX_NAME]; // CLR runtime version (e.g., "v4.0.30319")
+    CHAR    domain[DONUT_MAX_NAME];  // AppDomain name (random or user-supplied)
+    CHAR    cls[DONUT_MAX_NAME];     // Class name for .NET DLL (e.g., "Rubeus.Program")
+    CHAR    method[DONUT_MAX_NAME];  // Method name (e.g., "Main")
+
+    // Native DLL-specific fields
+    CHAR    function[DONUT_MAX_NAME]; // Export function to call (for native DLLs)
+    CHAR    param[DONUT_MAX_NAME];    // Parameters / command-line arguments
+
+    // Unicode versions of the above (for COM/CLR interfaces)
+    WCHAR   wRuntime[DONUT_MAX_NAME];
+    WCHAR   wDomain[DONUT_MAX_NAME];
+    WCHAR   wClass[DONUT_MAX_NAME];
+    WCHAR   wMethod[DONUT_MAX_NAME];
+
+    // Payload data
+    DWORD   mac;            // MAC for integrity verification after decryption
+    DWORD   zlen;           // Compressed size of the payload
+    DWORD   len;            // Original uncompressed size
+    BYTE    data[];         // The payload bytes (flexible array member)
+} DONUT_MODULE;</pre>
+
+<table>
+<tr><th>Field</th><th>Purpose</th><th>Used By</th></tr>
+<tr><td><code>type</code></td><td>Identifies the payload type, controls dispatch</td><td>All loaders</td></tr>
+<tr><td><code>runtime</code></td><td>CLR version string for .NET hosting</td><td><code>inmem_dotnet.c</code></td></tr>
+<tr><td><code>cls</code> / <code>method</code></td><td>Class and method name for .NET DLL invocation</td><td><code>inmem_dotnet.c</code></td></tr>
+<tr><td><code>function</code></td><td>Export name for native DLL call</td><td><code>inmem_pe.c</code></td></tr>
+<tr><td><code>param</code></td><td>Command-line arguments for the payload</td><td>All loaders</td></tr>
+<tr><td><code>compress</code></td><td>Compression algorithm indicator</td><td>Decompressor dispatch</td></tr>
+<tr><td><code>zlen</code> / <code>len</code></td><td>Compressed and original sizes for decompression</td><td>Decompressor</td></tr>
+<tr><td><code>data[]</code></td><td>The actual payload bytes (compressed + encrypted)</td><td>All loaders</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. Module Type Constants</h2>
+
+<p>The <code>type</code> field determines which handler function the loader calls. Donut defines these module types:</p>
+
+<pre><span class="lang-tag">C</span>#define DONUT_MODULE_NET_DLL  1  // .NET DLL (requires class + method)
+#define DONUT_MODULE_NET_EXE  2  // .NET EXE (has Main entry point)
+#define DONUT_MODULE_DLL      3  // Native unmanaged DLL
+#define DONUT_MODULE_EXE      4  // Native unmanaged EXE
+#define DONUT_MODULE_VBS      5  // VBScript file
+#define DONUT_MODULE_JS       6  // JScript file
+#define DONUT_MODULE_XSL      7  // XSL file (with embedded script)</pre>
+
+<p>The loader uses a simple switch/dispatch based on this value to call the appropriate in-memory execution function: <code>RunPE()</code>, <code>RunDotNET()</code>, or <code>RunScript()</code>.</p>
+
+<!-- ============================================================ -->
+<h2>4. The DONUT_INSTANCE Structure</h2>
+
+<p>The <code>DONUT_INSTANCE</code> is the loader&rsquo;s runtime configuration. It contains everything the PIC loader needs to bootstrap itself:</p>
+
+<pre><span class="lang-tag">C</span>typedef struct _DONUT_INSTANCE {
+    DWORD   len;            // Total size of this instance
+    CHASKEY master;         // Chaskey key for decrypting the module
+
+    // Chaskey cipher state for module decryption
+    BYTE    mod_key[CIPHER_KEY_LEN];   // Module encryption key
+    BYTE    mod_ctr[CIPHER_BLK_LEN];   // Module CTR nonce
+
+    DWORD   mod_len;        // Size of the encrypted module
+    ULONGLONG mod_offset;   // Offset to DONUT_MODULE from start of instance
+
+    // Exit behavior
+    DWORD   exit_opt;       // DONUT_OPT_EXIT_THREAD, DONUT_OPT_EXIT_PROCESS, or DONUT_OPT_EXIT_BLOCK
+
+    // Entropy / evasion
+    DWORD   entropy;        // Entropy level (random names vs. fixed)
+    DWORD   oep;            // Original entry point (for PE payloads)
+
+    // AMSI/WLDP/ETW bypass configuration
+    DWORD   bypass;         // Bypass level (none, abort, continue)
+
+    // API hashing: pre-computed hashes for all needed functions
+    ULONGLONG hash[DONUT_MAX_API]; // Array of API name hashes
+
+    // Staging configuration
+    DWORD   type;           // Staging type (HTTP, DNS, embedded)
+    CHAR    server[256];    // Staging server URL/hostname
+    CHAR    modname[256];   // Module name on the staging server
+
+    // Instance encryption (decrypted by initial key derivation)
+    BYTE    key[CIPHER_KEY_LEN];  // Instance-level Chaskey key
+    BYTE    ctr[CIPHER_BLK_LEN];  // Instance-level CTR nonce
+    DWORD   mac;                   // MAC for integrity verification
+
+    // Resolved API pointers (filled at runtime by the loader)
+    // These are populated after PEB walking resolves each hash
+    struct {
+        // kernel32.dll
+        LoadLibraryA_t         LoadLibraryA;
+        GetProcAddress_t       GetProcAddress;
+        VirtualAlloc_t         VirtualAlloc;
+        VirtualFree_t          VirtualFree;
+        VirtualProtect_t       VirtualProtect;
+        // oleaut32.dll
+        SafeArrayCreate_t      SafeArrayCreate;
+        SafeArrayAccessData_t  SafeArrayAccessData;
+        SysAllocString_t       SysAllocString;
+        // ole32.dll
+        CoInitializeEx_t       CoInitializeEx;
+        CoCreateInstance_t     CoCreateInstance;
+        // ... additional API function pointers
+    } api;
+} DONUT_INSTANCE;</pre>
+
+<div class="card">
+<h4>API Hash Table</h4>
+<p>The <code>hash[]</code> array contains pre-computed hashes of API function names (e.g., hash of <code>"LoadLibraryA"</code>, hash of <code>"VirtualAlloc"</code>). The PIC loader walks the PEB, finds loaded DLLs, and compares export names against these hashes. When a match is found, the resolved address is stored in the corresponding <code>api</code> struct field. This avoids having plaintext API strings in the shellcode.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Payload Compression</h2>
+
+<p>Donut supports three compression engines to reduce shellcode size. Compression is applied to the raw payload bytes before encryption:</p>
+
+<table>
+<tr><th>Engine</th><th>Constant</th><th>Characteristics</th><th>Implementation</th></tr>
+<tr><td><strong>None</strong></td><td><code>DONUT_COMPRESS_NONE</code></td><td>No compression; payload stored as-is</td><td>N/A</td></tr>
+<tr><td><strong>aPLib</strong></td><td><code>DONUT_COMPRESS_APLIB</code></td><td>Small decompressor (~150 bytes PIC code), good ratio</td><td><code>depack.c</code> (aPLib decompression)</td></tr>
+<tr><td><strong>LZNT1</strong></td><td><code>DONUT_COMPRESS_LZNT1</code></td><td>Uses <code>RtlDecompressBuffer</code> from ntdll.dll</td><td>Windows native API</td></tr>
+<tr><td><strong>Xpress Huffman</strong></td><td><code>DONUT_COMPRESS_XPRESS</code></td><td>Uses <code>RtlDecompressBufferEx</code>, better ratio than LZNT1</td><td>Windows native API</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Compression Trade-offs</h4>
+<p><strong>aPLib</strong> is self-contained &mdash; the decompressor is compiled into the PIC loader, so it works without resolving any APIs. This makes it the safest choice. <strong>LZNT1</strong> and <strong>Xpress</strong> produce better compression ratios but require resolving <code>RtlDecompressBuffer</code> from ntdll.dll at runtime, adding API resolution overhead and a dependency on the ntdll export.</p>
+</div>
+
+<pre><span class="lang-tag">C</span>// aPLib decompression in the PIC loader (depack.c)
+// Extremely compact decompressor suitable for shellcode
+DWORD aP_depack(const void *source, void *destination) {
+    const BYTE *src = (const BYTE*)source;
+    BYTE *dst = (BYTE*)destination;
+    DWORD  tag = 0, bitcount = 0;
+    DWORD  offs, len, R0 = ~0;
+
+    *dst++ = *src++;  // First byte is literal
+
+    for (;;) {
+        // Bit-packed stream: literals, matches, and short matches
+        // Compact implementation ~150 bytes of x86 code
+        // ...
+    }
+    return (DWORD)(dst - (BYTE*)destination);
+}</pre>
+
+<!-- ============================================================ -->
+<h2>6. Staging: Embedded vs. Remote</h2>
+
+<p>The <code>DONUT_MODULE</code> can be embedded directly in the shellcode (default) or hosted on a remote server and downloaded at runtime:</p>
+
+<div class="card">
+<h4>Embedded (Default)</h4>
+<p>The encrypted module is appended directly after the <code>DONUT_INSTANCE</code> in the shellcode blob. The loader accesses it via the <code>mod_offset</code> field. This produces a single self-contained shellcode file.</p>
+</div>
+
+<div class="card">
+<h4>HTTP Staging</h4>
+<p>The module is hosted on a web server. The <code>DONUT_INSTANCE</code> contains the URL (<code>server</code> field) and module name. At runtime, the loader uses <code>WinINet</code> APIs (<code>InternetOpenA</code>, <code>InternetOpenUrlA</code>, <code>InternetReadFile</code>) to download and decrypt the module. This keeps the initial shellcode small.</p>
+</div>
+
+<div class="card">
+<h4>DNS Staging</h4>
+<p>The module is served via DNS TXT records. The loader issues DNS queries to retrieve the module data in chunks, reassembles it, and decrypts. This provides a covert download channel that may bypass network monitoring.</p>
+</div>
+
+<div class="diagram">
+<h4>Embedded vs. Staged</h4>
+<div class="flow">
+<div class="box">Embedded<br><small>Loader + Instance + Module<br>= single blob</small></div>
+<div class="arrow">vs</div>
+<div class="box y">HTTP Staged<br><small>Loader + Instance only<br>Module downloaded at runtime</small></div>
+<div class="arrow">vs</div>
+<div class="box b">DNS Staged<br><small>Loader + Instance only<br>Module via DNS TXT</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. The DONUT_CONFIG Structure</h2>
+
+<p>At generation time (not runtime), Donut uses <code>DONUT_CONFIG</code> to collect user options before building the shellcode:</p>
+
+<pre><span class="lang-tag">C</span>typedef struct _DONUT_CONFIG {
+    DWORD   arch;       // Target architecture: x86, x64, or x86+x64
+    DWORD   bypass;     // AMSI/WLDP/ETW bypass level
+    DWORD   compress;   // Compression engine
+    DWORD   entropy;    // Entropy level for string randomization
+    DWORD   format;     // Output format: raw, base64, C array, Python, etc.
+    DWORD   exit_opt;   // Exit behavior: thread, process, or block
+    DWORD   thread;     // Create new thread for payload?
+    DWORD   oep;        // Overwrite PE entry point after execution
+
+    CHAR    input[DONUT_MAX_NAME];    // Input file path
+    CHAR    output[DONUT_MAX_NAME];   // Output file path
+    CHAR    cls[DONUT_MAX_NAME];      // .NET class name
+    CHAR    method[DONUT_MAX_NAME];   // .NET method name
+    CHAR    param[DONUT_MAX_NAME];    // Parameters / arguments
+    CHAR    server[256];              // Staging server URL
+    CHAR    modname[256];             // Module name for staging
+
+    // Populated during generation
+    DWORD   inst_len;   // Instance size
+    DWORD   mod_len;    // Module size
+    LPVOID  inst;       // Pointer to generated instance
+    LPVOID  mod;        // Pointer to generated module
+    LPVOID  pic;        // Pointer to final PIC shellcode
+    DWORD   pic_len;    // Final shellcode size
+} DONUT_CONFIG;</pre>
+
+<!-- ============================================================ -->
+<h2>8. Data Flow: From Input to Output</h2>
+
+<div class="diagram">
+<h4>Complete Data Flow</h4>
+<div class="flow">
+<div class="box">Input File<br><small>EXE/DLL/.NET/Script</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Wrap in MODULE<br><small>+ metadata fields</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Compress<br><small>aPLib / LZNT1</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Encrypt MODULE<br><small>Chaskey (Key 2)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">Build INSTANCE<br><small>+ API hashes + Key 2</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Encrypt INSTANCE<br><small>Chaskey (Key 1)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Prepend Loader<br><small>Final shellcode</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="q4">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="1">
+<p>1. What is the relationship between DONUT_INSTANCE and DONUT_MODULE?</p>
+<label data-opt="0"><input type="radio" name="q4_1">They are the same structure with different names</label>
+<label data-opt="1"><input type="radio" name="q4_1">INSTANCE configures the loader; MODULE wraps the payload with execution metadata</label>
+<label data-opt="2"><input type="radio" name="q4_1">MODULE contains the loader code; INSTANCE contains the payload</label>
+<label data-opt="3"><input type="radio" name="q4_1">Both are encrypted with the same key</label>
+<div class="explain">DONUT_INSTANCE is the outer configuration layer containing API hashes, encryption keys, and bypass settings. DONUT_MODULE is the inner layer wrapping the actual payload with metadata like class name, method, and arguments. They use separate encryption keys.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>2. Why is aPLib compression preferred over LZNT1 for shellcode payloads?</p>
+<label data-opt="0"><input type="radio" name="q4_2">aPLib decompression is self-contained in the PIC loader with no API dependencies</label>
+<label data-opt="1"><input type="radio" name="q4_2">aPLib produces smaller output than LZNT1</label>
+<label data-opt="2"><input type="radio" name="q4_2">LZNT1 is deprecated on modern Windows</label>
+<label data-opt="3"><input type="radio" name="q4_2">aPLib is faster than LZNT1</label>
+<div class="explain">aPLib decompression code is compiled directly into the PIC loader (~150 bytes), so it works without resolving any Windows APIs. LZNT1 and Xpress require calling <code>RtlDecompressBuffer</code> from ntdll.dll, adding an API resolution dependency.</div>
+</div>
+
+<div class="quiz-q" data-correct="2">
+<p>3. What does the <code>hash[]</code> array in DONUT_INSTANCE contain?</p>
+<label data-opt="0"><input type="radio" name="q4_3">SHA-256 hashes of the payload sections</label>
+<label data-opt="1"><input type="radio" name="q4_3">Hashes of encryption keys for validation</label>
+<label data-opt="2"><input type="radio" name="q4_3">Pre-computed hashes of Windows API function names for PEB-based resolution</label>
+<label data-opt="3"><input type="radio" name="q4_3">File hashes for integrity checking</label>
+<div class="explain">The hash array contains pre-computed hashes of API names (e.g., "LoadLibraryA", "VirtualAlloc"). The PIC loader walks loaded DLLs via the PEB and compares export name hashes against these values to resolve function addresses without using plaintext strings.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('q4')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Previous: .NET CLR Hosting</a>
+<a class="primary" href="module5.html">Next: The Donut Loader &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

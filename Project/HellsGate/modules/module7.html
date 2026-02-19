@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 7: Halo's Gate & TartarusGate Extensions - HellsGate Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#e11d48;--accent2:#be123c;--gradient:linear-gradient(135deg,#e11d48,#be123c)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>HellsGate Course</h2>
+<span>Dynamic SSN &amp; Direct Syscalls</span>
+</div>
+<a class="home-link" href="../HellsGate_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Hooking</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Syscall Architecture</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> SSN Basics</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> ntdll Stub Anatomy</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hell's Gate Algorithm</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Direct Syscall Exec</a>
+<a class="mod-link active" href="module7.html"><span class="diff d3">7</span> Halo's &amp; Tartarus Gate</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 7: Halo's Gate &amp; TartarusGate Extensions</h1>
+<p class="subtitle">When the gate is hooked, ask the neighbors.</p>
+
+<div class="card highlight">
+<h4>Beyond the Original</h4>
+<p>The original Hell's Gate fails if the target stub is hooked -- the SSN bytes are overwritten by the JMP patch. <strong>Halo's Gate</strong> (by Sektor7) and <strong>TartarusGate</strong> (by trickster0) solve this by searching neighboring syscall stubs to calculate the target SSN. This module covers the hook detection improvements, the neighbor search algorithm, and how these extensions handle various EDR hooking styles.</p>
+</div>
+
+<h2>The Problem: Hooked Stubs</h2>
+<p>When an EDR hooks <code>NtAllocateVirtualMemory</code>, it overwrites the first 5+ bytes of the stub with a JMP instruction. The original Hell's Gate checks for the pattern <code>4c 8b d1 b8</code> and returns FALSE if it does not match. But the SSN information is not truly lost -- it can be recovered from the layout of ntdll's syscall region.</p>
+
+<pre><code><span class="lang-tag">ASM</span>; A hooked stub: first 5 bytes replaced by JMP
+NtAllocateVirtualMemory:       ; SSN = 0x18 (but we can't read it directly)
+  e9 xx xx xx xx    jmp  EDR_Hook     ; EDR's JMP overwrites mov r10,rcx + b8
+  00 00 00          (remaining bytes of original mov eax, 0x18)
+  ...
+
+; BUT neighboring stubs are often still clean:
+NtAccessCheckByType:           ; SSN = 0x17 (one below, NOT hooked)
+  4c 8b d1          mov  r10, rcx
+  b8 17 00 00 00    mov  eax, 0x17    ; Clean! We can read this SSN
+  ...
+
+NtWorkerFactoryWorkerReady:    ; SSN = 0x19 (one above, NOT hooked)
+  4c 8b d1          mov  r10, rcx
+  b8 19 00 00 00    mov  eax, 0x19    ; Clean! We can read this SSN
+  ...</code></pre>
+
+<div class="card warn">
+<h4>The Key Insight</h4>
+<p>Syscall stubs in ntdll.dll are laid out <strong>contiguously</strong> in memory, each approximately 32 bytes apart (the exact size depends on the Windows version). Since SSNs are assigned sequentially, if you find a clean neighbor stub N positions away, you can calculate the target SSN as <code>neighbor_SSN +/- N</code>. EDRs typically only hook a subset of functions (20-50 out of ~470), so clean neighbors are almost always available within a few positions.</p>
+</div>
+
+<h2>Halo's Gate: Neighbor Search</h2>
+<p>Halo's Gate (introduced by Sektor7) extends Hell's Gate with a bidirectional search. When a stub is hooked, it walks up and down through adjacent stubs looking for one that is clean:</p>
+
+<pre><code><span class="lang-tag">C</span>// Halo's Gate neighbor search algorithm
+// 'pFunctionAddress' points to the hooked stub
+// Each stub is approximately 0x20 (32) bytes apart in memory
+
+BOOL HalosGateResolve(PVOID pFunctionAddress, PWORD pSSN) {
+    BYTE* stub = (BYTE*)pFunctionAddress;
+
+    // First, try the direct read (original Hell's Gate check)
+    if (stub[0] == 0x4c && stub[1] == 0x8b && stub[2] == 0xd1 && stub[3] == 0xb8) {
+        *pSSN = *(WORD*)(stub + 4);
+        return TRUE;  // Stub is clean
+    }
+
+    // Stub is hooked -- search neighbors
+    // Search both UP (higher addresses, higher SSNs)
+    // and DOWN (lower addresses, lower SSNs)
+
+    for (WORD delta = 1; delta &lt; 500; delta++) {
+        // Search DOWN (neighbor with SSN = target - delta)
+        BYTE* neighborDown = stub - (delta * 0x20);  // 0x20 = stub size
+        if (neighborDown[0] == 0x4c &&
+            neighborDown[1] == 0x8b &&
+            neighborDown[2] == 0xd1 &&
+            neighborDown[3] == 0xb8) {
+            // Found clean neighbor below
+            WORD neighborSSN = *(WORD*)(neighborDown + 4);
+            *pSSN = neighborSSN + delta;  // Target is 'delta' positions above
+            return TRUE;
+        }
+
+        // Search UP (neighbor with SSN = target + delta)
+        BYTE* neighborUp = stub + (delta * 0x20);
+        if (neighborUp[0] == 0x4c &&
+            neighborUp[1] == 0x8b &&
+            neighborUp[2] == 0xd1 &&
+            neighborUp[3] == 0xb8) {
+            // Found clean neighbor above
+            WORD neighborSSN = *(WORD*)(neighborUp + 4);
+            *pSSN = neighborSSN - delta;  // Target is 'delta' positions below
+            return TRUE;
+        }
+    }
+
+    return FALSE;  // All nearby stubs are hooked (very unlikely)
+}</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Halo's Gate Neighbor Search</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box" style="width:100%">Stub at offset -0x40 (delta=2): <code>4c 8b d1 b8 16 00</code> &larr; SSN 0x16 (clean)</div>
+<div class="box g" style="width:100%">Stub at offset -0x20 (delta=1): <code>4c 8b d1 b8 17 00</code> &larr; SSN 0x17 (clean)</div>
+<div class="box r" style="width:100%">TARGET STUB at offset 0: <code>e9 xx xx xx xx</code> &larr; HOOKED (SSN unknown)</div>
+<div class="box g" style="width:100%">Stub at offset +0x20 (delta=1): <code>4c 8b d1 b8 19 00</code> &larr; SSN 0x19 (clean)</div>
+<div class="box" style="width:100%">Stub at offset +0x40 (delta=2): <code>e9 xx xx xx xx</code> &larr; HOOKED</div>
+</div>
+</div>
+
+<p>In the diagram above, the target stub (SSN 0x18) is hooked. Halo's Gate finds the clean neighbor at delta=1 below (SSN 0x17) and calculates: <code>0x17 + 1 = 0x18</code>. Alternatively, it could use the neighbor at delta=1 above (SSN 0x19) and calculate <code>0x19 - 1 = 0x18</code>.</p>
+
+<h2>TartarusGate: Improved Hook Detection</h2>
+<p>TartarusGate (by trickster0) improves the hook detection logic. The original Hell's Gate and Halo's Gate only check byte 0 for <code>0xE9</code> (a JMP hook). But some EDRs place their JMP hook at byte 3 (offset 0x03), right after the 3-byte <code>mov r10, rcx</code> instruction. This produces the byte pattern <code>4c 8b d1 e9</code> -- the stub starts correctly but has a JMP where the <code>mov eax, SSN</code> opcode (<code>0xB8</code>) should be. TartarusGate adds a check for this pattern:</p>
+
+<pre><code><span class="lang-tag">C</span>// TartarusGate hook detection
+// Checks byte 0 AND byte 3 for JMP hooks
+
+BOOL IsStubHooked(BYTE* stub) {
+    // Check 1: Classic JMP hook (first byte is E9)
+    // EDR overwrites from byte 0: e9 xx xx xx xx ...
+    if (stub[0] == 0xe9)
+        return TRUE;
+
+    // Check 2: JMP hook at byte 3 (after mov r10, rcx)
+    // Some EDRs preserve the 3-byte "mov r10, rcx" but place
+    // a JMP where "mov eax, SSN" should be:
+    //   4c 8b d1 e9 xx xx xx xx   (hooked)
+    // vs expected clean pattern:
+    //   4c 8b d1 b8 XX XX 00 00   (clean)
+    // Halo's Gate only checks byte 0 for 0xe9, missing this hook style
+    if (stub[3] == 0xe9)
+        return TRUE;
+
+    return FALSE;  // Stub appears clean
+}</code></pre>
+
+<div class="card green">
+<h4>TartarusGate's Byte 3 Check</h4>
+<p>The key improvement in TartarusGate is checking byte 3 for <code>0xE9</code> (JMP). In a clean stub, byte 3 is always <code>0xB8</code> (the opcode for <code>mov eax, imm32</code>). Some EDRs hook by preserving the initial <code>mov r10, rcx</code> (bytes 0-2: <code>4c 8b d1</code>) but placing a JMP at byte 3 to redirect execution before the SSN is loaded. Hell's Gate and Halo's Gate only check byte 0 for <code>0xE9</code>, so they see the correct <code>0x4C</code> at byte 0 and assume the stub is clean -- but the SSN at bytes 4-5 is actually part of the JMP displacement, giving a bogus value. TartarusGate catches this by also checking byte 3.</p>
+</div>
+
+<h2>Comparison of Gate Techniques</h2>
+
+<table>
+<tr><th>Technique</th><th>Author</th><th>Hook Detection</th><th>SSN Recovery</th><th>Handles</th></tr>
+<tr><td><strong>Hell's Gate</strong></td><td>am0nsec / RtlMateusz</td><td>Checks <code>4c 8b d1 b8</code> prefix</td><td>Direct read only</td><td>Clean stubs only; fails on hooked</td></tr>
+<tr><td><strong>Halo's Gate</strong></td><td>Sektor7</td><td>Same as Hell's Gate</td><td>Neighbor search (up/down by 0x20)</td><td>Hooked stubs via neighbor calculation</td></tr>
+<tr><td><strong>TartarusGate</strong></td><td>trickster0</td><td>Extended: also checks byte 3 for <code>0xE9</code> (JMP after <code>mov r10, rcx</code>)</td><td>Neighbor search + improved detection</td><td>Classic JMP hooks at byte 0 and JMP hooks at byte 3</td></tr>
+</table>
+
+<h2>Edge Cases and Pitfalls</h2>
+
+<div class="card warn">
+<h4>Stub Size Variability</h4>
+<p>The neighbor search assumes a fixed stub size (typically 0x20 = 32 bytes). However, the actual stub size can vary slightly between Windows versions. On some builds, stubs include additional padding or a different test/jnz sequence. A more robust implementation would use the EAT to find neighboring function addresses directly, rather than assuming a fixed byte offset. This ensures correct neighbor identification regardless of stub size.</p>
+</div>
+
+<h2>SysWhispers Variants</h2>
+<p>While not gate techniques per se, the SysWhispers family uses different approaches to the same SSN resolution problem and is worth understanding for context:</p>
+
+<pre><code><span class="lang-tag">C</span>// SysWhispers2: Sorts Zw* exports by address to derive SSN
+// Since stubs are laid out in SSN order in memory,
+// the Nth export (sorted by address) has SSN = N
+
+// Step 1: Collect all Zw* export addresses from the EAT
+typedef struct { PVOID addr; DWORD64 hash; } SYSCALL_ENTRY;
+SYSCALL_ENTRY entries[MAX_ENTRIES];
+DWORD count = 0;
+
+for (DWORD i = 0; i &lt; pExportDir->NumberOfNames; i++) {
+    PCHAR name = (PCHAR)(base + pdwAddrOfNames[i]);
+    if (name[0] == 'Z' && name[1] == 'w') {
+        entries[count].addr = (PVOID)(base + pdwAddrOfFunctions[pwOrdinals[i]]);
+        entries[count].hash = djb2((PBYTE)name);
+        count++;
+    }
+}
+
+// Step 2: Sort by address (ascending)
+qsort(entries, count, sizeof(SYSCALL_ENTRY), cmpAddr);
+
+// Step 3: SSN = index in sorted array
+for (DWORD i = 0; i &lt; count; i++) {
+    if (entries[i].hash == targetHash) {
+        resolvedSSN = (WORD)i;  // Position = SSN
+        break;
+    }
+}</code></pre>
+
+<div class="card">
+<h4>Address Sorting vs. Stub Reading</h4>
+<p>The SysWhispers2 approach of sorting Zw* exports by address is an elegant alternative to reading stub bytes. Since stubs are laid out in SSN order, the function with the lowest address has SSN 0, the next has SSN 1, and so on. This works even when stubs are hooked because it only reads the EAT (function addresses), not the stub bytes themselves. The trade-off is that it requires enumerating and sorting all ~470 Zw* exports, whereas Hell's Gate only reads the specific stubs it needs.</p>
+</div>
+
+<div class="quiz" id="quiz7">
+<h4>Pop Quiz: Gate Extensions</h4>
+<div class="quiz-q" data-correct="0">
+<p>Q1: In Halo's Gate, if the target stub is hooked and the nearest clean neighbor is 3 positions below with SSN 0x15, what is the target SSN?</p>
+<label data-opt="0"><input type="radio" name="q7_0"> 0x18 (0x15 + 3)</label>
+<label data-opt="1"><input type="radio" name="q7_0"> 0x12 (0x15 - 3)</label>
+<label data-opt="2"><input type="radio" name="q7_0"> 0x15 (same as the neighbor)</label>
+<label data-opt="3"><input type="radio" name="q7_0"> Cannot be determined without the stub bytes</label>
+<div class="explain">If the clean neighbor is 3 positions below (lower memory address, lower SSN), its SSN is 3 less than the target. So target = neighbor + delta = 0x15 + 3 = 0x18.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: What improvement does TartarusGate add over Halo's Gate?</p>
+<label data-opt="0"><input type="radio" name="q7_1"> It uses a different hash algorithm for function names</label>
+<label data-opt="1"><input type="radio" name="q7_1"> It executes syscall from ntdll memory instead of the user's code</label>
+<label data-opt="2"><input type="radio" name="q7_1"> It also checks byte 3 for <code>0xE9</code>, catching JMP hooks placed after <code>mov r10, rcx</code></label>
+<label data-opt="3"><input type="radio" name="q7_1"> It reads SSNs from the on-disk ntdll file instead of memory</label>
+<div class="explain">TartarusGate adds a check for byte 3 being <code>0xE9</code> (JMP). Some EDRs preserve the 3-byte <code>mov r10, rcx</code> instruction but place a JMP at byte 3 (where <code>mov eax, SSN</code> should start). Halo's Gate only checks byte 0 for <code>0xE9</code> and misses this hooking pattern. TartarusGate catches it by also checking byte 3.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q3: Why does the SysWhispers2 address-sorting approach work even when stubs are hooked?</p>
+<label data-opt="0"><input type="radio" name="q7_2"> Hooks do not change the function addresses in the EAT</label>
+<label data-opt="1"><input type="radio" name="q7_2"> It only reads EAT function addresses (which point to stub start), not the stub bytes themselves</label>
+<label data-opt="2"><input type="radio" name="q7_2"> SysWhispers2 unhooks stubs before reading them</label>
+<label data-opt="3"><input type="radio" name="q7_2"> The sorting algorithm ignores hooked entries</label>
+<div class="explain">EAT addresses point to the start of each stub. Inline hooks modify the code at those addresses but do not change the EAT pointers. Since SysWhispers2 only reads addresses from the EAT (not stub bytes), it gets correct addresses even for hooked functions. Sorting these addresses gives the SSN order.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz7')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module6.html">&larr; Previous: Direct Syscall Execution</a>
+<a class="primary" href="module8.html">Next: Full Chain &amp; Detection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

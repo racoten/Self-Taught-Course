@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: SystemFunction032 &amp; Shellcode Mapping - ShellGhost Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F47B;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#64748b;--accent2:#475569;--gradient:linear-gradient(135deg,#64748b,#475569)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ShellGhost Course</h2>
+<span>Single-Instruction Evasion</span>
+</div>
+<a class="home-link" href="../ShellGhost_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Memory Scanner Evasion Goals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Software Breakpoints &amp; INT3</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Vectored Exception Handling</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. The ShellGhost Concept</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module5.html"><span>5. SystemFunction032 &amp; Shellcode Mapping</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. VEH Handler Implementation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Background: Trap Flag &amp; Single-Stepping</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 5: SystemFunction032 &amp; Shellcode Mapping</h1>
+<p class="subtitle">How ShellGhost pre-processes shellcode into per-instruction encrypted chunks and uses Windows' built-in RC4 API for decryption.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand ShellGhost's core innovation: the <strong>shellcode mapping</strong> preprocessing step, and how it enables per-instruction encryption. You will learn how <code>ShellGhost_mapping.py</code> disassembles shellcode and generates <code>CRYPT_BYTES_QUOTA</code> structs, how <code>SystemFunction032</code> from advapi32.dll provides RC4 encryption/decryption, and why each instruction is encrypted independently (no persistent RC4 state between handler calls). This preprocessing pipeline is the mechanism that makes per-instruction decryption possible.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Shellcode Mapping Innovation</h2>
+
+<p>ShellGhost's most important innovation is not the VEH handler itself, but the <strong>preprocessing step</strong> that makes per-instruction handling possible. A Python script (<code>ShellGhost_mapping.py</code>) analyzes the raw shellcode offline and produces the data structures the VEH handler needs at runtime.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Shellcode Mapping Pipeline</h4>
+<div class="flow">
+<div class="flow box">Raw Shellcode<br><small>Binary bytes</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Disassemble<br><small>Capstone / disasm</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Map Instructions<br><small>RVA + byte count</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Encrypt Each Instr<br><small>RC4 independently</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Output C Arrays<br><small>Compile into binary</small></div>
+</div>
+</div>
+
+<div class="card green">
+<h4>Why Preprocessing Matters</h4>
+<p>Without the preprocessing step, the VEH handler would need to determine instruction boundaries at runtime &mdash; which is extremely difficult. x86/x64 instructions range from 1 to 15 bytes, and decoding them requires a full disassembler. By disassembling the shellcode offline, ShellGhost pre-computes each instruction's offset and length, storing them in a <code>CRYPT_BYTES_QUOTA</code> structure. At runtime, the handler simply looks up the current instruction index to know exactly how many bytes to decrypt.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. The CRYPT_BYTES_QUOTA Structure</h2>
+
+<p>Each instruction in the shellcode is represented by a <code>CRYPT_BYTES_QUOTA</code> struct containing two fields:</p>
+
+<pre><span class="lang-tag">C</span>// Per-instruction mapping structure
+typedef struct _CRYPT_BYTES_QUOTA {
+    DWORD rva;      // Offset of this instruction from shellcode base
+    DWORD quota;    // Number of bytes in this instruction
+} CRYPT_BYTES_QUOTA;</pre>
+
+<div class="card">
+<h4>Example: Mapping a Simple Shellcode</h4>
+<pre><span class="lang-tag">Text</span>Shellcode disassembly:
+  Offset  Bytes           Instruction
+  0x0000  48 89 E5        mov rbp, rsp
+  0x0003  48 83 EC 20     sub rsp, 0x20
+  0x0007  31 C9           xor ecx, ecx
+  0x0009  FF D0           call rax
+  0x000B  C3              ret
+
+Generated CRYPT_BYTES_QUOTA array:
+  { 0x0000, 3 },   // mov rbp, rsp      (3 bytes)
+  { 0x0003, 4 },   // sub rsp, 0x20     (4 bytes)
+  { 0x0007, 2 },   // xor ecx, ecx      (2 bytes)
+  { 0x0009, 2 },   // call rax           (2 bytes)
+  { 0x000B, 1 },   // ret                (1 byte)</pre>
+</div>
+
+<p>The preprocessing script generates this array as C source code that is compiled directly into the ShellGhost binary. At runtime, instruction N's location and size are simply <code>map[N].rva</code> and <code>map[N].quota</code>.</p>
+
+<!-- ============================================================ -->
+<h2>3. Per-Instruction Independent Encryption</h2>
+
+<p>A critical design decision in ShellGhost: <strong>each instruction is encrypted independently</strong>. There is no persistent RC4 state carried between instructions. Each encryption/decryption operation is a fresh call to SystemFunction032 with the same key but operating on different data.</p>
+
+<div class="card warn">
+<h4>Why Independent Encryption?</h4>
+<p>If instructions were encrypted as a continuous stream (like traditional RC4 usage), decrypting instruction N would require processing all bytes of instructions 0 through N-1 first &mdash; making random access impossible. By encrypting each instruction independently, ShellGhost can decrypt any instruction at any time with just the key and the instruction's encrypted bytes. This also means that the encrypted bytes for each instruction are self-contained: knowing the key and the ciphertext is sufficient to recover the plaintext, with no dependency on previous instructions.</p>
+</div>
+
+<table>
+<tr><th>Approach</th><th>State Between Instructions</th><th>Random Access</th><th>ShellGhost Uses</th></tr>
+<tr><td>Continuous RC4 stream</td><td>S-box + i,j must persist</td><td>No (sequential only)</td><td>No</td></tr>
+<tr><td><strong>Independent per-instruction RC4</strong></td><td><strong>No state needed</strong></td><td><strong>Yes (any instruction)</strong></td><td><strong>Yes</strong></td></tr>
+<tr><td>AES-CTR with counter</td><td>Counter value</td><td>Yes (counter = offset)</td><td>No</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>4. SystemFunction032: Windows RC4 API</h2>
+
+<p>ShellGhost does not implement its own RC4 cipher. Instead, it uses <code>SystemFunction032</code>, an undocumented but well-known function exported by <code>advapi32.dll</code> that performs RC4 encryption/decryption:</p>
+
+<pre><span class="lang-tag">C</span>// SystemFunction032 prototype (undocumented, from advapi32.dll)
+// Performs RC4 encryption/decryption in-place
+typedef NTSTATUS (WINAPI *_SystemFunction032)(
+    PUNICODE_STRING Data,   // Buffer to encrypt/decrypt (in-place)
+    PUNICODE_STRING Key     // RC4 key
+);
+
+// Note: UNICODE_STRING is repurposed here as a generic buffer descriptor:
+typedef struct _UNICODE_STRING {
+    USHORT Length;           // Number of bytes in the buffer
+    USHORT MaximumLength;   // Total buffer capacity
+    PWSTR  Buffer;          // Pointer to the data (not actually Unicode)
+} UNICODE_STRING;</pre>
+
+<div class="card green">
+<h4>Why SystemFunction032?</h4>
+<ul>
+<li><strong>Avoids custom crypto code</strong>: No need to implement RC4 manually, reducing code size and avoiding telltale crypto constants in the binary</li>
+<li><strong>Legitimate API</strong>: The function is part of advapi32.dll, a standard Windows DLL. Calling it does not raise suspicion.</li>
+<li><strong>Symmetric</strong>: RC4 encryption and decryption are the same operation (XOR with keystream). Calling SystemFunction032 twice with the same key restores the original data.</li>
+<li><strong>No persistent state</strong>: Each call to SystemFunction032 initializes fresh RC4 state internally, which is exactly what ShellGhost needs for per-instruction independent encryption.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Using SystemFunction032</h2>
+
+<pre><span class="lang-tag">C</span>// Resolve SystemFunction032 at runtime
+HMODULE hAdvapi = LoadLibraryA("advapi32.dll");
+_SystemFunction032 SystemFunction032 =
+    (_SystemFunction032)GetProcAddress(hAdvapi, "SystemFunction032");
+
+// Decrypt one instruction using SystemFunction032
+void DecryptInstruction(PBYTE exec_buf, PBYTE enc_data,
+                        CRYPT_BYTES_QUOTA *entry, PBYTE key, USHORT key_len) {
+    // Copy encrypted bytes to execution buffer
+    memcpy(exec_buf + entry->rva, enc_data + entry->rva, entry->quota);
+
+    // Set up the UNICODE_STRING structures
+    UNICODE_STRING data_str;
+    data_str.Length = (USHORT)entry->quota;
+    data_str.MaximumLength = (USHORT)entry->quota;
+    data_str.Buffer = (PWSTR)(exec_buf + entry->rva);
+
+    UNICODE_STRING key_str;
+    key_str.Length = key_len;
+    key_str.MaximumLength = key_len;
+    key_str.Buffer = (PWSTR)key;
+
+    // Decrypt in place (RC4 is symmetric: same operation for encrypt/decrypt)
+    SystemFunction032(&data_str, &key_str);
+}
+
+// Re-encrypt is the same operation applied again
+void ReEncryptInstruction(PBYTE exec_buf,
+                          CRYPT_BYTES_QUOTA *entry, PBYTE key, USHORT key_len) {
+    UNICODE_STRING data_str;
+    data_str.Length = (USHORT)entry->quota;
+    data_str.MaximumLength = (USHORT)entry->quota;
+    data_str.Buffer = (PWSTR)(exec_buf + entry->rva);
+
+    UNICODE_STRING key_str;
+    key_str.Length = key_len;
+    key_str.MaximumLength = key_len;
+    key_str.Buffer = (PWSTR)key;
+
+    SystemFunction032(&data_str, &key_str);
+    // After this, the bytes at exec_buf + entry->rva are encrypted again
+}</pre>
+
+<!-- ============================================================ -->
+<h2>6. The Preprocessing Script</h2>
+
+<p>The <code>ShellGhost_mapping.py</code> script performs these steps:</p>
+
+<ol>
+<li><strong>Read</strong> the raw shellcode binary file</li>
+<li><strong>Disassemble</strong> the shellcode using a disassembly engine (e.g., Capstone)</li>
+<li><strong>Record</strong> each instruction's offset (RVA) and byte count into a <code>CRYPT_BYTES_QUOTA</code> array</li>
+<li><strong>Encrypt</strong> each instruction's bytes independently using RC4 with the chosen key</li>
+<li><strong>Output</strong> C source code containing:
+<ul>
+<li>The encrypted shellcode as a byte array</li>
+<li>The <code>CRYPT_BYTES_QUOTA</code> mapping array</li>
+<li>The total number of instructions</li>
+</ul>
+</li>
+</ol>
+
+<pre><span class="lang-tag">C</span>// Example output from ShellGhost_mapping.py (compiled into binary)
+
+// Encrypted shellcode data (each instruction encrypted independently)
+unsigned char encrypted_shellcode[] = {
+    0xA3, 0x7F, 0x12,              // instruction 0 (3 bytes, encrypted)
+    0xBB, 0x44, 0x91, 0xD7,        // instruction 1 (4 bytes, encrypted)
+    0x5E, 0xC2,                    // instruction 2 (2 bytes, encrypted)
+    0x1A, 0xF8,                    // instruction 3 (2 bytes, encrypted)
+    0x9D,                          // instruction 4 (1 byte, encrypted)
+};
+
+// Instruction mapping
+CRYPT_BYTES_QUOTA shellcode_map[] = {
+    { 0x0000, 3 },
+    { 0x0003, 4 },
+    { 0x0007, 2 },
+    { 0x0009, 2 },
+    { 0x000B, 1 },
+};
+
+#define NUM_INSTRUCTIONS 5</pre>
+
+<!-- ============================================================ -->
+<h2>7. RC4 Background: How It Works Internally</h2>
+
+<p>While ShellGhost uses SystemFunction032 rather than a custom implementation, understanding RC4's internals helps explain why it works for per-instruction encryption:</p>
+
+<div class="card">
+<h4>RC4 in Brief</h4>
+<ul>
+<li><strong>Key Scheduling Algorithm (KSA)</strong>: Initializes a 256-byte permutation (S-box) from the key. Same key always produces the same initial state.</li>
+<li><strong>Pseudo-Random Generation Algorithm (PRGA)</strong>: Generates a keystream byte-by-byte. Each byte is produced by swapping two S-box entries and using the result as an index.</li>
+<li><strong>Encryption/Decryption</strong>: XOR each plaintext byte with the corresponding keystream byte. Since XOR is its own inverse, the same operation encrypts and decrypts.</li>
+<li><strong>No block size</strong>: RC4 is a stream cipher with no fixed block size, so it can handle data of any length without padding.</li>
+</ul>
+</div>
+
+<div class="card">
+<h4>Per-Instruction Independence</h4>
+<p>When SystemFunction032 is called, it runs the full KSA from the key, then generates enough keystream bytes to XOR with the data buffer. Because each instruction is encrypted as a separate call, each starts from a fresh RC4 state initialized from the same key. This means the same key produces the same keystream prefix for every instruction &mdash; but since each instruction's ciphertext was produced with this same fresh state, decryption correctly recovers the plaintext. The trade-off is that this is slightly less cryptographically strong than a continuous stream, but for ShellGhost's purpose (defeating automated scanners), it is more than sufficient.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Security Considerations</h2>
+
+<div class="card warn">
+<h4>RC4 Is Cryptographically Broken</h4>
+<p>RC4 has known statistical biases in its keystream (particularly in the first 256 bytes) and is deprecated for use in TLS and other protocols. However, for ShellGhost's use case, this does not matter. The goal is not to protect confidentiality against a dedicated cryptanalyst &mdash; the goal is to prevent <strong>automated memory scanners</strong> from recognizing shellcode patterns. Using the Windows-provided SystemFunction032 also means ShellGhost avoids embedding custom crypto code. An analyst who captures the key can decrypt the shellcode regardless of which cipher is used.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: What does ShellGhost_mapping.py produce?</p>
+<div class="quiz-btn" data-choice="A">A) A DLL that performs encryption at runtime</div>
+<div class="quiz-btn" data-choice="B">B) C arrays of per-instruction encrypted data and CRYPT_BYTES_QUOTA mappings</div>
+<div class="quiz-btn" data-choice="C">C) An executable shellcode loader</div>
+<div class="quiz-btn" data-choice="D">D) A YARA rule for the shellcode</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q2: How does ShellGhost handle RC4 state between instruction decryptions?</p>
+<div class="quiz-btn" data-choice="A">A) It maintains a persistent S-box that advances with each instruction</div>
+<div class="quiz-btn" data-choice="B">B) It saves and restores RC4 state to disk between calls</div>
+<div class="quiz-btn" data-choice="C">C) There is no persistent state &mdash; each instruction is encrypted/decrypted independently with a fresh RC4 call</div>
+<div class="quiz-btn" data-choice="D">D) It uses AES instead of RC4 for state management</div>
+</div>
+
+<div class="quiz-q" data-answer="A">
+<p>Q3: What Windows API does ShellGhost use for RC4 encryption/decryption?</p>
+<div class="quiz-btn" data-choice="A">A) SystemFunction032 from advapi32.dll</div>
+<div class="quiz-btn" data-choice="B">B) CryptEncrypt from crypt32.dll</div>
+<div class="quiz-btn" data-choice="C">C) BCryptEncrypt from bcrypt.dll</div>
+<div class="quiz-btn" data-choice="D">D) A custom RC4 implementation compiled into the binary</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Prev: The ShellGhost Concept</a>
+<a class="primary" href="module6.html">Next: VEH Handler Implementation &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: Polymorphic Engines: Concepts - Shoggoth Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F419;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#a855f7;--accent2:#7c3aed;--gradient:linear-gradient(135deg,#a855f7,#7c3aed)}</style>
+</head>
+<body>
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+<nav>
+<div class="logo">
+<h2>Shoggoth Course</h2>
+<span>Polymorphic Engine Masterclass</span>
+</div>
+<a class="home-link" href="../Shoggoth_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Signatures &amp; Polymorphism</span><span class="diff d1">d1</span></a>
+<a class="mod-link active" href="module2.html"><span>2. Polymorphic Engine Concepts</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. asmjit: Runtime Codegen</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Shoggoth Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Encryption Layer</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Decoder Stub Generation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Junk Code &amp; Anti-Analysis</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: Polymorphic Engines &mdash; Concepts</h1>
+<p class="subtitle">What polymorphism means in the malware context, how it differs from metamorphism, and the historical evolution of self-mutating code.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand the formal definition of polymorphism in executable code, distinguish it from metamorphism, learn the historical lineage from early DOS viruses to modern tools like Shoggoth, and grasp the core components every polymorphic engine must implement.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Defining Polymorphism</h2>
+
+<p>In biology, polymorphism refers to organisms of the same species existing in multiple forms. In the context of executable code, <strong>polymorphism</strong> means that a program can change its own binary representation while preserving its original functionality. Each instance of a polymorphic program looks different at the byte level, but they all perform the same computation when executed.</p>
+
+<p>More precisely, a polymorphic engine takes an input payload <code>P</code> and produces an output <code>E(P)</code> such that:</p>
+
+<ul>
+<li><strong>Functional equivalence:</strong> Executing <code>E(P)</code> eventually produces the same behavior as executing <code>P</code></li>
+<li><strong>Structural variance:</strong> Given two outputs <code>E1(P)</code> and <code>E2(P)</code> from different runs, the byte content of <code>E1</code> and <code>E2</code> differs substantially</li>
+<li><strong>Self-contained decryption:</strong> <code>E(P)</code> includes all code necessary to reverse the transformation and recover <code>P</code> at runtime</li>
+</ul>
+
+<p>The output typically consists of two parts: a <strong>decoder stub</strong> (variable code that performs decryption) and an <strong>encrypted payload</strong> (the original code, transformed to be unreadable without the decoder). The polymorphic property applies primarily to the decoder stub &mdash; it is the part that must change between generations to avoid signature detection.</p>
+
+<!-- ============================================================ -->
+<h2>2. Polymorphic vs Metamorphic</h2>
+
+<p>These two terms are often confused. While both involve code mutation, they operate at fundamentally different levels:</p>
+
+<table>
+<tr><th>Property</th><th>Polymorphic</th><th>Metamorphic</th></tr>
+<tr><td><strong>What changes</strong></td><td>The decoder stub (wrapper around encrypted payload)</td><td>The entire program body, including functional code</td></tr>
+<tr><td><strong>Payload state</strong></td><td>Encrypted at rest, decrypted at runtime</td><td>Always in cleartext &mdash; the code itself is rewritten</td></tr>
+<tr><td><strong>Mutation timing</strong></td><td>At generation time (before delivery)</td><td>At propagation time (virus rewrites itself when copying)</td></tr>
+<tr><td><strong>Complexity</strong></td><td>Moderate &mdash; generate variable decoder + encrypt payload</td><td>Very high &mdash; must rewrite arbitrary code while preserving semantics</td></tr>
+<tr><td><strong>Detection difficulty</strong></td><td>Hard (no stable decoder signature) but emulation can reveal payload</td><td>Very hard (no encrypted payload to recover; code is always &ldquo;valid&rdquo;)</td></tr>
+<tr><td><strong>Historical examples</strong></td><td>MtE, SMEG, Shoggoth</td><td>Win32.Simile, Win32.ZMist, Regswap</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>Shoggoth Is Polymorphic, Not Metamorphic</h4>
+<p>Shoggoth encrypts the payload and generates a variable decoder stub. It does <em>not</em> rewrite the payload&rsquo;s own instructions. The payload is treated as an opaque blob of bytes that gets encrypted and later decrypted at runtime. The polymorphism applies to the decoder stub and junk code surrounding it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Historical Evolution</h2>
+
+<p>Polymorphic engines have a four-decade lineage in the virus world. Understanding this history contextualizes Shoggoth as a modern implementation of well-established principles.</p>
+
+<h3>3.1 The Early Era (1990&ndash;1992)</h3>
+
+<p>The concept of self-encrypting code appeared in the late 1980s, but the first true polymorphic engine was the <strong>Mutation Engine (MtE)</strong> released in 1992 by the virus author known as Dark Avenger. MtE was distributed as a linkable object file &mdash; any virus author could incorporate it. It generated random decryption loops using different registers, instruction orderings, and interspersed junk instructions.</p>
+
+<p>MtE demonstrated that polymorphism could be packaged as a reusable library rather than being tightly coupled to a specific virus. This modular approach directly parallels how Shoggoth functions today: a standalone tool that takes any payload and wraps it in polymorphic packaging.</p>
+
+<h3>3.2 The Arms Race (1993&ndash;2000)</h3>
+
+<p>After MtE, virus authors and AV vendors entered an escalating arms race. Engines like <strong>SMEG</strong> (Simulated Metamorphic Encryption Generator) and <strong>TPE</strong> (Trident Polymorphic Engine) pushed the boundaries with more registers, more junk instruction types, and more complex control flow in the decoder. AV vendors responded with <strong>generic decryption (GD)</strong> &mdash; running the code in an emulator until the payload was decrypted, then scanning the cleartext result.</p>
+
+<h3>3.3 Metamorphic Leap (2000&ndash;2010)</h3>
+
+<p>Some virus authors moved beyond polymorphism to full metamorphism. Win32.Simile (2002) could rewrite its own code using instruction substitution, register reassignment, and code transposition &mdash; all without encrypting anything. Win32.ZMist (by the author Z0mbie) took this further with code integration, embedding itself within the host program&rsquo;s control flow graph.</p>
+
+<h3>3.4 Modern Offensive Tools (2010&ndash;Present)</h3>
+
+<p>The red team and offensive security community adopted polymorphic techniques for payload generation. Tools like <strong>msfvenom</strong> (Metasploit) offer encoder chains (shikata_ga_nai, xor_dynamic), <strong>Veil</strong> generates polymorphic payloads in various languages, and <strong>Shoggoth</strong> brings true asmjit-based x86-64 polymorphic encoding with multi-stage encryption and sophisticated junk code generation.</p>
+
+<div class="diagram">
+<h4>Historical Timeline of Polymorphic Engines</h4>
+<div class="flow">
+<div class="box">1992<br><small>MtE</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">1994<br><small>SMEG / TPE</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">2002<br><small>Simile (metamorphic)</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">~2004<br><small>shikata_ga_nai</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">2023<br><small>Shoggoth</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Core Components of a Polymorphic Engine</h2>
+
+<p>Every polymorphic engine, from MtE to Shoggoth, must implement a set of core components. The sophistication of each component determines the engine&rsquo;s evasion capability:</p>
+
+<div class="card">
+<h4>Component Architecture</h4>
+<table>
+<tr><th>Component</th><th>Purpose</th><th>Shoggoth Implementation</th></tr>
+<tr><td><strong>Random Number Generator</strong></td><td>Source of entropy for all decisions</td><td>C++ <code>&lt;random&gt;</code> with optional seed for reproducibility</td></tr>
+<tr><td><strong>Encryption Engine</strong></td><td>Transforms payload bytes into unreadable ciphertext</td><td>Two-stage: RC4 + random block cipher (XOR/ADD/SUB/ROL/ROR/NOT/NEG/INC/DEC)</td></tr>
+<tr><td><strong>Decoder Generator</strong></td><td>Emits machine code that reverses the encryption at runtime</td><td>asmjit x86::Assembler with CodeHolder and JitRuntime</td></tr>
+<tr><td><strong>Register Allocator</strong></td><td>Randomly assigns CPU registers to decoder variables</td><td>Random selection from available GPR pool (RAX-R15, excluding RSP and RBP)</td></tr>
+<tr><td><strong>Junk Code Generator</strong></td><td>Inserts meaningless instructions to break pattern matching</td><td>Recursive generation: jump-over blocks, side-effect-free ops, fake calls</td></tr>
+<tr><td><strong>Output Assembler</strong></td><td>Combines decoder + encrypted payload into final output</td><td>Flat PIC binary blob, optionally with PE/COFF loader prepended</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. The Decoder Stub Anatomy</h2>
+
+<p>The decoder stub is the heart of any polymorphic output. It must accomplish a fixed set of tasks, but the <em>way</em> it accomplishes them varies. Here is a conceptual pseudocode for a polymorphic decoder:</p>
+
+<pre><span class="lang-tag">Pseudocode</span><code>// Conceptual decoder stub structure (varies each generation)
+//
+// 1. Locate encrypted payload (RIP-relative addressing)
+// 2. Set up decryption loop counter
+// 3. For each block/byte of encrypted data:
+//    a. Apply inverse operations (reverse order of encryption)
+//    b. Advance pointer
+// 4. Transfer control to decrypted payload
+//
+// What changes between generations:
+//   - Which registers hold the pointer, counter, key
+//   - Whether the loop counts up or down
+//   - Which instructions implement each operation
+//   - Where junk instructions are inserted
+//   - Whether operations are inlined or use subroutines</code></pre>
+
+<p>The invariant is the <em>algorithm</em> (decrypt the payload, then jump to it). Everything else &mdash; the registers, the instruction encodings, the ordering of setup operations, the junk code &mdash; is variable. This separation of algorithm from implementation is the fundamental principle of polymorphism.</p>
+
+<!-- ============================================================ -->
+<h2>6. Equivalent Instruction Substitution</h2>
+
+<p>A key technique in polymorphic engines is replacing instructions with functionally equivalent alternatives. The x86-64 instruction set is rich with redundancies that engines can exploit:</p>
+
+<table>
+<tr><th>Original Instruction</th><th>Equivalent Alternatives</th></tr>
+<tr><td><code>mov rax, 0</code></td><td><code>xor rax, rax</code> / <code>sub rax, rax</code> / <code>and rax, 0</code> / <code>push 0; pop rax</code></td></tr>
+<tr><td><code>mov rax, rbx</code></td><td><code>push rbx; pop rax</code> / <code>lea rax, [rbx]</code> / <code>xchg rax, rbx</code> (if rbx no longer needed)</td></tr>
+<tr><td><code>add rax, 1</code></td><td><code>inc rax</code> / <code>sub rax, -1</code> / <code>lea rax, [rax+1]</code></td></tr>
+<tr><td><code>test rax, rax</code></td><td><code>cmp rax, 0</code> / <code>or rax, rax</code> / <code>and rax, rax</code></td></tr>
+<tr><td><code>xor [ptr], key</code></td><td><code>mov tmp, [ptr]; xor tmp, key; mov [ptr], tmp</code></td></tr>
+</table>
+
+<p>Each substitution changes the binary encoding (different opcodes, different lengths) while preserving the computational result. When combined with register randomization and junk code insertion, the resulting machine code looks completely different between generations.</p>
+
+<div class="card warn">
+<h4>Side-Effect Awareness</h4>
+<p>Not all substitutions are truly equivalent. Some instructions affect CPU flags differently. For example, <code>lea rax, [rax+1]</code> does not modify the FLAGS register, while <code>inc rax</code> modifies OF, SF, ZF, AF, PF (but not CF), and <code>add rax, 1</code> modifies all arithmetic flags. A correct polymorphic engine must track flag dependencies to avoid breaking the decoder logic.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Why Shoggoth Chose asmjit</h2>
+
+<p>Historical polymorphic engines often assembled machine code manually &mdash; writing raw bytes into a buffer, computing jump offsets by hand, and managing relocations manually. This is error-prone and difficult to maintain. Shoggoth uses <strong>asmjit</strong>, a mature C++ library for runtime x86/x64 code generation, which provides:</p>
+
+<ul>
+<li><strong>Assembler-level abstraction:</strong> Write <code>a.xor_(rax, rbx)</code> instead of computing opcode bytes manually</li>
+<li><strong>Automatic encoding:</strong> asmjit handles REX prefixes, ModR/M bytes, SIB bytes, and displacement encoding</li>
+<li><strong>Label management:</strong> Forward references and branch target resolution are handled automatically</li>
+<li><strong>CodeHolder:</strong> A container that accumulates generated code, manages sections, and handles relocations</li>
+<li><strong>JitRuntime:</strong> Allocates executable memory and copies the generated code for execution (used in testing)</li>
+</ul>
+
+<p>This allows Shoggoth to express its polymorphic transformations at a high level while asmjit handles the low-level encoding details. We will explore asmjit in depth in Module 3.</p>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz2">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="1">
+<p>Q1: What is the key difference between polymorphic and metamorphic code?</p>
+<label data-opt="0"><input type="radio" name="q1"> Polymorphic code is faster than metamorphic code</label>
+<label data-opt="1"><input type="radio" name="q1"> Polymorphic code changes the decoder/wrapper while encrypting the payload; metamorphic code rewrites the functional code itself</label>
+<label data-opt="2"><input type="radio" name="q1"> Metamorphic code uses encryption; polymorphic code does not</label>
+<label data-opt="3"><input type="radio" name="q1"> There is no meaningful difference; the terms are interchangeable</label>
+<div class="explain">Polymorphic engines encrypt the payload and generate a variable decoder stub. Metamorphic engines rewrite the actual functional code instructions (without encryption) using techniques like instruction substitution, register reassignment, and code transposition. The payload in a metamorphic engine is always in cleartext but structurally different each time.</div>
+</div>
+
+<div class="quiz-q" data-correct="0">
+<p>Q2: What was historically significant about MtE (Mutation Engine)?</p>
+<label data-opt="0"><input type="radio" name="q2"> It was the first polymorphic engine distributed as a reusable library that any virus author could incorporate</label>
+<label data-opt="1"><input type="radio" name="q2"> It was the first virus to use XOR encryption</label>
+<label data-opt="2"><input type="radio" name="q2"> It was the first metamorphic virus</label>
+<label data-opt="3"><input type="radio" name="q2"> It was the first virus to target Windows systems</label>
+<div class="explain">MtE (1992) was groundbreaking because it was packaged as a standalone object file that could be linked into any DOS virus. This modular approach &mdash; separating the polymorphic engine from the payload &mdash; established the pattern that tools like Shoggoth follow today.</div>
+</div>
+
+<div class="quiz-q" data-correct="2">
+<p>Q3: Why must a polymorphic engine track CPU flag side effects during instruction substitution?</p>
+<label data-opt="0"><input type="radio" name="q3"> Because CPU flags affect memory allocation</label>
+<label data-opt="1"><input type="radio" name="q3"> Because the operating system checks flags for security violations</label>
+<label data-opt="2"><input type="radio" name="q3"> Because different &ldquo;equivalent&rdquo; instructions may modify flags differently, which could break conditional branches in the decoder</label>
+<label data-opt="3"><input type="radio" name="q3"> Because flags determine which registers are available for use</label>
+<div class="explain">Instructions that appear equivalent for data movement can differ in their flag effects. For example, <code>lea rax,[rax+1]</code> does not modify FLAGS while <code>add rax,1</code> modifies CF, OF, SF, ZF, AF, PF. If the decoder uses a conditional branch that depends on a flag, substituting the wrong instruction can break the decryption logic entirely.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz2')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Prev: Signatures &amp; Detection</a>
+<a class="primary" href="module3.html">Next: asmjit Runtime Codegen &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

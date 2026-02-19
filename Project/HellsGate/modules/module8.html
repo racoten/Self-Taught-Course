@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Full Chain, Detection & Countermeasures - HellsGate Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#e11d48;--accent2:#be123c;--gradient:linear-gradient(135deg,#e11d48,#be123c)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>HellsGate Course</h2>
+<span>Dynamic SSN &amp; Direct Syscalls</span>
+</div>
+<a class="home-link" href="../HellsGate_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Hooking</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Syscall Architecture</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> SSN Basics</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> ntdll Stub Anatomy</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hell's Gate Algorithm</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Direct Syscall Exec</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Halo's &amp; Tartarus Gate</a>
+<a class="mod-link active" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Full Chain, Detection &amp; Countermeasures</h1>
+<p class="subtitle">The gate opens, but the watchtower sees everything -- or does it?</p>
+
+<div class="card highlight">
+<h4>The Complete Picture</h4>
+<p>This final module ties together the entire Hell's Gate chain, from initial PEB walk to syscall execution, and then examines the detection surface from the defender's perspective. Direct syscalls bypass userland hooks, but the kernel has its own instrumentation. Understanding these detection vectors is essential for both offensive research and defensive engineering.</p>
+</div>
+
+<h2>The Complete Execution Chain</h2>
+<p>Let us trace the entire Hell's Gate flow from process startup to syscall completion:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Hell's Gate Complete Chain</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:650px;margin:0 auto">
+<div class="box" style="width:100%">1. Process starts; EDR DLL injected; ntdll stubs are hooked</div>
+<div class="box" style="width:100%">2. Hell's Gate reads PEB &rarr; finds ntdll.dll base address</div>
+<div class="box" style="width:100%">3. Parses ntdll PE headers &rarr; locates Export Address Table</div>
+<div class="box" style="width:100%">4. Walks EAT, hashes each name, matches against target hashes</div>
+<div class="box hl" style="width:100%">5. For each target: reads stub bytes, validates 4c 8b d1 b8 pattern</div>
+<div class="box hl" style="width:100%">6. Extracts SSN from bytes [4:5] (or neighbor search if hooked)</div>
+<div class="box y" style="width:100%">7. Calls HellsGate(ssn) to set the SSN in global variable</div>
+<div class="box y" style="width:100%">8. Calls HellDescent(params...) &rarr; mov r10,rcx; mov eax,ssn; syscall</div>
+<div class="box g" style="width:100%">9. Kernel: KiSystemCall64 &rarr; SSDT dispatch &rarr; Nt* function executes</div>
+<div class="box g" style="width:100%">10. sysret &rarr; NTSTATUS returned to caller. EDR hooks never fired.</div>
+</div>
+</div>
+
+<h2>Detection Vector 1: Syscall Origin Validation</h2>
+<p>The most significant detection vector for direct syscalls is <strong>syscall origin validation</strong>. When the kernel receives a syscall, it can check where the <code>syscall</code> instruction was executed from (the return address in RCX). Legitimately, this should always be inside <strong>ntdll.dll</strong>'s memory range.</p>
+
+<pre><code><span class="lang-tag">C</span>// Kernel-side syscall origin check (conceptual)
+// In KiSystemCall64, RCX contains the return address (where syscall was called from)
+
+PVOID syscallOrigin = (PVOID)TrapFrame->Rcx;  // Return address
+
+// Get ntdll's memory range
+PVOID ntdllBase = PsGetProcessNtdllBase(PsGetCurrentProcess());
+SIZE_T ntdllSize = GetModuleSize(ntdllBase);
+
+// Check if the syscall originated from within ntdll
+if (syscallOrigin &lt; ntdllBase ||
+    syscallOrigin &gt; (PBYTE)ntdllBase + ntdllSize) {
+    // ALERT: syscall from outside ntdll!
+    // This is a strong indicator of direct syscall usage
+    LogSuspiciousSyscall(PsGetCurrentProcess(), syscallOrigin, SSN);
+}</code></pre>
+
+<div class="card warn">
+<h4>The Biggest Weakness of Direct Syscalls</h4>
+<p>When Hell's Gate executes <code>syscall</code> from its own ASM stub, the return address points to the Hell's Gate code (inside the .text section of the malicious binary), <strong>not</strong> into ntdll.dll. A kernel driver or ETW consumer can check this return address and immediately identify that the syscall did not originate from the legitimate ntdll stub. This is the primary detection mechanism modern EDRs use against direct syscall techniques.</p>
+</div>
+
+<h2>Detection Vector 2: ETW Syscall Telemetry</h2>
+<p><strong>Event Tracing for Windows (ETW)</strong> provides kernel-level telemetry that cannot be bypassed by userland techniques. Several ETW providers are relevant:</p>
+
+<table>
+<tr><th>ETW Provider</th><th>What It Captures</th><th>Detection Capability</th></tr>
+<tr><td><code>Microsoft-Windows-Threat-Intelligence</code></td><td>Sensitive operations (memory allocation, thread creation in remote processes)</td><td>Fires regardless of syscall origin; captures full parameters</td></tr>
+<tr><td><code>Microsoft-Windows-Kernel-Audit-API-Calls</code></td><td>Specific security-relevant kernel API calls</td><td>Logs syscall parameters and caller context</td></tr>
+<tr><td><code>Microsoft-Windows-Kernel-Process</code></td><td>Process and thread lifecycle events</td><td>Thread creation detected even via direct syscall</td></tr>
+</table>
+
+<p>The <strong>Threat Intelligence ETW provider</strong> (TI ETW) is particularly important. It is a kernel-level provider registered by the <code>EtwTi</code> (Threat Intelligence) routines in the kernel. It fires callback notifications for sensitive operations like cross-process memory writes, thread injection, and handle duplication -- regardless of whether the syscall came through ntdll or via a direct invocation.</p>
+
+<pre><code><span class="lang-tag">C</span>// Example: ETW TI provider detects NtAllocateVirtualMemory
+// in a remote process, even via direct syscall
+//
+// The kernel function NtAllocateVirtualMemory internally calls:
+//   EtwTiLogAllocExecVm()
+// which generates an ETW event with:
+//   - Caller process ID
+//   - Target process ID
+//   - Base address
+//   - Size
+//   - Protection flags
+//   - Call stack (including the suspicious return address)
+//
+// The EDR's kernel-mode ETW consumer receives this event
+// and can correlate it with other activity</code></pre>
+
+<div class="card green">
+<h4>Why ETW Is Hard to Evade</h4>
+<p>ETW instrumentation is embedded inside the kernel functions themselves. When <code>NtAllocateVirtualMemory</code> executes in the kernel, the ETW logging call happens inside that function's code path. There is no user-mode bypass for this -- the events fire regardless of how the syscall was invoked. Disabling or tampering with ETW providers from user mode (e.g., patching <code>EtwEventWrite</code>) is itself detectable and increasingly protected by Kernel Patch Protection (PatchGuard) and Hypervisor-protected Code Integrity (HVCI).</p>
+</div>
+
+<h2>Detection Vector 3: Kernel Callbacks</h2>
+<p>Windows provides kernel callback mechanisms that EDR drivers register with to receive notifications about security-relevant events:</p>
+
+<table>
+<tr><th>Callback</th><th>Registration API</th><th>Events</th></tr>
+<tr><td>Process Notify</td><td><code>PsSetCreateProcessNotifyRoutineEx</code></td><td>Process creation and termination</td></tr>
+<tr><td>Thread Notify</td><td><code>PsSetCreateThreadNotifyRoutine</code></td><td>Thread creation (detects NtCreateThreadEx even via direct syscall)</td></tr>
+<tr><td>Image Load Notify</td><td><code>PsSetLoadImageNotifyRoutine</code></td><td>DLL/image loading (detects manual mapping attempts)</td></tr>
+<tr><td>Object Callbacks</td><td><code>ObRegisterCallbacks</code></td><td>Handle operations (open process, duplicate handle)</td></tr>
+<tr><td>Minifilter Callbacks</td><td><code>FltRegisterFilter</code></td><td>File I/O operations (payload drops, persistence)</td></tr>
+</table>
+
+<p>These kernel callbacks fire based on the <strong>kernel operation</strong>, not on how the syscall was invoked. When <code>NtCreateThreadEx</code> creates a thread (whether called via ntdll or direct syscall), the thread creation notify callback fires. The EDR's kernel driver receives the notification with the process ID, thread ID, and start address -- enough to detect injection.</p>
+
+<h2>Detection Vector 4: Call Stack Analysis</h2>
+<p>Modern EDRs perform <strong>call stack inspection</strong> during kernel callbacks and ETW event processing. The call stack reveals the origin of the syscall:</p>
+
+<pre><code><span class="lang-tag">C</span>// Legitimate call stack for NtAllocateVirtualMemory:
+//   ntdll!NtAllocateVirtualMemory+0x14      (syscall instruction)
+//   KERNELBASE!VirtualAlloc+0x47             (wrapper)
+//   myprogram!main+0x123                     (application code)
+//   kernel32!BaseThreadInitThunk+0x14
+
+// Suspicious call stack (direct syscall via Hell's Gate):
+//   malware.exe!HellDescent+0x0A             (syscall from unknown module!)
+//   malware.exe!main+0x456                   (caller)
+//   kernel32!BaseThreadInitThunk+0x14
+
+// The absence of ntdll in the call stack is a STRONG indicator</code></pre>
+
+<div class="card warn">
+<h4>Indirect Syscalls: The Counter-Countermeasure</h4>
+<p>To evade syscall origin checks, some tools use <strong>indirect syscalls</strong> (e.g., RecycledGate, SysWhispers3). Instead of executing <code>syscall</code> from their own code, they set up registers and then JMP to the <code>syscall</code> instruction <em>inside ntdll</em> (at the known offset within the stub). This way, the return address points to ntdll, making the call appear legitimate. However, the call stack still reveals the unusual caller before ntdll.</p>
+</div>
+
+<h2>The Evolving Arms Race</h2>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">The Syscall Evasion Arms Race</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:650px;margin:0 auto">
+<div class="box" style="width:100%"><strong>Era 1:</strong> Attackers call Nt* functions normally &rarr; EDRs add userland hooks</div>
+<div class="box" style="width:100%"><strong>Era 2:</strong> Attackers unhook ntdll &rarr; EDRs detect unhooking (integrity checks)</div>
+<div class="box hl" style="width:100%"><strong>Era 3:</strong> Hell's Gate (direct syscalls) &rarr; EDRs add kernel callbacks + ETW</div>
+<div class="box hl" style="width:100%"><strong>Era 4:</strong> Indirect syscalls (RecycledGate) &rarr; EDRs check call stack depth</div>
+<div class="box y" style="width:100%"><strong>Era 5:</strong> Stack spoofing + sleep obfuscation &rarr; EDRs add hardware breakpoints + ETW TI</div>
+<div class="box g" style="width:100%"><strong>Current:</strong> Multi-layer detection: hooks + ETW + callbacks + stack analysis + ML</div>
+</div>
+</div>
+
+<h2>Countermeasures Summary</h2>
+
+<table>
+<tr><th>Detection Method</th><th>What It Catches</th><th>Bypass Difficulty</th></tr>
+<tr><td>Userland hooks (ntdll)</td><td>Normal API calls</td><td>Low (Hell's Gate bypasses completely)</td></tr>
+<tr><td>Syscall origin check</td><td>syscall from non-ntdll address</td><td>Medium (indirect syscalls evade)</td></tr>
+<tr><td>ETW TI provider</td><td>Sensitive operations at kernel level</td><td>High (kernel-level, hard to tamper)</td></tr>
+<tr><td>Kernel callbacks</td><td>Thread creation, handle ops, image loads</td><td>High (kernel-level, registered by driver)</td></tr>
+<tr><td>Call stack analysis</td><td>Missing ntdll frames, unusual callers</td><td>Medium-High (stack spoofing is complex)</td></tr>
+<tr><td>Thread start address</td><td>Threads starting in non-image-backed memory</td><td>Medium (ROP/thread hijacking can evade)</td></tr>
+<tr><td>Memory scanning</td><td>RWX pages, unbacked executable regions</td><td>Medium (W^X + encryption during sleep)</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>The Key Takeaway</h4>
+<p>Hell's Gate and direct syscalls are not a silver bullet. They effectively bypass <strong>one layer</strong> of defense (userland hooks), but modern EDR solutions deploy multiple overlapping detection layers. The technique remains valuable as part of a larger evasion strategy, but must be combined with stack spoofing, indirect syscalls, ETW tampering, and sleep obfuscation to evade the full detection stack. Understanding both the offensive technique and its detection surfaces makes you a better security researcher on either side.</p>
+</div>
+
+<h2>OPSEC Considerations</h2>
+<p>If you are studying these techniques for red team operations or security research, consider the following operational security points:</p>
+
+<pre><code><span class="lang-tag">C</span>// OPSEC checklist for direct syscall implementations:
+
+// 1. STATIC SIGNATURES
+//    - DJB2 hash constants are known IOCs
+//    - The HellsGate/HellDescent function names are signatured
+//    - The wSystemCall global variable pattern is detectable
+//    Solution: Use custom hash algorithms, randomize names, obfuscate
+
+// 2. BEHAVIORAL INDICATORS
+//    - PEB walking + EAT parsing sequence is suspicious
+//    - Rapid succession of direct syscalls from non-ntdll code
+//    - Allocate + Write + Protect + CreateThread pattern
+//    Solution: Add delays, vary execution order, use alternative techniques
+
+// 3. MEMORY INDICATORS
+//    - The .text section contains syscall instructions (0F 05)
+//    - The ASM stub pattern is identifiable in memory
+//    - Shellcode in non-image-backed memory
+//    Solution: Encrypt stubs when not in use, use stomped modules
+
+// 4. BUILD ARTIFACTS
+//    - Debug symbols, PDB paths, compiler metadata
+//    - Import table reveals CRT usage (if not minimized)
+//    - Section names and characteristics
+//    Solution: Strip symbols, minimize imports, customize PE metadata</code></pre>
+
+<div class="card green">
+<h4>What Hell's Gate Started</h4>
+<p>The Hell's Gate paper and implementation by am0nsec and RtlMateusz catalyzed an entire field of research. Its core insight -- that SSNs can be resolved dynamically from ntdll stubs -- led to Halo's Gate, TartarusGate, SysWhispers2/3, RecycledGate, FreshyCalls, and dozens of other implementations. Understanding Hell's Gate gives you the foundation to understand every subsequent direct syscall technique, as they all build on the same principles of stub parsing and direct invocation.</p>
+</div>
+
+<div class="quiz" id="quiz8">
+<h4>Pop Quiz: Detection &amp; Countermeasures</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: What is the primary way the kernel can detect that a syscall was executed via Hell's Gate instead of through ntdll?</p>
+<label data-opt="0"><input type="radio" name="q8_0"> The SSN value is slightly different when not from ntdll</label>
+<label data-opt="1"><input type="radio" name="q8_0"> The return address (saved in RCX by syscall) points to the Hell's Gate stub, not to ntdll.dll</label>
+<label data-opt="2"><input type="radio" name="q8_0"> The kernel detects that ntdll hooks were removed</label>
+<label data-opt="3"><input type="radio" name="q8_0"> Direct syscalls use a different CPU instruction</label>
+<div class="explain">When syscall executes, it stores the return address in RCX (which the kernel saves in the trap frame). If the syscall was executed from Hell's Gate's HellDescent function, this address points outside ntdll.dll. Kernel-side checks can compare this against ntdll's address range to detect direct syscalls.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q2: Why can't direct syscalls evade the ETW Threat Intelligence provider?</p>
+<label data-opt="0"><input type="radio" name="q8_1"> Because ETW hooks are in user mode alongside ntdll</label>
+<label data-opt="1"><input type="radio" name="q8_1"> Because ETW requires the syscall to pass through ntdll</label>
+<label data-opt="2"><input type="radio" name="q8_1"> Because ETW is protected by HVCI</label>
+<label data-opt="3"><input type="radio" name="q8_1"> Because ETW instrumentation is inside the kernel function itself, and fires regardless of how the syscall was invoked</label>
+<div class="explain">ETW TI instrumentation is embedded within the kernel Nt* functions. When the kernel executes NtAllocateVirtualMemory (dispatched via SSDT regardless of caller), the ETW logging call inside that function fires an event. There is no user-mode bypass because the instrumentation is in kernel code.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: What technique do indirect syscalls (e.g., RecycledGate) use to evade syscall origin checks?</p>
+<label data-opt="0"><input type="radio" name="q8_2"> They encrypt the return address before executing syscall</label>
+<label data-opt="1"><input type="radio" name="q8_2"> They patch the kernel's origin check to skip validation</label>
+<label data-opt="2"><input type="radio" name="q8_2"> They JMP to the syscall instruction inside ntdll, so the return address points to ntdll memory</label>
+<label data-opt="3"><input type="radio" name="q8_2"> They execute syscall from a mapped copy of ntdll at the same address</label>
+<div class="explain">Indirect syscalls set up all registers (including EAX with the SSN) and then JMP to the address of the syscall instruction within the actual ntdll stub. Since the syscall instruction executes from ntdll's address range, the return address stored in RCX points back into ntdll, passing origin validation checks.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz8')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Previous: Halo's &amp; Tartarus Gate</a>
+<a class="primary" href="../HellsGate_index.html">Back to Course Home &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

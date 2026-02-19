@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: Remote Function Hooking Concept - ThreadlessInject Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9F5;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#14b8a6;--accent2:#0d9488;--gradient:linear-gradient(135deg,#14b8a6,#0d9488)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ThreadlessInject Course</h2>
+<span>Threadless Injection Masterclass</span>
+</div>
+<a class="home-link" href="../ThreadlessInject_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> Thread Creation Problem</a>
+<a class="mod-link active" href="module2.html"><span class="diff d1">2</span> Remote Function Hooking</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> Target Function Selection</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> Remote Memory Allocation</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hook Stub Architecture</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Installing Remote Hook</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Execution &amp; Cleanup</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: Remote Function Hooking Concept</h1>
+<p class="subtitle">Redirect execution flow by patching the first bytes of a function &mdash; even in another process.</p>
+
+<div class="card highlight">
+<h4>The Core Idea</h4>
+<p>Inline function hooking is a technique where you overwrite the beginning of a target function with a jump instruction that redirects execution to your own code. This has been used for decades in debugging, instrumentation, and game modding. ThreadlessInject applies this concept <strong>across process boundaries</strong>: you hook a function inside a remote process so that when an existing thread in that process calls the hooked function, it runs your shellcode instead.</p>
+</div>
+
+<h2>What Is Inline Hooking?</h2>
+<p>At the machine code level, every function begins with a <strong>prologue</strong> &mdash; a sequence of instructions that sets up the stack frame. On x64 Windows, a typical function prologue looks like this:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; Typical x64 function prologue (5+ bytes)
+mov edi, edi          ; 2 bytes - hot-patch padding (older convention)
+push rbp              ; 1 byte  - save base pointer
+mov rbp, rsp          ; 3 bytes - set up stack frame
+sub rsp, 0x20         ; 4 bytes - allocate shadow space
+
+; Or more commonly in modern MSVC compiled code:
+sub rsp, 0x28         ; 4 bytes - allocate stack space
+mov [rsp+0x30], rcx   ; 5 bytes - save first parameter</code></pre>
+
+<p>An inline hook overwrites these first bytes with a jump instruction that redirects execution to a different address. The original bytes that were overwritten are saved so they can be executed later (this is the "trampoline" pattern), allowing the original function to still work after the hook runs.</p>
+
+<h2>The Hook Jump: Overwriting the Prologue</h2>
+<p>On x64, the most common way to redirect execution is with an absolute indirect jump. You need to get to an arbitrary 64-bit address, which requires more than a simple relative <code>JMP</code> (which is limited to a 32-bit signed displacement, or roughly +/- 2GB). The standard approach is:</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; Absolute jump via RIP-relative addressing (14 bytes total)
+; This is what gets written over the function prologue
+jmp [rip+0]           ; FF 25 00 00 00 00  (6 bytes) - jump to address stored at [RIP+0]
+dq targetAddress      ; 8 bytes - the 64-bit absolute address to jump to
+
+; After execution of "jmp [rip+0]":
+;   RIP is loaded from the 8 bytes immediately following the JMP instruction
+;   This gives us a full 64-bit address range</code></pre>
+
+<p>This 14-byte sequence is the building block of ThreadlessInject's remote hook. The 6-byte <code>JMP [RIP+0]</code> instruction tells the CPU to load the next instruction pointer from the memory location immediately after itself, which contains the 8-byte absolute address of your hook function (or in ThreadlessInject's case, your shellcode loader stub).</p>
+
+<div class="card warn">
+<h4>Why 14 Bytes?</h4>
+<p>A relative <code>JMP rel32</code> (opcode <code>E9</code>) is only 5 bytes but can only reach addresses within +/- 2GB of the current instruction. Since shellcode could be allocated anywhere in the 64-bit address space, you need the full absolute jump. The <code>FF 25</code> encoding with a following 8-byte address gives you complete coverage of the address space at the cost of overwriting 14 bytes of the target function's prologue.</p>
+</div>
+
+<h2>The Trampoline Pattern</h2>
+<p>When you overwrite a function's first 14 bytes, you destroy those original instructions. If you simply redirect to your shellcode and never execute the original function, the target process will break &mdash; whatever functionality that function provided is now gone. The <strong>trampoline</strong> solves this by preserving the overwritten bytes and providing a way to execute them after your hook code runs.</p>
+
+<div class="diagram">
+<h4>Inline Hook with Trampoline Flow</h4>
+<div class="flow">
+<div class="box">Caller invokes<br><code>TargetFunc()</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">JMP to<br>Hook Stub</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Execute<br>Shellcode</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Execute saved<br>original bytes</div>
+<div class="arrow">&rarr;</div>
+<div class="box">JMP back to<br>TargetFunc+14</div>
+</div>
+</div>
+
+<p>The trampoline works in four stages:</p>
+<ol>
+<li><strong>Redirect</strong>: The caller enters <code>TargetFunc()</code> and immediately hits the JMP instruction that was patched in. Execution transfers to the hook stub.</li>
+<li><strong>Hook execution</strong>: The hook stub saves register state, calls the shellcode payload, then restores register state.</li>
+<li><strong>Original bytes</strong>: The saved original prologue bytes are executed. These are the instructions that were overwritten by the JMP.</li>
+<li><strong>Resume</strong>: A second JMP transfers execution back to <code>TargetFunc+14</code> (the instruction immediately after the overwritten region), and the original function continues as if nothing happened.</li>
+</ol>
+
+<h2>Local vs. Remote Hooking</h2>
+<p>In a local hook (hooking a function in your own process), you have direct memory access. You can simply use <code>memcpy</code> to save original bytes, <code>VirtualProtect</code> to make the page writable, and write your jump. Remote hooking &mdash; hooking a function in another process &mdash; requires cross-process memory APIs:</p>
+
+<table>
+<tr><th>Operation</th><th>Local (Same Process)</th><th>Remote (Cross-Process)</th></tr>
+<tr><td>Read original bytes</td><td><code>memcpy()</code></td><td><code>NtReadVirtualMemory()</code></td></tr>
+<tr><td>Allocate hook stub</td><td><code>VirtualAlloc()</code></td><td><code>NtAllocateVirtualMemory()</code></td></tr>
+<tr><td>Write hook stub</td><td><code>memcpy()</code></td><td><code>NtWriteVirtualMemory()</code></td></tr>
+<tr><td>Change page protection</td><td><code>VirtualProtect()</code></td><td><code>NtProtectVirtualMemory()</code></td></tr>
+<tr><td>Write JMP (install hook)</td><td><code>memcpy()</code></td><td><code>NtWriteVirtualMemory()</code></td></tr>
+</table>
+
+<p>ThreadlessInject uses the <code>Nt*</code> native API variants throughout. These are the lowest-level usermode functions and go directly to the kernel via syscalls, bypassing any userland hooks that EDR products may have placed on the <code>kernel32.dll</code> wrappers.</p>
+
+<h2>Why This Works for Injection</h2>
+<p>The insight that makes this an injection technique (rather than just a hooking technique) is straightforward: if you hook a function inside a remote process, you do not need to create a thread to execute your code. The target process's own existing threads will do it for you. Every time any thread in the target process calls the hooked function, your code runs. No <code>CreateRemoteThread</code>, no <code>NtCreateThreadEx</code>, no APC queuing. The thread creation kernel callback (<code>PsSetCreateThreadNotifyRoutine</code>) never fires because no thread is created.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Conceptual overview of remote function hooking for injection:
+//
+// 1. Open target process
+// 2. Find address of a frequently-called function (e.g., ntdll!RtlUserThreadStart)
+// 3. Read the first 14 bytes of that function (save original prologue)
+// 4. Allocate RWX memory in target process for shellcode + hook stub
+// 5. Write shellcode + hook stub + saved original bytes into allocated memory
+// 6. Overwrite target function's first 14 bytes with JMP to our hook stub
+// 7. Wait... an existing thread calls the function and executes our shellcode
+//
+// Result: shellcode runs in target process with ZERO new threads created</code></pre>
+
+<div class="card green">
+<h4>Key Advantage: Execution on Existing Threads</h4>
+<p>Because your shellcode executes on an existing thread that was already running in the target process, the thread's call stack looks largely normal. The thread was already there, already running, already making function calls. It just happens to take a detour through your shellcode before continuing its normal work. This is fundamentally different from a new thread whose entire existence is attributable to the injection.</p>
+</div>
+
+<h2>Limitations to Keep in Mind</h2>
+<p>Remote function hooking is not without challenges. The hook is not guaranteed to execute immediately &mdash; it runs only when a thread calls the hooked function. If you pick a function that is rarely called, your shellcode might not execute for a long time (or ever). There are also thread safety concerns: if a thread is partway through executing the function when you overwrite its prologue, the thread could crash. These challenges are addressed in subsequent modules.</p>
+
+<div class="quiz" id="quiz2">
+<h4>Pop Quiz: Remote Function Hooking</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: How many bytes does a full absolute JMP (JMP [RIP+0] + 8-byte address) overwrite in the target function?</p>
+<label data-opt="0"><input type="radio" name="q2_0"> 5 bytes</label>
+<label data-opt="1"><input type="radio" name="q2_0"> 8 bytes</label>
+<label data-opt="2"><input type="radio" name="q2_0"> 14 bytes (6-byte JMP instruction + 8-byte address)</label>
+<label data-opt="3"><input type="radio" name="q2_0"> 16 bytes</label>
+<div class="explain">The JMP [RIP+0] instruction is encoded as FF 25 00 00 00 00 (6 bytes), followed by the 8-byte absolute target address. Total: 14 bytes of the original function prologue are overwritten.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What is the role of the trampoline in an inline hook?</p>
+<label data-opt="0"><input type="radio" name="q2_1"> It encrypts the shellcode to avoid detection</label>
+<label data-opt="1"><input type="radio" name="q2_1"> It preserves and executes the original overwritten bytes so the hooked function still works</label>
+<label data-opt="2"><input type="radio" name="q2_1"> It creates a new thread to run the hook</label>
+<label data-opt="3"><input type="radio" name="q2_1"> It prevents the target process from crashing by disabling DEP</label>
+<div class="explain">The trampoline saves the original bytes that were overwritten by the hook JMP, executes them after the hook code runs, and then jumps back to the instruction after the overwritten region. This allows the original function to continue working normally after the hook executes.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: Why does ThreadlessInject use NtWriteVirtualMemory instead of WriteProcessMemory?</p>
+<label data-opt="0"><input type="radio" name="q3_2"> NtWriteVirtualMemory is the native syscall wrapper, bypassing userland EDR hooks on kernel32</label>
+<label data-opt="1"><input type="radio" name="q3_2"> NtWriteVirtualMemory is faster</label>
+<label data-opt="2"><input type="radio" name="q3_2"> WriteProcessMemory cannot write to remote processes</label>
+<label data-opt="3"><input type="radio" name="q3_2"> NtWriteVirtualMemory supports larger writes</label>
+<div class="explain">EDR products commonly hook kernel32.dll functions like WriteProcessMemory in userland. The Nt* functions in ntdll.dll are closer to the syscall boundary and harder for EDRs to hook reliably. By using NtWriteVirtualMemory, ThreadlessInject bypasses the kernel32 hooking layer.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz2')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Previous: Thread Creation Problem</a>
+<a class="primary" href="module3.html">Next: Target Function Selection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

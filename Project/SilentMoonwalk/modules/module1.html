@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: EDR Call Stack Telemetry - SilentMoonwalk Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F319;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#06b6d4;--accent2:#0891b2;--gradient:linear-gradient(135deg,#06b6d4,#0891b2)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>SilentMoonwalk Course</h2><span>Call Stack Spoofing Masterclass</span></div>
+  <a class="home-link" href="../SilentMoonwalk_index.html">&larr; Course Home</a>
+  <a class="mod-link active" href="module1.html"><span class="diff d1">1</span> EDR Stack Telemetry</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> x64 Stack Frames</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> ROP Fundamentals</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> Desync Theory</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Gadget Discovery</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Synthetic Frames</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Full Spoof Engine</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Detection &amp; Counters</a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: EDR Call Stack Telemetry</h1>
+<p class="subtitle">Why your call stack is the one thing you can't easily lie about &mdash; until now.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>Before we tear apart SilentMoonwalk's spoofing engine, you need to understand <strong>what EDRs actually see</strong> when they inspect a thread's call stack. Every major endpoint detection product now treats the call stack as a high-confidence telemetry source. This module explains exactly how that telemetry is gathered and why it matters for offensive operations.</p>
+</div>
+
+<h2>The Call Stack as a Forensic Artifact</h2>
+<p>Every thread in a Windows process maintains a <strong>call stack</strong> &mdash; a region of memory that records the chain of function calls leading to the current point of execution. When thread A calls function B, which calls function C, the stack contains return addresses that trace back through C &rarr; B &rarr; A.</p>
+<p>For defenders, this is gold. A legitimate thread sleeping inside <code>NtWaitForSingleObject</code> should show a clean stack trace rooted in known system DLLs. If that same sleeping thread has a return address pointing into unbacked private memory (no file on disk), it screams <strong>injected code</strong>.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Clean vs Suspicious Call Stack</h4>
+<div style="display:flex;gap:30px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:#10b981;font-weight:700;margin-bottom:10px">Legitimate Stack</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box g" style="width:100%">ntdll!NtWaitForSingleObject</div>
+<div class="box g" style="width:100%">KERNELBASE!WaitForSingleObjectEx</div>
+<div class="box g" style="width:100%">kernel32!SleepEx</div>
+<div class="box g" style="width:100%">myapp.exe!WorkerThread+0x42</div>
+<div class="box g" style="width:100%">kernel32!BaseThreadInitThunk</div>
+<div class="box g" style="width:100%">ntdll!RtlUserThreadStart</div>
+</div>
+</div>
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:#ef4444;font-weight:700;margin-bottom:10px">Beacon Stack (Detected)</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box g" style="width:100%">ntdll!NtWaitForSingleObject</div>
+<div class="box g" style="width:100%">KERNELBASE!WaitForSingleObjectEx</div>
+<div class="box r" style="width:100%">0x000001A2F3E01337 (unbacked RWX!)</div>
+<div class="box r" style="width:100%">0x000001A2F3E00A10 (unbacked RWX!)</div>
+<div class="box g" style="width:100%">kernel32!BaseThreadInitThunk</div>
+<div class="box g" style="width:100%">ntdll!RtlUserThreadStart</div>
+</div>
+</div>
+</div>
+</div>
+
+<h2>How EDRs Collect Stack Telemetry</h2>
+<p>EDRs use multiple mechanisms to capture call stacks. Understanding each one reveals what must be spoofed and when.</p>
+
+<h3>1. Kernel Callbacks (PsSetCreateThreadNotifyRoutine)</h3>
+<p>EDR kernel drivers register callbacks via <code>PsSetCreateThreadNotifyRoutine</code> and <code>PsSetCreateProcessNotifyRoutine</code>. When a thread is created, the driver is notified and can immediately inspect the thread's start address and initial stack. This catches basic injection but does not continuously monitor the stack.</p>
+
+<h3>2. ETW Stack Walking (Event Tracing for Windows)</h3>
+<p>ETW is the most pervasive telemetry source. The kernel can be configured to capture stack traces alongside events. When a syscall event fires, the kernel walks the stack and attaches the trace to the ETW event record. EDRs consume these events from both kernel-mode and user-mode providers:</p>
+
+<pre><code><span class="lang-tag">C</span>// EDR kernel driver enabling stack traces for syscall events
+// EVENT_ENABLE_PROPERTY_STACK_TRACE causes the kernel to walk the
+// stack at event capture time and embed it in the ETW record
+EVENT_TRACE_PROPERTIES props;
+props.EnableFlags = EVENT_TRACE_FLAG_SYSTEMCALL;
+// The stack trace is captured by the kernel at the exact moment
+// the syscall fires - this is hard to fake from usermode</code></pre>
+
+<div class="card warn">
+<h4>Key Insight: Kernel-Captured Stacks</h4>
+<p>When the kernel captures a stack trace via ETW, it reads the actual RSP-based stack frames at that instant. This means any spoofing must be in place <strong>before</strong> the syscall executes, not after. The stack must look clean at the exact moment the kernel event fires. This is why simple post-call cleanup approaches fail.</p>
+</div>
+
+<h3>3. RtlWalkFrameChain / RtlCaptureStackBackTrace</h3>
+<p>These are the primary user-mode APIs for stack walking. EDRs call them from hooks, callbacks, or dedicated scanning threads:</p>
+
+<pre><code><span class="lang-tag">C</span>// RtlCaptureStackBackTrace - captures return addresses from the stack
+USHORT RtlCaptureStackBackTrace(
+    ULONG  FramesToSkip,    // Skip N frames (usually 0-2 for the hook itself)
+    ULONG  FramesToCapture,  // How many frames to collect
+    PVOID  *BackTrace,       // Output array of return addresses
+    PULONG BackTraceHash     // Optional hash of all addresses
+);
+
+// Example: EDR hook on NtAllocateVirtualMemory
+NTSTATUS Hook_NtAllocateVirtualMemory(...) {
+    PVOID stack[64];
+    USHORT frames = RtlCaptureStackBackTrace(0, 64, stack, NULL);
+
+    // Check each return address
+    for (USHORT i = 0; i &lt; frames; i++) {
+        if (!IsAddressInKnownModule(stack[i])) {
+            // ALERT: return address points to unbacked memory!
+            LogSuspiciousStack(stack, frames);
+        }
+    }
+    // Forward to real syscall
+    return Original_NtAllocateVirtualMemory(...);
+}</code></pre>
+
+<h3>4. Inline Hooking with Stack Inspection</h3>
+<p>Many EDRs place inline hooks (detours) on sensitive functions like <code>NtAllocateVirtualMemory</code>, <code>NtProtectVirtualMemory</code>, and <code>NtWriteVirtualMemory</code>. Inside the hook handler, the EDR captures the current call stack and analyzes it. If any return address points to suspicious memory, the call is flagged or blocked.</p>
+
+<table>
+<tr><th>Telemetry Source</th><th>Capture Mode</th><th>When It Fires</th><th>Spoofing Difficulty</th></tr>
+<tr><td>ETW Stack Traces</td><td>Kernel</td><td>Syscall entry</td><td>High &mdash; kernel reads real RSP</td></tr>
+<tr><td>Kernel Callbacks</td><td>Kernel</td><td>Thread/process creation</td><td>Medium &mdash; only at creation time</td></tr>
+<tr><td>RtlWalkFrameChain</td><td>User-mode</td><td>On-demand / periodic</td><td>Medium &mdash; walks actual frames</td></tr>
+<tr><td>Inline Hook Stacks</td><td>User-mode</td><td>On hooked API call</td><td>Medium &mdash; stack must be clean at call</td></tr>
+<tr><td>Thread Scanning</td><td>User-mode</td><td>Periodic sweeps</td><td>Must be clean during sleep</td></tr>
+</table>
+
+<h2>What Makes a Stack "Suspicious"</h2>
+<p>EDRs apply several heuristics when analyzing captured stack traces:</p>
+
+<div class="card">
+<h4>Detection Heuristics</h4>
+<ul>
+<li><strong>Unbacked return addresses</strong> &mdash; Any return address that doesn't map to a known loaded module (DLL/EXE) on disk is immediately suspicious.</li>
+<li><strong>RWX memory regions</strong> &mdash; Return addresses pointing into memory with PAGE_EXECUTE_READWRITE protections suggest dynamically generated code.</li>
+<li><strong>Missing unwind data</strong> &mdash; On x64, legitimate functions have <code>RUNTIME_FUNCTION</code> entries in the <code>.pdata</code> section. Functions without unwind metadata are likely shellcode.</li>
+<li><strong>Impossible call chains</strong> &mdash; A return address inside function F, but F never calls the function below it in the stack. The call chain doesn't make logical sense.</li>
+<li><strong>Abnormal stack depth</strong> &mdash; A sleeping thread with an unusually shallow or deep stack compared to typical wait patterns.</li>
+</ul>
+</div>
+
+<h2>The Evolution of Stack-Based Evasion</h2>
+<p>Stack spoofing techniques evolved through several generations, each addressing new detection capabilities:</p>
+
+<table>
+<tr><th>Generation</th><th>Technique</th><th>Tool</th><th>Limitation</th></tr>
+<tr><td>Gen 1</td><td>Zeroing return address</td><td>ThreadStackSpoofer</td><td>Stack unwind fails &mdash; NULL frames are suspicious</td></tr>
+<tr><td>Gen 2</td><td>Overwriting with legitimate addr</td><td>CallStackSpoofingPOC</td><td>Static frame, unwind codes don't match, single-frame only</td></tr>
+<tr><td>Gen 3</td><td>ROP-based frame fabrication</td><td><strong>SilentMoonwalk</strong></td><td>Builds entire synthetic chain that passes RtlVirtualUnwind</td></tr>
+<tr><td>Gen 4</td><td>Synthetic unwind metadata &amp; unwinder emulation</td><td>Draugr (NtDallas) / Unwinder (Kudaes)</td><td>Draugr: JMP [RBX] chaining with fake RUNTIME_FUNCTION/UNWIND_INFO for BOFs. Unwinder: computes stack mathematically from unwind metadata</td></tr>
+</table>
+
+<div class="card highlight">
+<h4>Where SilentMoonwalk Fits</h4>
+<p>SilentMoonwalk was a breakthrough because it was the first public tool to construct <strong>entire synthetic call chains</strong> that survive structured exception handling (SEH) unwinding via <code>RtlVirtualUnwind</code>. Rather than just replacing a single return address, it fabricates multiple stack frames, each with proper alignment and return addresses that correspond to real functions with valid <code>RUNTIME_FUNCTION</code> metadata in legitimate DLLs.</p>
+</div>
+
+<h2>Why Simple Spoofs Fail</h2>
+<p>To understand why SilentMoonwalk's approach is necessary, consider what happens when you simply overwrite a return address on the stack:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Naive approach: just overwrite the return address before sleeping
+void NaiveSpoof() {
+    // Save real return address
+    PVOID realRetAddr = _ReturnAddress();
+
+    // Overwrite with address inside kernel32
+    // This is on the stack, so we can modify it
+    *(PVOID*)(_AddressOfReturnAddress()) = (PVOID)kernel32_SleepEx_addr;
+
+    // Now sleep - the stack shows kernel32!SleepEx as caller
+    SleepEx(5000, FALSE);
+
+    // Restore (we wake up here via the real return)
+    // PROBLEM: RtlVirtualUnwind will try to unwind from kernel32!SleepEx
+    // and the unwind codes won't match the actual stack frame layout.
+    // The stack pointer deltas will be wrong, and the unwind will
+    // either crash or produce garbage frames above this point.
+}</code></pre>
+
+<p>The problem is that <code>RtlVirtualUnwind</code> uses <strong>UNWIND_INFO</strong> metadata to determine how much stack space a function allocated. If you claim the return address is inside <code>SleepEx</code>, the unwinder will apply <code>SleepEx</code>'s unwind codes to the stack, computing wrong RSP values and following garbage pointers for every subsequent frame. The entire unwind chain collapses.</p>
+
+<h2>The SilentMoonwalk Promise</h2>
+<p>SilentMoonwalk solves this by building stack frames where the return address, RSP offsets, and frame layout <strong>all agree</strong> with the unwind metadata of the spoofed function. When <code>RtlVirtualUnwind</code> processes each frame, the math checks out: the frame size matches the unwind codes, the return address is at the expected offset, and the unwinder smoothly transitions to the next frame in the chain. The result is a complete, walkable call stack that looks indistinguishable from a legitimate one.</p>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: EDR Stack Telemetry</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why are kernel-captured ETW stack traces particularly hard to spoof?</p>
+<label data-opt="0"><input type="radio" name="q1_0"> Because ETW is encrypted</label>
+<label data-opt="1"><input type="radio" name="q1_0"> Because ETW runs in a separate process</label>
+<label data-opt="2"><input type="radio" name="q1_0"> Because the kernel reads the actual RSP-based stack frames at syscall entry time</label>
+<label data-opt="3"><input type="radio" name="q1_0"> Because ETW uses hardware breakpoints</label>
+<div class="explain">The kernel captures the stack trace at the exact moment a syscall fires by reading the real stack memory. Any spoofing must already be in place on the stack before the syscall executes.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What makes an unbacked return address suspicious to an EDR?</p>
+<label data-opt="0"><input type="radio" name="q1_1"> It uses too much memory</label>
+<label data-opt="1"><input type="radio" name="q1_1"> It points to memory not mapped from any known file on disk (no DLL/EXE backing)</label>
+<label data-opt="2"><input type="radio" name="q1_1"> It contains invalid opcodes</label>
+<label data-opt="3"><input type="radio" name="q1_1"> It has a NULL value</label>
+<div class="explain">Legitimate code resides in file-backed memory (mapped from DLLs/EXEs on disk). A return address pointing to private, unbacked memory strongly suggests dynamically allocated shellcode or injected code.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q3: Why does simply overwriting a return address with a legitimate address fail against RtlVirtualUnwind-based inspection?</p>
+<label data-opt="0"><input type="radio" name="q1_2"> Because the CPU detects the modification</label>
+<label data-opt="1"><input type="radio" name="q1_2"> Because Windows blocks writes to the stack</label>
+<label data-opt="2"><input type="radio" name="q1_2"> Because the spoofed address must be in ntdll specifically</label>
+<label data-opt="3"><input type="radio" name="q1_2"> Because the unwind codes for the spoofed function won't match the actual stack frame layout</label>
+<div class="explain">RtlVirtualUnwind uses UNWIND_INFO metadata to compute frame sizes and locate the next return address. If the stack frame doesn't match the expected layout for the spoofed function, the unwind chain breaks and produces invalid or suspicious results.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: x64 Stack Frames &amp; Unwinding &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

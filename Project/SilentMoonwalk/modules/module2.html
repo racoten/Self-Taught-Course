@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: x64 Stack Frames &amp; Unwinding - SilentMoonwalk Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F319;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#06b6d4;--accent2:#0891b2;--gradient:linear-gradient(135deg,#06b6d4,#0891b2)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>SilentMoonwalk Course</h2><span>Call Stack Spoofing Masterclass</span></div>
+  <a class="home-link" href="../SilentMoonwalk_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Stack Telemetry</a>
+  <a class="mod-link active" href="module2.html"><span class="diff d1">2</span> x64 Stack Frames</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> ROP Fundamentals</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> Desync Theory</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Gadget Discovery</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Synthetic Frames</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Full Spoof Engine</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Detection &amp; Counters</a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: x64 Stack Frames &amp; Unwinding</h1>
+<p class="subtitle">The architecture that makes stack spoofing both possible and incredibly difficult.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>SilentMoonwalk fabricates stack frames that must survive <code>RtlVirtualUnwind</code> inspection. To understand how that works, you need to know how x64 Windows structures stack frames, stores unwind metadata, and uses that metadata to reconstruct call chains. This is the foundation everything else builds upon.</p>
+</div>
+
+<h2>The x64 Stack: Basics</h2>
+<p>On x64 Windows, the stack grows <strong>downward</strong> (from high addresses to low). The <code>RSP</code> register always points to the top of the stack (the lowest used address). Key rules:</p>
+
+<ul>
+<li><strong>16-byte alignment</strong> &mdash; RSP must be 16-byte aligned <em>before</em> the CALL instruction. After CALL pushes the 8-byte return address, RSP is offset by 8, and the called function must re-align.</li>
+<li><strong>Shadow space</strong> &mdash; Every function must reserve 32 bytes (0x20) of shadow space above the return address for the callee's use. This is part of the x64 calling convention.</li>
+<li><strong>No mandatory frame pointer</strong> &mdash; Unlike x86, x64 functions are not required to use RBP as a frame pointer. Most functions use RSP-relative addressing exclusively.</li>
+</ul>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">x64 Stack Frame Layout (typical function with 2 local vars)</h4>
+<div class="flow" style="flex-direction:column;gap:2px;align-items:stretch;max-width:520px;margin:0 auto">
+<div class="box" style="width:100%;font-size:.8rem">Higher addresses (stack bottom)</div>
+<div class="box hl" style="width:100%">Caller's frame...</div>
+<div class="box y" style="width:100%">Return Address (8 bytes) &larr; pushed by CALL</div>
+<div class="box" style="width:100%">Shadow space: home for RCX (8 bytes)</div>
+<div class="box" style="width:100%">Shadow space: home for RDX (8 bytes)</div>
+<div class="box" style="width:100%">Shadow space: home for R8 (8 bytes)</div>
+<div class="box" style="width:100%">Shadow space: home for R9 (8 bytes)</div>
+<div class="box g" style="width:100%">Local variable 1 (8 bytes)</div>
+<div class="box g" style="width:100%">Local variable 2 (8 bytes)</div>
+<div class="box hl" style="width:100%">RSP &rarr; (top of stack, 16-byte aligned)</div>
+<div class="box" style="width:100%;font-size:.8rem">Lower addresses (stack top)</div>
+</div>
+</div>
+
+<h2>The x64 Calling Convention</h2>
+<p>x64 Windows uses a single calling convention (no more __cdecl vs __stdcall confusion):</p>
+
+<table>
+<tr><th>Parameter</th><th>Location</th><th>Notes</th></tr>
+<tr><td>1st integer/pointer</td><td>RCX</td><td>Also has shadow space at [RSP+8]</td></tr>
+<tr><td>2nd integer/pointer</td><td>RDX</td><td>Shadow space at [RSP+16]</td></tr>
+<tr><td>3rd integer/pointer</td><td>R8</td><td>Shadow space at [RSP+24]</td></tr>
+<tr><td>4th integer/pointer</td><td>R9</td><td>Shadow space at [RSP+32]</td></tr>
+<tr><td>5th+ parameters</td><td>Stack</td><td>At [RSP+40], [RSP+48], ...</td></tr>
+<tr><td>Return value</td><td>RAX</td><td>Up to 64 bits</td></tr>
+<tr><td>Volatile registers</td><td>RAX, RCX, RDX, R8-R11</td><td>Caller must save if needed</td></tr>
+<tr><td>Non-volatile registers</td><td>RBX, RBP, RDI, RSI, R12-R15</td><td>Callee must preserve (push/pop)</td></tr>
+</table>
+
+<h2>RUNTIME_FUNCTION: The Unwind Metadata</h2>
+<p>On x64 Windows, every non-leaf function must have a <code>RUNTIME_FUNCTION</code> entry in the module's <code>.pdata</code> section. This is the key structure that makes structured exception handling and stack unwinding work:</p>
+
+<pre><code><span class="lang-tag">C</span>// From winnt.h - the entry in .pdata for each function
+typedef struct _RUNTIME_FUNCTION {
+    DWORD BeginAddress;      // RVA of function start
+    DWORD EndAddress;        // RVA of function end
+    DWORD UnwindData;        // RVA of UNWIND_INFO structure
+} RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;
+
+// The .pdata section is a sorted array of these entries.
+// Given an instruction pointer (RIP), the OS binary-searches
+// this array to find which function contains that address.</code></pre>
+
+<div class="card">
+<h4>Leaf vs Non-Leaf Functions</h4>
+<p>A <strong>leaf function</strong> is one that does not call any other function, does not modify RSP (beyond the return address), and does not use SEH. Leaf functions do NOT need a RUNTIME_FUNCTION entry. For stack unwinding, the unwinder simply pops the return address from [RSP] and continues. All other functions (non-leaf) must have unwind metadata.</p>
+</div>
+
+<h2>UNWIND_INFO: How to Reverse a Function's Prologue</h2>
+<p>The <code>UNWIND_INFO</code> structure describes exactly what a function's prologue did to the stack, so the unwinder can reverse those operations:</p>
+
+<pre><code><span class="lang-tag">C</span>typedef struct _UNWIND_INFO {
+    UBYTE Version : 3;       // Currently 1 or 2
+    UBYTE Flags : 5;         // UNW_FLAG_NHANDLER, UNW_FLAG_EHANDLER, UNW_FLAG_CHAININFO
+    UBYTE SizeOfProlog;      // Size in bytes of the function's prologue
+    UBYTE CountOfCodes;      // Number of UNWIND_CODE entries
+    UBYTE FrameRegister : 4; // If nonzero, the function uses a frame pointer (0=none, 5=RBP)
+    UBYTE FrameOffset : 4;   // Scaled offset from RSP for the frame register
+    UNWIND_CODE UnwindCode[]; // Variable-length array of unwind operations
+    // Followed by optional exception handler or chained RUNTIME_FUNCTION
+} UNWIND_INFO;
+
+typedef union _UNWIND_CODE {
+    struct {
+        UBYTE CodeOffset;    // Offset in prologue where this op occurred
+        UBYTE UnwindOp : 4;  // The operation type
+        UBYTE OpInfo : 4;    // Operation-specific info (register number, etc.)
+    };
+    USHORT FrameOffset;      // Used for UWOP_ALLOC_LARGE operand
+} UNWIND_CODE;</code></pre>
+
+<h3>Unwind Operation Codes</h3>
+<p>Each <code>UNWIND_CODE</code> describes one prologue operation that the unwinder must reverse:</p>
+
+<table>
+<tr><th>Op Code</th><th>Value</th><th>Meaning</th><th>Reversal</th></tr>
+<tr><td>UWOP_PUSH_NONVOL</td><td>0</td><td>Pushed a non-volatile register</td><td>Pop register from [RSP], RSP += 8</td></tr>
+<tr><td>UWOP_ALLOC_LARGE</td><td>1</td><td>Allocated large stack space</td><td>RSP += allocation size</td></tr>
+<tr><td>UWOP_ALLOC_SMALL</td><td>2</td><td>Allocated 8-128 bytes on stack</td><td>RSP += (OpInfo * 8) + 8</td></tr>
+<tr><td>UWOP_SET_FPREG</td><td>3</td><td>Set frame pointer register</td><td>RSP = FrameRegister - FrameOffset*16</td></tr>
+<tr><td>UWOP_SAVE_NONVOL</td><td>4</td><td>Saved register to stack (2-slot)</td><td>Restore register from saved location</td></tr>
+<tr><td>UWOP_SAVE_NONVOL_FAR</td><td>5</td><td>Saved register to stack (3-slot)</td><td>Restore register from far offset</td></tr>
+<tr><td>UWOP_SAVE_XMM128</td><td>8</td><td>Saved 128-bit XMM register</td><td>Restore XMM from saved location</td></tr>
+<tr><td>UWOP_PUSH_MACHFRAME</td><td>10</td><td>Machine frame push (interrupts)</td><td>Restore RSP from machine frame</td></tr>
+</table>
+
+<h2>RtlVirtualUnwind: The Unwinding Engine</h2>
+<p>This is the core function that EDRs rely on to walk call stacks. Given an instruction pointer (RIP) and a stack pointer (RSP), it computes the calling function's RIP and RSP:</p>
+
+<pre><code><span class="lang-tag">C</span>PEXCEPTION_ROUTINE RtlVirtualUnwind(
+    DWORD                          HandlerType,     // UNW_FLAG_NHANDLER for stack walk
+    DWORD64                        ImageBase,        // Base of module containing RIP
+    DWORD64                        ControlPc,        // Current RIP (instruction pointer)
+    PRUNTIME_FUNCTION              FunctionEntry,    // RUNTIME_FUNCTION for this RIP
+    PCONTEXT                       ContextRecord,    // CPU context (RSP, RBP, etc.)
+    PVOID                          *HandlerData,     // Exception handler data (output)
+    PDWORD64                       EstablisherFrame, // Frame pointer value (output)
+    PKNONVOLATILE_CONTEXT_POINTERS ContextPointers   // Where registers were saved (output)
+);
+
+// The algorithm:
+// 1. Look up UNWIND_INFO via FunctionEntry->UnwindData
+// 2. Determine which unwind codes apply (based on ControlPc offset in function)
+// 3. Reverse each applicable operation:
+//    - UWOP_ALLOC_SMALL: add size to RSP
+//    - UWOP_PUSH_NONVOL: pop register, add 8 to RSP
+//    - etc.
+// 4. After all codes: [RSP] contains the return address = caller's RIP
+// 5. RSP += 8 (skip over return address)
+// 6. Update ContextRecord with new RIP and RSP
+// 7. Return to allow walking the next frame</code></pre>
+
+<div class="card warn">
+<h4>Critical for SilentMoonwalk</h4>
+<p>RtlVirtualUnwind does NOT simply read return addresses from the stack. It <strong>computes</strong> the caller's RSP by reversing prologue operations, then reads the return address from the computed location. This means that spoofing a return address alone is insufficient &mdash; you must ensure the <strong>entire frame layout</strong> matches what the unwind codes expect. If the unwind codes say "RSP += 0x40 for UWOP_ALLOC_SMALL, then pop RBX, then pop RBP", then those exact values must be at those exact stack offsets.</p>
+</div>
+
+<h2>Walking a Complete Stack</h2>
+<p>A full stack walk is just a loop calling <code>RtlVirtualUnwind</code> repeatedly until it reaches the thread entry point:</p>
+
+<pre><code><span class="lang-tag">C</span>// Simplified stack walk loop (what RtlWalkFrameChain does internally)
+void WalkStack(PCONTEXT ctx) {
+    DWORD64 ImageBase;
+    PRUNTIME_FUNCTION pFunc;
+
+    while (ctx->Rip != 0) {
+        // 1. Find RUNTIME_FUNCTION for current RIP
+        pFunc = RtlLookupFunctionEntry(ctx->Rip, &ImageBase, NULL);
+
+        if (pFunc == NULL) {
+            // Leaf function: return address is at [RSP]
+            ctx->Rip = *(DWORD64*)(ctx->Rsp);
+            ctx->Rsp += 8;
+        } else {
+            // Non-leaf: use unwind info to compute caller's context
+            PVOID handlerData;
+            DWORD64 establisher;
+            RtlVirtualUnwind(
+                UNW_FLAG_NHANDLER, ImageBase, ctx->Rip,
+                pFunc, ctx, &handlerData, &establisher, NULL
+            );
+        }
+        // ctx now contains the CALLER's RIP and RSP
+        printf("  Frame: RIP=0x%llx RSP=0x%llx\n", ctx->Rip, ctx->Rsp);
+    }
+}</code></pre>
+
+<h2>The Chaining Mechanism (UNW_FLAG_CHAININFO)</h2>
+<p>Some functions have multiple prologue regions described by chained UNWIND_INFO structures. When the <code>Flags</code> field includes <code>UNW_FLAG_CHAININFO</code>, a <code>RUNTIME_FUNCTION</code> follows the unwind codes, pointing to the parent unwind info. The unwinder processes the current codes, then follows the chain to the parent, applying those codes too. SilentMoonwalk must handle this correctly when selecting target functions.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">RtlVirtualUnwind: One Iteration</h4>
+<div class="flow">
+<div class="box hl">RIP + RSP<br>(current frame)</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">RtlLookup<br>FunctionEntry</div>
+<div class="arrow">&rarr;</div>
+<div class="box">RUNTIME_FUNCTION<br>&rarr; UNWIND_INFO</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Reverse prologue<br>ops on RSP</div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Caller RIP + RSP<br>(previous frame)</div>
+</div>
+</div>
+
+<h2>Why This Matters for SilentMoonwalk</h2>
+<p>SilentMoonwalk must construct fake stack frames where:</p>
+<ol>
+<li>The return address at each frame points to an instruction inside a real function with a valid <code>RUNTIME_FUNCTION</code> entry.</li>
+<li>The RSP offset between frames exactly matches what <code>RtlVirtualUnwind</code> will compute by reversing that function's unwind codes.</li>
+<li>Non-volatile register save slots contain plausible values (not NULL, not pointing to freed memory).</li>
+<li>The final frame in the chain terminates cleanly at a known thread entry point like <code>RtlUserThreadStart</code> or <code>BaseThreadInitThunk</code>.</li>
+</ol>
+<p>Getting any of these wrong causes the stack walk to diverge, producing impossible frames or crashing &mdash; both of which are easily detected.</p>
+
+<div class="quiz" id="quiz2">
+<h4>Pop Quiz: x64 Stack &amp; Unwinding</h4>
+<div class="quiz-q" data-correct="0">
+<p>Q1: What does the RUNTIME_FUNCTION structure's UnwindData field point to?</p>
+<label data-opt="0"><input type="radio" name="q2_0"> An UNWIND_INFO structure describing how to reverse the function's prologue</label>
+<label data-opt="1"><input type="radio" name="q2_0"> The function's exception handler</label>
+<label data-opt="2"><input type="radio" name="q2_0"> The function's return address</label>
+<label data-opt="3"><input type="radio" name="q2_0"> The function's parameter list</label>
+<div class="explain">UnwindData is an RVA pointing to the UNWIND_INFO structure, which contains the unwind codes that describe the function's prologue operations. The unwinder reverses these operations to compute the caller's RSP and find the return address.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: How does RtlVirtualUnwind find the caller's return address?</p>
+<label data-opt="0"><input type="radio" name="q2_1"> It reads [RBP+8] always</label>
+<label data-opt="1"><input type="radio" name="q2_1"> It uses a hardcoded offset from RSP</label>
+<label data-opt="2"><input type="radio" name="q2_1"> It reverses all unwind codes to compute the correct RSP, then reads [RSP]</label>
+<label data-opt="3"><input type="radio" name="q2_1"> It walks a linked list of frame pointers</label>
+<div class="explain">RtlVirtualUnwind processes each UNWIND_CODE to reverse the function's prologue (undoing SUB RSP, PUSH operations, etc.), arriving at the correct RSP value where the return address was placed by the CALL instruction. It then reads [RSP] to get the caller's RIP.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q3: A leaf function in x64 terminology is one that:</p>
+<label data-opt="0"><input type="radio" name="q2_2"> Has no local variables</label>
+<label data-opt="1"><input type="radio" name="q2_2"> Doesn't call other functions, doesn't modify RSP, and doesn't use SEH</label>
+<label data-opt="2"><input type="radio" name="q2_2"> Is always inlined by the compiler</label>
+<label data-opt="3"><input type="radio" name="q2_2"> Has no UNWIND_INFO and cannot be unwound</label>
+<div class="explain">A leaf function makes no calls, doesn't adjust RSP (beyond the implicit CALL/RET), and uses no structured exception handling. It doesn't need a RUNTIME_FUNCTION entry. The unwinder handles it by simply reading the return address from [RSP].</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz2')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Previous: EDR Stack Telemetry</a>
+<a class="primary" href="module3.html">Next: ROP Fundamentals &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

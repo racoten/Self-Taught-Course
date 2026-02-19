@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: Stack Desynchronization Theory - SilentMoonwalk Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F319;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#06b6d4;--accent2:#0891b2;--gradient:linear-gradient(135deg,#06b6d4,#0891b2)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>SilentMoonwalk Course</h2><span>Call Stack Spoofing Masterclass</span></div>
+  <a class="home-link" href="../SilentMoonwalk_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Stack Telemetry</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> x64 Stack Frames</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> ROP Fundamentals</a>
+  <a class="mod-link active" href="module4.html"><span class="diff d2">4</span> Desync Theory</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Gadget Discovery</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Synthetic Frames</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Full Spoof Engine</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Detection &amp; Counters</a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 4: Stack Desynchronization Theory</h1>
+<p class="subtitle">Separating what the CPU actually does from what the stack says happened.</p>
+
+<div class="card highlight">
+<h4>The Core Innovation</h4>
+<p>SilentMoonwalk's key insight is <strong>stack desynchronization</strong>: the physical stack layout seen by a stack walker does NOT have to reflect the actual execution path. By carefully constructing the stack, you can make the unwinder see call chain A &rarr; B &rarr; C &rarr; D while the actual execution path was completely different. This module explains the theory behind this separation.</p>
+</div>
+
+<h2>Synchronized vs Desynchronized Stacks</h2>
+<p>In normal execution, the stack is <strong>synchronized</strong> &mdash; the return addresses on the stack directly correspond to the actual call chain. If <code>main()</code> calls <code>foo()</code> which calls <code>bar()</code>, the stack unwinder will see exactly that chain.</p>
+
+<p>A <strong>desynchronized</strong> stack breaks this correspondence. The execution might follow path X &rarr; Y &rarr; Z, but the stack is constructed so the unwinder sees A &rarr; B &rarr; C. The two views are decoupled:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Synchronized vs Desynchronized</h4>
+<div style="display:flex;gap:30px;justify-content:center;flex-wrap:wrap">
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:#10b981;font-weight:700;margin-bottom:10px">Synchronized (Normal)</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box g" style="width:100%">Execution: main &rarr; foo &rarr; bar</div>
+<div class="box g" style="width:100%">Stack shows: main &rarr; foo &rarr; bar</div>
+<div class="box g" style="width:100%">Match: YES</div>
+</div>
+</div>
+<div style="flex:1;min-width:250px">
+<p style="text-align:center;color:#06b6d4;font-weight:700;margin-bottom:10px">Desynchronized (SilentMoonwalk)</p>
+<div class="flow" style="flex-direction:column;gap:4px">
+<div class="box hl" style="width:100%">Execution: shellcode &rarr; ROP &rarr; syscall</div>
+<div class="box g" style="width:100%">Stack shows: RtlUserThreadStart &rarr; BaseThreadInitThunk &rarr; kernel32!SleepEx &rarr; ...</div>
+<div class="box y" style="width:100%">Match: NO (by design)</div>
+</div>
+</div>
+</div>
+</div>
+
+<h2>Why Desynchronization Is Possible</h2>
+<p>Stack desynchronization is possible because of a fundamental property of the x64 unwinding mechanism: <strong>the unwinder is stateless</strong>. It doesn't track what functions were actually called. It only looks at:</p>
+
+<ol>
+<li>The current RIP (instruction pointer)</li>
+<li>The current RSP (stack pointer)</li>
+<li>The RUNTIME_FUNCTION / UNWIND_INFO for the function containing RIP</li>
+<li>The values at specific stack offsets (as dictated by the unwind codes)</li>
+</ol>
+
+<p>If you arrange these four things to be internally consistent, the unwinder will happily produce a clean call chain &mdash; regardless of whether those functions were ever actually called.</p>
+
+<div class="card">
+<h4>The Unwinder's Trust Model</h4>
+<p>RtlVirtualUnwind trusts that the stack has not been tampered with. It assumes that if RIP is inside function F at offset X, then F's prologue has already executed, and the stack contains F's saved registers and local variables at the offsets described by F's UNWIND_INFO. SilentMoonwalk exploits this trust by placing values at exactly the right offsets.</p>
+</div>
+
+<h2>The SilentMoonwalk Approach</h2>
+<p>SilentMoonwalk achieves desynchronization through a multi-step process. At a high level:</p>
+
+<h3>Step 1: Select Target Functions</h3>
+<p>Choose a set of legitimate functions from ntdll.dll or kernel32.dll whose call chain would be plausible. For example, a sleeping thread might reasonably show:</p>
+
+<pre><code><span class="lang-tag">Text</span>ntdll!NtWaitForSingleObject
+KERNELBASE!WaitForSingleObjectEx+0x8e
+kernel32!SleepEx+0x63
+kernel32!Sleep+0x9
+SomeApp!WorkerThread+0x42
+kernel32!BaseThreadInitThunk+0x14
+ntdll!RtlUserThreadStart+0x21</code></pre>
+
+<h3>Step 2: Compute Frame Sizes</h3>
+<p>For each target function, parse its RUNTIME_FUNCTION and UNWIND_INFO to determine the exact frame size. The frame size is the total amount of stack space allocated by the function's prologue (SUB RSP + pushed registers). Each frame must occupy exactly this many bytes on the spoofed stack.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Computing frame size from UNWIND_INFO
+// This determines how much stack space a function occupies
+DWORD ComputeFrameSize(PUNWIND_INFO pUnwind) {
+    DWORD frameSize = 0;
+
+    for (UBYTE i = 0; i &lt; pUnwind->CountOfCodes; i++) {
+        UNWIND_CODE code = pUnwind->UnwindCode[i];
+        switch (code.UnwindOp) {
+            case UWOP_PUSH_NONVOL:   // 0
+                frameSize += 8;       // Each push adds 8 bytes
+                break;
+            case UWOP_ALLOC_LARGE:   // 1
+                if (code.OpInfo == 0) {
+                    frameSize += pUnwind->UnwindCode[++i].FrameOffset * 8;
+                } else {
+                    DWORD size = *(DWORD*)&pUnwind->UnwindCode[i+1];
+                    frameSize += size;
+                    i += 2;
+                }
+                break;
+            case UWOP_ALLOC_SMALL:   // 2
+                frameSize += (code.OpInfo * 8) + 8;
+                break;
+            // UWOP_SET_FPREG, UWOP_SAVE_NONVOL, etc. handled similarly
+        }
+    }
+
+    return frameSize;  // Total bytes between RSP and return address
+}</code></pre>
+
+<h3>Step 3: Construct the Fake Stack</h3>
+<p>Lay out the spoofed frames contiguously on the stack. Each frame has the exact size computed from the target function's unwind codes. At the top of each frame (from the unwinder's perspective), place the return address pointing into the <em>next</em> target function in the chain.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Synthetic Stack Layout</h4>
+<div class="flow" style="flex-direction:column;gap:2px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box" style="width:100%;font-size:.75rem;text-align:left">Low address (RSP points here)</div>
+<div class="box hl" style="width:100%;text-align:left"><strong>Frame 0</strong> &mdash; "inside" NtWaitForSingleObject<br>Size: matches UNWIND_INFO of NtWaitForSingleObject<br>Return addr at computed offset &rarr; points into WaitForSingleObjectEx</div>
+<div class="box g" style="width:100%;text-align:left"><strong>Frame 1</strong> &mdash; "inside" WaitForSingleObjectEx<br>Size: matches UNWIND_INFO of WaitForSingleObjectEx<br>Return addr &rarr; points into SleepEx</div>
+<div class="box g" style="width:100%;text-align:left"><strong>Frame 2</strong> &mdash; "inside" SleepEx<br>Size: matches UNWIND_INFO of SleepEx<br>Return addr &rarr; points into BaseThreadInitThunk</div>
+<div class="box y" style="width:100%;text-align:left"><strong>Frame 3</strong> &mdash; "inside" BaseThreadInitThunk<br>Size: matches UNWIND_INFO<br>Return addr &rarr; points into RtlUserThreadStart</div>
+<div class="box" style="width:100%;text-align:left"><strong>Frame 4</strong> &mdash; RtlUserThreadStart (terminal frame)<br>Unwinder stops here.</div>
+<div class="box" style="width:100%;font-size:.75rem;text-align:left">High address (stack bottom)</div>
+</div>
+</div>
+
+<h3>Step 4: Use ROP to Actually Execute</h3>
+<p>The tricky part: this same stack layout must also function as a ROP chain for actual execution. SilentMoonwalk places gadget addresses at specific positions within each frame so that during execution, RSP advances through the frames via <code>ADD RSP, N; RET</code> gadgets, while from the unwinder's perspective, those same positions look like legitimate frame contents.</p>
+
+<h2>The Frame Size Problem</h2>
+<p>The hardest constraint in stack desynchronization is frame size matching. Consider this scenario:</p>
+
+<pre><code><span class="lang-tag">Text</span>SleepEx's UNWIND_INFO says:
+  UWOP_ALLOC_SMALL: 0x28 bytes (OpInfo=4, so (4*8)+8 = 40 = 0x28)
+  UWOP_PUSH_NONVOL: RBX (adds 8 bytes)
+  UWOP_PUSH_NONVOL: RSI (adds 8 bytes)
+
+Total frame size: 0x28 + 8 + 8 = 0x38 bytes (56 bytes)
+Plus 8 bytes for return address = 0x40 (64 bytes) total between caller RSP and callee RSP
+
+This means in our synthetic stack, the "SleepEx frame" must occupy
+exactly 0x40 bytes. Not 0x38, not 0x48. Exactly 0x40.</code></pre>
+
+<div class="card warn">
+<h4>The Non-Volatile Register Constraint</h4>
+<p>It's not enough to just get the frame size right. If the unwind codes include <code>UWOP_PUSH_NONVOL</code> for RBX and RSI, the unwinder will <strong>read values from those stack positions</strong> and restore them into the register context. If those positions contain garbage or obviously wrong values (like 0xDEADBEEF), a sophisticated analyzer might flag the frame as synthetic. SilentMoonwalk must place plausible values for saved registers.</p>
+</div>
+
+<h2>Execution Flow vs Unwind Flow</h2>
+<p>The key to understanding SilentMoonwalk is recognizing that execution and unwinding traverse the stack in opposite ways:</p>
+
+<table>
+<tr><th>Property</th><th>Execution (ROP chain)</th><th>Unwinding (RtlVirtualUnwind)</th></tr>
+<tr><td>Direction</td><td>RSP increases (moves toward stack bottom)</td><td>RSP increases (reverses prologue)</td></tr>
+<tr><td>Driven by</td><td>RET instructions popping addresses</td><td>UNWIND_CODE processing</td></tr>
+<tr><td>What it reads</td><td>Gadget addresses from the stack</td><td>Return addresses + saved registers</td></tr>
+<tr><td>When it happens</td><td>During actual code execution</td><td>When EDR/OS walks the stack</td></tr>
+<tr><td>State tracking</td><td>CPU registers (RSP, RIP, etc.)</td><td>CONTEXT structure (simulated)</td></tr>
+</table>
+
+<p>SilentMoonwalk's genius is making both traversals work simultaneously on the same physical memory layout.</p>
+
+<h2>Comparison with Prior Approaches</h2>
+
+<h3>ThreadStackSpoofer (Gen 1)</h3>
+<p>ThreadStackSpoofer by mgeeky simply overwrites the return address with NULL or a legitimate address before sleeping, then restores it after waking. This is a <strong>single-frame</strong> manipulation &mdash; it only modifies one return address. The unwinder hits the modified frame and either stops (NULL) or tries to unwind the spoofed function (usually failing because frame sizes don't match).</p>
+
+<h3>CallStackSpoofingPOC (Gen 2)</h3>
+<p>CallStackSpoofingPOC by pard0p uses a single ROP gadget (typically <code>ADD RSP, 0x?? ; RET</code>) to bridge between the real and fake parts of the stack. It constructs one fake frame. However, it still only spoofs one or two frames, not the entire chain.</p>
+
+<h3>SilentMoonwalk (Gen 3)</h3>
+<p>SilentMoonwalk constructs the <strong>entire call chain</strong> &mdash; every frame from the current position all the way back to <code>RtlUserThreadStart</code>. Each frame has correct size, plausible saved register values, and a return address pointing to a real instruction inside the target function. This is what makes it "fully dynamic" &mdash; it generates the spoofed stack on the fly based on the actual UNWIND_INFO of target functions.</p>
+
+<div class="card green">
+<h4>Dynamic vs Static Spoofing</h4>
+<p>Earlier tools used hardcoded offsets and specific function addresses, making them brittle across Windows versions. SilentMoonwalk dynamically parses the <code>.pdata</code> section at runtime, computing frame sizes from the actual UNWIND_INFO structures. This means it works across Windows versions without needing to update offsets &mdash; as long as the target functions exist and have valid unwind data.</p>
+</div>
+
+<div class="quiz" id="quiz4">
+<h4>Pop Quiz: Desynchronization Theory</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: Why can the unwinder be fooled by a synthetic stack?</p>
+<label data-opt="0"><input type="radio" name="q4_0"> Because RtlVirtualUnwind has a buffer overflow vulnerability</label>
+<label data-opt="1"><input type="radio" name="q4_0"> Because the unwinder only runs in user mode</label>
+<label data-opt="2"><input type="radio" name="q4_0"> Because the unwinder is stateless &mdash; it only examines RIP, RSP, and UNWIND_INFO at each frame without tracking actual call history</label>
+<label data-opt="3"><input type="radio" name="q4_0"> Because the unwinder doesn't validate return addresses</label>
+<div class="explain">RtlVirtualUnwind is purely stateless. At each iteration, it looks up the RUNTIME_FUNCTION for the current RIP, applies the unwind codes to RSP, and reads the return address. It has no memory of what was called before and no way to verify that the function was actually invoked.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What is the "frame size problem" in stack desynchronization?</p>
+<label data-opt="0"><input type="radio" name="q4_1"> Finding functions with small enough frames to fit in memory</label>
+<label data-opt="1"><input type="radio" name="q4_1"> Each synthetic frame must occupy the exact number of bytes that the target function's UNWIND_INFO declares</label>
+<label data-opt="2"><input type="radio" name="q4_1"> The total stack must not exceed 1MB</label>
+<label data-opt="3"><input type="radio" name="q4_1"> Frame sizes must be multiples of 16 only</label>
+<div class="explain">If the target function's UNWIND_INFO says the prologue allocated N bytes, the unwinder will add N to RSP when processing that frame. The synthetic frame must be exactly N bytes so that after the unwinder adjusts RSP, it lands precisely on the next frame's return address.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q3: How does SilentMoonwalk differ from ThreadStackSpoofer?</p>
+<label data-opt="0"><input type="radio" name="q4_2"> SilentMoonwalk only works on x86</label>
+<label data-opt="1"><input type="radio" name="q4_2"> ThreadStackSpoofer constructs more frames</label>
+<label data-opt="2"><input type="radio" name="q4_2"> SilentMoonwalk is a static analysis tool</label>
+<label data-opt="3"><input type="radio" name="q4_2"> SilentMoonwalk fabricates the entire call chain with correct unwind-compatible frames, while ThreadStackSpoofer only modifies a single return address</label>
+<div class="explain">ThreadStackSpoofer performs a simple single-frame return address overwrite. SilentMoonwalk constructs a complete synthetic call chain where every frame has the correct size, valid return addresses, and plausible saved register values, making the entire stack walkable by RtlVirtualUnwind.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz4')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Previous: ROP Fundamentals</a>
+<a class="primary" href="module5.html">Next: Gadget Discovery &amp; Selection &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

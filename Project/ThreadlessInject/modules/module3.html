@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: Target Function Selection - ThreadlessInject Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9F5;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#14b8a6;--accent2:#0d9488;--gradient:linear-gradient(135deg,#14b8a6,#0d9488)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ThreadlessInject Course</h2>
+<span>Threadless Injection Masterclass</span>
+</div>
+<a class="home-link" href="../ThreadlessInject_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> Thread Creation Problem</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Remote Function Hooking</a>
+<a class="mod-link active" href="module3.html"><span class="diff d1">3</span> Target Function Selection</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> Remote Memory Allocation</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hook Stub Architecture</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Installing Remote Hook</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Execution &amp; Cleanup</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: Target Function Selection</h1>
+<p class="subtitle">Choosing the right function to hook determines whether your injection fires in milliseconds or never.</p>
+
+<div class="card highlight">
+<h4>Why Function Choice Matters</h4>
+<p>ThreadlessInject works by hooking a function inside the target process so that when an existing thread calls that function, your shellcode executes. The choice of which function to hook is critical. Hook a function that is called frequently and you get near-instant execution. Hook a function that is never called and your shellcode sits dormant forever. Hook a function that is currently being executed by multiple threads and you risk crashing the process.</p>
+</div>
+
+<h2>Requirements for a Good Target Function</h2>
+<p>A suitable target function for ThreadlessInject must satisfy several criteria simultaneously. Finding a function that meets all of these requirements is the art of target selection:</p>
+
+<table>
+<tr><th>Requirement</th><th>Reason</th><th>Risk if Violated</th></tr>
+<tr><td><strong>Called frequently</strong></td><td>Shellcode needs to execute promptly</td><td>Payload never fires or fires too late</td></tr>
+<tr><td><strong>Exported by a loaded DLL</strong></td><td>You need to resolve its address from your injector process</td><td>Cannot find the function to hook</td></tr>
+<tr><td><strong>Prologue &ge; 14 bytes</strong></td><td>Need space for the absolute JMP + address</td><td>Overwrite spills into next function, crash</td></tr>
+<tr><td><strong>Not currently executing</strong></td><td>Thread safety during hook installation</td><td>Thread hits partially-written hook, crash</td></tr>
+<tr><td><strong>Not hooked by EDR</strong></td><td>Avoid conflicts with existing EDR hooks</td><td>Double-hook conflict, detection, crash</td></tr>
+<tr><td><strong>Safe to detour briefly</strong></td><td>Your shellcode adds latency to the call</td><td>Timeouts, UI freezes, deadlocks</td></tr>
+</table>
+
+<h2>Sleep-Based vs. Event-Driven Triggers</h2>
+<p>Target functions broadly fall into two categories based on when and why they are called:</p>
+
+<h3>Sleep-Based Targets</h3>
+<p>These are functions called on a timer or periodic basis. The most common example is a thread that calls <code>Sleep()</code> or <code>WaitForSingleObject()</code> in a loop. Many Windows services and background processes have worker threads that sleep for a fixed interval, wake up, do some work, and sleep again. Hooking the sleep function guarantees your code runs every time the thread wakes up from (or enters) a sleep cycle.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Example: a typical worker thread pattern in many Windows services
+// This thread calls Sleep() every 1000ms - a reliable hook target
+DWORD WINAPI WorkerThread(LPVOID param) {
+    while (running) {
+        DoPeriodicWork();
+        Sleep(1000);  // <-- If we hook Sleep(), our code runs every ~1 second
+    }
+    return 0;
+}
+
+// ThreadlessInject's default approach: hook an export the process regularly calls
+// Common choice: functions in ntdll.dll or kernel32.dll that service loops call</code></pre>
+
+<h3>Event-Driven Targets</h3>
+<p>These functions are called in response to external events: network packets, user input, file system changes, etc. They may fire unpredictably but often fire quickly when the system is under normal operation. Examples include message dispatch functions, I/O completion routines, and network receive handlers.</p>
+
+<div class="card">
+<h4>ThreadlessInject's Default Approach</h4>
+<p>The ThreadlessInject tool allows the operator to specify which function to hook via command-line arguments. The user provides the DLL name and the export name. This flexibility means the operator can pick the best function for their specific target process. In practice, commonly chosen targets include exports from <code>ntdll.dll</code>, <code>kernel32.dll</code>, or application-specific DLLs that the target process is known to call frequently.</p>
+</div>
+
+<h2>Resolving the Target Function Address</h2>
+<p>To hook a function in a remote process, you need its virtual address in that process. For DLLs like <code>ntdll.dll</code> and <code>kernel32.dll</code>, there is a useful property of Windows: these system DLLs are mapped at the <strong>same base address in every process</strong> (ASLR randomizes the base once at boot, but all processes share the same randomized address). This means you can resolve the function address in your own process and use that same address in the target process.</p>
+
+<pre><code><span class="lang-tag">C++</span>// Resolving the target function address
+// For system DLLs (ntdll, kernel32), the address is the same in all processes
+
+// Method 1: GetProcAddress in our own process (works for system DLLs)
+HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+FARPROC pTarget = GetProcAddress(hNtdll, "NtWaitForSingleObject");
+// pTarget is valid in both our process AND the target process
+
+// Method 2: For non-system DLLs, enumerate remote process modules
+// Use NtQueryInformationProcess or CreateToolhelp32Snapshot to find
+// the DLL base in the remote process, then parse its export table
+MODULEENTRY32 me32;
+me32.dwSize = sizeof(MODULEENTRY32);
+HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, targetPid);
+// Walk modules to find target DLL base address...
+// Then parse PE export directory to find function RVA
+// remoteAddr = remoteDllBase + exportRVA</code></pre>
+
+<div class="card warn">
+<h4>Non-System DLLs: Different Base Addresses</h4>
+<p>For application-specific DLLs, ASLR may randomize the base address independently for each process. You cannot assume the DLL is at the same address in the target as in your process. You need to enumerate the remote process's module list (via <code>CreateToolhelp32Snapshot</code> with <code>TH32CS_SNAPMODULE</code>, or by reading the remote PEB) to find the actual base address of the DLL, then parse its export table to find the target function's RVA and compute its absolute address.</p>
+</div>
+
+<h2>Prologue Size Analysis</h2>
+<p>You need at least 14 bytes of the function prologue to overwrite. If the function's prologue is shorter than 14 bytes, you will overwrite into the middle of a subsequent instruction, which will cause a crash when execution returns to the function after the overwritten region. You must analyze the target function's disassembly to confirm it has enough room.</p>
+
+<pre><code><span class="lang-tag">x86-64 ASM</span>; Example: NtWaitForSingleObject prologue (ntdll.dll)
+; This has plenty of room for a 14-byte hook
+4C 8B D1          mov r10, rcx      ; 3 bytes
+B8 04 00 00 00    mov eax, 0x4      ; 5 bytes  (syscall number)
+0F 05             syscall            ; 2 bytes
+C3                ret                ; 1 byte
+; Total first instruction block: 11 bytes
+; But we need 14, so we'd overwrite into the syscall+ret
+; This is fine IF we save and replay all overwritten bytes
+
+; Better example: a larger function prologue
+48 89 5C 24 08    mov [rsp+8], rbx   ; 5 bytes
+48 89 6C 24 10    mov [rsp+16], rbp  ; 5 bytes
+48 89 74 24 18    mov [rsp+24], rsi  ; 5 bytes
+57                push rdi            ; 1 byte
+; 16 bytes - plenty of room for the 14-byte hook</code></pre>
+
+<p>In practice, most non-trivial functions have prologues well over 14 bytes because they save multiple registers and allocate stack space. Small stub functions (like the ntdll syscall stubs shown above) require more care, but they are still hookable if you save all the overwritten bytes correctly in the trampoline.</p>
+
+<h2>Common Target Functions</h2>
+<p>Here are functions commonly considered as hook targets for threadless injection, along with their characteristics:</p>
+
+<table>
+<tr><th>Function</th><th>DLL</th><th>Call Pattern</th><th>Notes</th></tr>
+<tr><td><code>NtWaitForSingleObject</code></td><td>ntdll.dll</td><td>Blocking waits (very frequent)</td><td>Called by any thread doing synchronization</td></tr>
+<tr><td><code>NtClose</code></td><td>ntdll.dll</td><td>Handle cleanup (frequent)</td><td>Called whenever handles are closed</td></tr>
+<tr><td><code>NtQueryInformationFile</code></td><td>ntdll.dll</td><td>File operations</td><td>Frequent in I/O-heavy processes</td></tr>
+<tr><td><code>Sleep</code></td><td>kernel32.dll</td><td>Periodic timer loops</td><td>Good for services with worker threads</td></tr>
+<tr><td><code>GetTickCount</code></td><td>kernel32.dll</td><td>Timing checks</td><td>Called by many GUI applications</td></tr>
+<tr><td><code>MessageBoxW</code></td><td>user32.dll</td><td>User interaction</td><td>Only fires on dialog display (rare)</td></tr>
+</table>
+
+<div class="diagram">
+<h4>Target Selection Decision Flow</h4>
+<div class="flow">
+<div class="box hl">Identify target<br>process</div>
+<div class="arrow">&rarr;</div>
+<div class="box">List loaded<br>DLLs &amp; exports</div>
+<div class="arrow">&rarr;</div>
+<div class="box y">Find frequently<br>called export</div>
+<div class="arrow">&rarr;</div>
+<div class="box">Verify prologue<br>&ge; 14 bytes</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Confirm no<br>EDR hook conflict</div>
+</div>
+</div>
+
+<h2>Stability Considerations</h2>
+<p>Hooking a function introduces latency to every call. If the hooked function is called from a time-sensitive context (interrupt handler, DPC, or a tight real-time loop), the added execution time of your shellcode could cause timeouts, deadlocks, or data corruption. This is especially important for the <strong>one-shot</strong> pattern used by ThreadlessInject: the hook only needs to fire once, but while it is installed, every call to the hooked function takes the detour. Module 7 covers how ThreadlessInject solves this with immediate cleanup after the first execution.</p>
+
+<div class="card green">
+<h4>ThreadlessInject's Approach</h4>
+<p>ThreadlessInject lets the operator specify the target DLL and export function on the command line. This design choice reflects the reality that the best target depends on the specific target process. For generic injection into common Windows services, <code>ntdll.dll</code> exports are safe bets. For application-specific injection, the operator can profile the target process to identify the most frequently called functions and choose accordingly.</p>
+</div>
+
+<div class="quiz" id="quiz3">
+<h4>Pop Quiz: Target Function Selection</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: Why can you use GetProcAddress in your own process to find the address of an ntdll.dll function in the target process?</p>
+<label data-opt="0"><input type="radio" name="q3_0"> GetProcAddress works across process boundaries</label>
+<label data-opt="1"><input type="radio" name="q3_0"> System DLLs like ntdll.dll are mapped at the same base address in every process (ASLR is per-boot, not per-process)</label>
+<label data-opt="2"><input type="radio" name="q3_0"> ntdll.dll is always loaded at address 0x7FFE0000</label>
+<label data-opt="3"><input type="radio" name="q3_0"> The Windows loader shares function addresses via shared memory</label>
+<div class="explain">Windows randomizes the base address of system DLLs like ntdll.dll and kernel32.dll once at boot time. After that, every process maps them at the same randomized address. So resolving a function in your own process gives you the same virtual address that is valid in the target process.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: What happens if the target function's prologue is shorter than 14 bytes?</p>
+<label data-opt="0"><input type="radio" name="q3_1"> The JMP + address overwrites into the middle of a subsequent instruction, causing a crash when execution returns</label>
+<label data-opt="1"><input type="radio" name="q3_1"> The hook silently fails and nothing happens</label>
+<label data-opt="2"><input type="radio" name="q3_1"> Windows automatically pads the function to accommodate the hook</label>
+<label data-opt="3"><input type="radio" name="q3_1"> The 14-byte hook compresses to fit the available space</label>
+<div class="explain">If you overwrite 14 bytes but the prologue instructions only span, say, 10 bytes, the last 4 bytes of your hook overwrite the beginning of the 11th byte's instruction. When the trampoline jumps back to "original function + 14", it lands in the middle of a partially-overwritten instruction, causing undefined behavior (usually a crash).</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: Why is hooking a function that is currently being executed by multiple threads dangerous?</p>
+<label data-opt="0"><input type="radio" name="q3_2"> It would cause the shellcode to run multiple times simultaneously</label>
+<label data-opt="1"><input type="radio" name="q3_2"> Windows prevents writes to code that is currently executing</label>
+<label data-opt="2"><input type="radio" name="q3_2"> A thread might be partway through the prologue bytes being overwritten, executing a half-written instruction</label>
+<label data-opt="3"><input type="radio" name="q3_2"> Multiple threads hooking the same function causes a deadlock</label>
+<div class="explain">If a thread's instruction pointer is somewhere within the first 14 bytes of the target function at the exact moment you overwrite those bytes, that thread will try to execute a partially-overwritten instruction sequence. This is a race condition that typically results in an access violation or illegal instruction exception, crashing the thread or the process.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz3')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Previous: Remote Function Hooking</a>
+<a class="primary" href="module4.html">Next: Remote Memory Allocation &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

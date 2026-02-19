@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 8: Detection, Limitations &amp; Countermeasures - SilentMoonwalk Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F319;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#06b6d4;--accent2:#0891b2;--gradient:linear-gradient(135deg,#06b6d4,#0891b2)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>SilentMoonwalk Course</h2><span>Call Stack Spoofing Masterclass</span></div>
+  <a class="home-link" href="../SilentMoonwalk_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Stack Telemetry</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> x64 Stack Frames</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> ROP Fundamentals</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> Desync Theory</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Gadget Discovery</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Synthetic Frames</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Full Spoof Engine</a>
+  <a class="mod-link active" href="module8.html"><span class="diff d3">8</span> Detection &amp; Counters</a>
+</nav>
+
+<main>
+<span class="diff-badge hard">Difficulty: Advanced</span>
+<h1>Module 8: Detection, Limitations &amp; Countermeasures</h1>
+<p class="subtitle">No technique is invincible. Understanding the defenses shapes the next generation of offense.</p>
+
+<div class="card highlight">
+<h4>The Arms Race</h4>
+<p>SilentMoonwalk represented a major leap in call stack spoofing, but defenders have not stood still. This module examines the hardware and software mechanisms that can detect or prevent stack spoofing, the inherent limitations of SilentMoonwalk's approach, and how successor tools like Draugr and Unwinder evolved the technique further.</p>
+</div>
+
+<h2>Hardware Countermeasures</h2>
+
+<h3>Intel CET: Control-Flow Enforcement Technology</h3>
+<p>Intel CET introduces a <strong>shadow stack</strong> &mdash; a second, hardware-protected stack that stores only return addresses. The CPU automatically pushes the return address to both the regular stack and the shadow stack on every <code>CALL</code>, and validates that both match on every <code>RET</code>:</p>
+
+<pre><code><span class="lang-tag">Text</span>Normal execution with CET enabled:
+  CALL target_function:
+    1. Push return address to regular stack (RSP)
+    2. Push return address to shadow stack (SSP)  <-- hardware-managed
+    3. Jump to target_function
+
+  RET:
+    1. Pop return address from regular stack
+    2. Pop return address from shadow stack
+    3. Compare both addresses
+    4. If they MATCH: continue normally
+    5. If they DIFFER: #CP exception (Control Protection fault)
+
+Impact on SilentMoonwalk:
+  - JMP [RBX] doesn't push to either stack --> no shadow stack entry
+  - When the target API executes RET, the shadow stack has the REAL
+    return address, but the regular stack has the SPOOFED address
+  - MISMATCH --> #CP fault --> process crashes or is flagged</code></pre>
+
+<div class="card warn">
+<h4>CET Adoption Status</h4>
+<p>Intel CET (specifically the shadow stack component) is supported in hardware starting from Intel 11th gen (Tiger Lake) and AMD Zen 3 processors. Windows 10 20H1+ and Windows 11 support it as <strong>Hardware-enforced Stack Protection</strong> (also known as CET Shadow Stacks). However, adoption is gradual: it must be enabled per-process via the <code>/CETCOMPAT</code> linker flag, and many applications and DLLs are not yet CET-compatible. As of late 2024, most enterprise software still runs without CET enforcement, but the trend is toward broader adoption.</p>
+</div>
+
+<h3>ARM Pointer Authentication (PAC)</h3>
+<p>On ARM64 systems (including Windows on ARM), Pointer Authentication Codes provide a similar defense. Return addresses are cryptographically signed before being pushed to the stack and verified before use. Modifying a signed pointer invalidates the PAC, causing a fault. While not directly relevant to x64 SilentMoonwalk, this represents the platform direction.</p>
+
+<h2>Software Detection Strategies</h2>
+
+<h3>1. Return Address Validation</h3>
+<p>EDRs can validate that each return address on the stack points to an instruction immediately following a <code>CALL</code> instruction. Legitimate return addresses are always the instruction after a CALL. SilentMoonwalk's return addresses point to arbitrary offsets within functions (typically just after the prologue):</p>
+
+<pre><code><span class="lang-tag">C++</span>// Detection: verify each return address follows a CALL instruction
+bool IsReturnAddressAfterCall(PVOID retAddr) {
+    // A CALL instruction on x64 can be:
+    //   E8 xx xx xx xx     (CALL rel32)     - 5 bytes
+    //   FF 15 xx xx xx xx  (CALL [rip+xx])  - 6 bytes
+    //   FF Dx              (CALL reg)       - 2 bytes
+    //   41 FF Dx           (CALL r8-r15)    - 3 bytes
+
+    PBYTE addr = (PBYTE)retAddr;
+
+    // Check for CALL rel32 (most common)
+    if (addr[-5] == 0xE8)
+        return true;
+
+    // Check for CALL [rip+disp32]
+    if (addr[-6] == 0xFF && (addr[-5] & 0x38) == 0x10)
+        return true;
+
+    // Check for CALL reg (2-byte)
+    if (addr[-2] == 0xFF && (addr[-1] & 0xF8) == 0xD0)
+        return true;
+
+    // Check for CALL r8-r15 (3-byte with REX)
+    if (addr[-3] == 0x41 && addr[-2] == 0xFF && (addr[-1] & 0xF8) == 0xD0)
+        return true;
+
+    // No CALL found before this return address!
+    // This could indicate a spoofed return address.
+    return false;
+}</code></pre>
+
+<div class="card">
+<h4>Evasion: Choosing Post-CALL Return Addresses</h4>
+<p>SilentMoonwalk can counter this detection by specifically selecting return addresses that follow actual CALL instructions in the target function. Instead of pointing to an arbitrary post-prologue offset, the spoofer scans the target function for CALL instructions and uses the address immediately after a CALL as the return address. This makes the spoofed address indistinguishable from a real return point.</p>
+</div>
+
+<h3>2. Call Chain Semantic Validation</h3>
+<p>A more sophisticated detection validates that the call chain is <strong>semantically plausible</strong>. For each pair of adjacent frames (caller, callee), the EDR verifies that the caller function actually contains a CALL instruction that could target the callee:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Detection: verify caller actually calls callee
+bool ValidateCallChainEdge(PVOID callerRetAddr, PVOID calleeFunc) {
+    // The CALL instruction is at (callerRetAddr - sizeof(CALL))
+    PBYTE callSite = (PBYTE)callerRetAddr - 5; // assuming CALL rel32
+
+    if (callSite[0] == 0xE8) {
+        // Decode the relative target
+        INT32 relTarget = *(INT32*)(callSite + 1);
+        PVOID callTarget = (PVOID)(callSite + 5 + relTarget);
+
+        // Does this CALL actually target the callee function?
+        // (or a function that eventually calls it)
+        if (callTarget == calleeFunc)
+            return true;
+
+        // Could also be an indirect call - harder to validate
+    }
+    return false;  // Suspicious: caller doesn't appear to call callee
+}</code></pre>
+
+<h3>3. Stack Region Validation</h3>
+<p>EDRs can verify that RSP values in the unwind chain fall within the thread's actual stack bounds (stored in the TEB):</p>
+
+<pre><code><span class="lang-tag">C++</span>// Detection: verify stack pointers are within thread stack bounds
+bool IsRspInThreadStack(DWORD64 rsp) {
+    // Get Thread Environment Block
+    PNT_TIB pTib = (PNT_TIB)NtCurrentTeb();
+
+    DWORD64 stackBase  = (DWORD64)pTib->StackBase;    // High address
+    DWORD64 stackLimit = (DWORD64)pTib->StackLimit;   // Low address
+
+    // RSP must be between StackLimit and StackBase
+    return (rsp >= stackLimit && rsp < stackBase);
+}
+
+// If SilentMoonwalk allocates its synthetic stack via VirtualAlloc
+// (separate from the thread's stack), the RSP values will be
+// OUTSIDE the thread stack bounds --> detected!
+//
+// Mitigation: SilentMoonwalk should build synthetic frames ON the
+// thread's actual stack (within StackLimit to StackBase range),
+// rather than on a separately allocated buffer.</code></pre>
+
+<h3>4. Timing-Based Detection</h3>
+<p>The act of constructing a synthetic stack takes measurable time. If an EDR monitors the time between specific events (thread creation, API call, sleep entry), an abnormal delay might indicate stack manipulation occurring:</p>
+
+<table>
+<tr><th>Detection Method</th><th>What It Detects</th><th>SilentMoonwalk Exposure</th></tr>
+<tr><td>CET Shadow Stacks</td><td>RSP/SSP return address mismatch</td><td>High &mdash; fundamental design conflict</td></tr>
+<tr><td>Post-CALL validation</td><td>Return addr not after a CALL</td><td>Low &mdash; can be mitigated by careful addr selection</td></tr>
+<tr><td>Semantic chain validation</td><td>Caller doesn't actually call callee</td><td>Medium &mdash; requires realistic chain selection</td></tr>
+<tr><td>Stack bounds checking</td><td>RSP outside thread stack</td><td>High if using separate buffer, Low if using real stack</td></tr>
+<tr><td>Saved register analysis</td><td>Implausible non-volatile reg values</td><td>Medium &mdash; plausible values mitigate this</td></tr>
+<tr><td>Timing analysis</td><td>Abnormal delay before syscall</td><td>Low &mdash; construction is fast (microseconds)</td></tr>
+</table>
+
+<h2>Inherent Limitations of SilentMoonwalk</h2>
+
+<div class="card">
+<h4>1. Static Chain Templates</h4>
+<p>SilentMoonwalk uses pre-selected call chain templates. While it dynamically computes frame sizes, the choice of which functions to spoof is somewhat fixed. A truly dynamic approach would analyze the actual call chain that the target API produces during normal operation and replicate that exact chain.</p>
+</div>
+
+<div class="card">
+<h4>2. Gadget Availability</h4>
+<p>The technique depends on finding suitable gadgets (JMP [RBX], ADD RSP, POP REG) within functions that have compatible UNWIND_INFO. On some Windows builds, the ideal gadgets may not exist, or they may exist only in functions with inconvenient frame sizes. This can limit which call chains can be spoofed.</p>
+</div>
+
+<div class="card">
+<h4>3. Non-Volatile Register State</h4>
+<p>SilentMoonwalk must provide plausible values for all saved non-volatile registers in each frame. Currently, it uses heuristic approaches (module addresses, data section pointers). A sophisticated analyzer could detect patterns in these values that differ from what real function execution produces.</p>
+</div>
+
+<div class="card">
+<h4>4. Single-Thread Focus</h4>
+<p>SilentMoonwalk spoofs the call stack for a single thread during a specific API call. It does not handle multi-threaded scenarios where multiple threads might be inspected simultaneously, or where an EDR correlates stack traces across threads.</p>
+</div>
+
+<h2>Comparison: Stack Spoofing Tools</h2>
+
+<table>
+<tr><th>Feature</th><th>ThreadStackSpoofer</th><th>CallStackSpoofingPOC</th><th>SilentMoonwalk</th><th>Draugr</th></tr>
+<tr><td>Spoofed Frames</td><td>1 (return addr only)</td><td>1-2 (with ADD RSP gadget)</td><td>Full chain (N frames)</td><td>Full chain (N frames)</td></tr>
+<tr><td>Unwind Compatible</td><td>No &mdash; breaks RtlVirtualUnwind</td><td>Partial &mdash; first frame only</td><td>Yes &mdash; all frames have valid unwind data</td><td>Yes &mdash; fake RUNTIME_FUNCTION/UNWIND_INFO entries</td></tr>
+<tr><td>Dynamic</td><td>No &mdash; hardcoded addresses</td><td>Partially &mdash; one gadget resolved</td><td>Yes &mdash; parses .pdata at runtime</td><td>Yes &mdash; builds synthetic unwind metadata at runtime</td></tr>
+<tr><td>Mechanism</td><td>Overwrite return addr before sleep</td><td>ROP with ADD RSP gadget</td><td>Multi-frame ROP + synthetic unwind chain</td><td>JMP [RBX] gadget chaining + synthetic RUNTIME_FUNCTION/UNWIND_INFO for BOFs</td></tr>
+<tr><td>CET Resistant</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
+<tr><td>Call Validation Resistant</td><td>No</td><td>Partially</td><td>With careful return addr selection</td><td>With synthetic unwind metadata</td></tr>
+<tr><td>Implementation</td><td>Simple C/ASM</td><td>C++ with one gadget</td><td>C++ with gadget database</td><td>C++/ASM BOF with JMP [RBX] gadgets</td></tr>
+</table>
+
+<h2>Draugr and Unwinder: The Next Generation</h2>
+<p>Draugr (by NtDallas) took a different approach oriented toward Cobalt Strike BOFs (Beacon Object Files). Rather than finding arbitrary ROP gadgets, Draugr provides <strong>call stack spoofing for BOFs</strong> by constructing synthetic stack frames using <code>JMP [RBX]</code> gadgets to chain frames together. It constructs fake <code>RUNTIME_FUNCTION</code> and <code>UNWIND_INFO</code> entries so that the synthetic frames pass <code>RtlVirtualUnwind</code> validation:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Draugr's approach (conceptual):
+// 1. Enumerate loaded modules for JMP [RBX] gadgets in functions
+//    with valid RUNTIME_FUNCTION entries
+// 2. Construct synthetic RUNTIME_FUNCTION and UNWIND_INFO entries
+//    that describe the desired frame layout
+// 3. Chain synthetic frames using JMP [RBX] gadgets, where each
+//    frame's unwind data matches the stack layout
+// 4. The resulting stack passes RtlVirtualUnwind validation because
+//    every frame has proper unwind metadata
+
+// Advantage: Purpose-built for Cobalt Strike BOFs with JMP [RBX]
+// gadget chaining and fake unwind metadata.
+// Works within the BOF execution context without sacrificial threads.</code></pre>
+
+<div class="card green">
+<h4>The Unwinder Approach</h4>
+<p>Unwinder (by Kudaes, at <code>github.com/Kudaes/Unwinder</code>) takes a different approach by implementing a complete x64 unwinder from scratch. This custom unwinder processes UNWIND_INFO structures identically to RtlVirtualUnwind but can also <strong>reverse the process</strong>: given a desired call chain, it computes the exact stack contents needed. This eliminates the gadget dependency entirely &mdash; no ROP chain is needed because the synthetic stack is computed mathematically from the unwind metadata.</p>
+</div>
+
+<h2>Control Flow Guard (CFG)</h2>
+<p>CFG is a Windows mitigation that validates indirect call targets. Before every indirect CALL, the compiler inserts a check against a bitmap of valid call targets. How does this affect SilentMoonwalk?</p>
+
+<pre><code><span class="lang-tag">C++</span>// CFG validation on indirect calls:
+// The compiler inserts:
+//   call __guard_check_icall_fptr  ; validate target
+//   call [rax]                      ; actual indirect call
+
+// Impact on SilentMoonwalk:
+// - JMP [RBX] is NOT a CALL, so CFG doesn't validate the target
+// - However, if the spoofer uses CALL-based gadgets, CFG may block them
+// - SilentMoonwalk deliberately uses JMP-based trampolines to avoid CFG
+//
+// CFG bitmap is per-module and marks function entry points as valid.
+// Gadgets mid-function are NOT valid CFG targets for indirect CALL,
+// but JMP instructions bypass this check entirely.</code></pre>
+
+<div class="card">
+<h4>CFG + CET: The Combined Defense</h4>
+<p>When both CFG and CET are enabled, indirect calls are validated against the CFG bitmap (software check) and returns are validated against the shadow stack (hardware check). This combination significantly constrains ROP-based techniques. SilentMoonwalk's JMP [RBX] bypasses CFG but cannot bypass CET's shadow stack validation on the subsequent RET.</p>
+</div>
+
+<h2>Detection Engineering: Building Detections</h2>
+<p>For blue team practitioners, here are actionable detection strategies ordered by implementation complexity:</p>
+
+<table>
+<tr><th>Priority</th><th>Detection</th><th>Implementation</th><th>False Positive Risk</th></tr>
+<tr><td>1 (Easy)</td><td>Enable CET shadow stacks</td><td>Compile with <code>/CETCOMPAT</code>, enable in OS</td><td>Low (hardware-enforced)</td></tr>
+<tr><td>2 (Medium)</td><td>Stack bounds validation</td><td>Check RSP within TEB.StackBase/Limit during unwind</td><td>Low</td></tr>
+<tr><td>3 (Medium)</td><td>Post-CALL instruction check</td><td>Disassemble 2-6 bytes before each return address</td><td>Medium (some JIT code)</td></tr>
+<tr><td>4 (Hard)</td><td>Semantic chain validation</td><td>Verify caller-callee relationships via static analysis</td><td>Medium (indirect calls)</td></tr>
+<tr><td>5 (Hard)</td><td>Saved register plausibility</td><td>Check non-volatile reg values against expected ranges</td><td>High (wide variance in normal)</td></tr>
+</table>
+
+<h2>The Future of Stack Spoofing</h2>
+<p>The arms race between stack spoofing and detection continues to evolve:</p>
+
+<ul>
+<li><strong>Hardware enforcement</strong> (CET, PAC) will eventually make ROP-based spoofing obsolete on systems where it's enabled. The transition period, however, may last years.</li>
+<li><strong>Synthetic unwind metadata</strong> (Draugr's approach of constructing fake RUNTIME_FUNCTION/UNWIND_INFO entries) and <strong>unwinder emulation</strong> (Kudaes' Unwinder) produce higher-fidelity spoofed stacks but at greater complexity.</li>
+<li><strong>Hybrid approaches</strong> may combine stack spoofing with sleep obfuscation (encrypting memory during sleep) and module stomping (placing code in legitimate DLL memory) for layered evasion.</li>
+<li><strong>Kernel-mode telemetry</strong> improvements may provide EDRs with tamper-resistant stack information that cannot be manipulated from user mode.</li>
+</ul>
+
+<div class="card highlight">
+<h4>The Fundamental Lesson</h4>
+<p>SilentMoonwalk demonstrated that the x64 structured exception handling mechanism, designed for reliability and performance, creates an exploitable gap between what code actually executes and what the unwinding metadata reports. As long as the unwinder is stateless and trusts stack contents, some form of desynchronization attack will be possible. The defense community's response has been to add independent verification (shadow stacks, call validation) rather than trying to make the unwinder tamper-proof.</p>
+</div>
+
+<div class="quiz" id="quiz8">
+<h4>Pop Quiz: Detection &amp; Countermeasures</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: How does Intel CET's shadow stack defeat SilentMoonwalk?</p>
+<label data-opt="0"><input type="radio" name="q8_0"> It encrypts the regular stack so it can't be modified</label>
+<label data-opt="1"><input type="radio" name="q8_0"> It maintains a hardware-protected copy of return addresses; JMP-based control flow creates a mismatch on RET because no shadow stack entry was pushed</label>
+<label data-opt="2"><input type="radio" name="q8_0"> It blocks JMP instructions entirely</label>
+<label data-opt="3"><input type="radio" name="q8_0"> It validates function arguments against a whitelist</label>
+<div class="explain">CET pushes return addresses to a shadow stack on every CALL and validates them on every RET. Since SilentMoonwalk uses JMP [RBX] (which doesn't push to the shadow stack), when the target API executes RET, the regular stack has the spoofed return address but the shadow stack has no corresponding entry (or a different one), causing a control protection fault.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: What advantage does Draugr's approach have over SilentMoonwalk?</p>
+<label data-opt="0"><input type="radio" name="q8_1"> It works on 32-bit systems</label>
+<label data-opt="1"><input type="radio" name="q8_1"> It's faster to execute</label>
+<label data-opt="2"><input type="radio" name="q8_1"> It constructs synthetic RUNTIME_FUNCTION and UNWIND_INFO entries with JMP [RBX] gadget chaining, purpose-built for Cobalt Strike BOFs</label>
+<label data-opt="3"><input type="radio" name="q8_1"> It bypasses CET shadow stacks</label>
+<div class="explain">Draugr (by NtDallas) constructs synthetic RUNTIME_FUNCTION and UNWIND_INFO entries and uses JMP [RBX] gadgets to chain fake stack frames that pass RtlVirtualUnwind validation. It is purpose-built for Cobalt Strike BOFs, providing call stack spoofing within the BOF execution context. Its synthetic unwind metadata approach produces frames that survive structured unwinding (though, like SilentMoonwalk, it does not bypass CET).</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: Why is stack bounds checking (TEB.StackBase/StackLimit) an effective detection against naive implementations?</p>
+<label data-opt="0"><input type="radio" name="q8_2"> Because if the synthetic stack is allocated separately (e.g., via VirtualAlloc), the RSP values fall outside the thread's legitimate stack range stored in the TEB</label>
+<label data-opt="1"><input type="radio" name="q8_2"> Because the TEB is encrypted and cannot be spoofed</label>
+<label data-opt="2"><input type="radio" name="q8_2"> Because stack bounds are checked by hardware on every instruction</label>
+<label data-opt="3"><input type="radio" name="q8_2"> Because only kernel threads have stack bounds</label>
+<div class="explain">Each thread's TEB records the stack base (high address) and stack limit (low address). If SilentMoonwalk builds its synthetic stack on a separately allocated memory buffer, the RSP values during unwinding will point outside the thread's stack range. An EDR checking RSP against these bounds will immediately flag the frame as invalid. The mitigation is to build synthetic frames directly on the thread's real stack.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz8')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module7.html">&larr; Previous: The Full Spoof Engine</a>
+<a class="primary" href="../SilentMoonwalk_index.html">Back to Course Home</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

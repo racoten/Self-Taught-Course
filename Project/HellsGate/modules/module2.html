@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 2: Windows Syscall Architecture - HellsGate Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#e11d48;--accent2:#be123c;--gradient:linear-gradient(135deg,#e11d48,#be123c)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>HellsGate Course</h2>
+<span>Dynamic SSN &amp; Direct Syscalls</span>
+</div>
+<a class="home-link" href="../HellsGate_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Hooking</a>
+<a class="mod-link active" href="module2.html"><span class="diff d1">2</span> Syscall Architecture</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> SSN Basics</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> ntdll Stub Anatomy</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hell's Gate Algorithm</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Direct Syscall Exec</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Halo's &amp; Tartarus Gate</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 2: Windows Syscall Architecture</h1>
+<p class="subtitle">The gateway between user mode and the kernel -- one instruction to rule them all.</p>
+
+<div class="card highlight">
+<h4>The Big Picture</h4>
+<p>Hell's Gate works by invoking the <code>syscall</code> instruction directly. To understand why this is powerful, you must understand the entire mechanism Windows uses to transition from user mode (Ring 3) to kernel mode (Ring 0). This module covers the hardware and software architecture that makes system calls possible on x64 Windows.</p>
+</div>
+
+<h2>Protection Rings &amp; Privilege Levels</h2>
+<p>x86-64 processors implement a <strong>privilege ring</strong> model. While the architecture supports four rings (0-3), Windows uses only two:</p>
+
+<table>
+<tr><th>Ring</th><th>Name</th><th>What Runs Here</th><th>Access</th></tr>
+<tr><td><strong>Ring 0</strong></td><td>Kernel Mode</td><td>ntoskrnl.exe, drivers, kernel objects</td><td>Full hardware access, all memory, all instructions</td></tr>
+<tr><td><strong>Ring 3</strong></td><td>User Mode</td><td>Applications, DLLs (including ntdll.dll)</td><td>Restricted: cannot execute privileged instructions or access kernel memory</td></tr>
+</table>
+
+<p>Your application code runs in Ring 3. It cannot directly access hardware, modify page tables, or touch kernel data structures. To perform any privileged operation (allocating memory, creating threads, opening files), it must ask the kernel via a <strong>system call</strong>.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Ring Transition via syscall</h4>
+<div class="flow">
+<div class="box">Ring 3 (User)<br><code>mov eax, SSN</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl"><code>syscall</code><br>instruction</div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Ring 0 (Kernel)<br><code>KiSystemCall64</code></div>
+<div class="arrow">&rarr;</div>
+<div class="box">SSDT Dispatch<br><code>Nt*</code> kernel func</div>
+</div>
+</div>
+
+<h2>The <code>syscall</code> Instruction</h2>
+<p>On x86-64, the <code>syscall</code> instruction is the mechanism for Ring 3 to Ring 0 transitions. When the CPU executes <code>syscall</code>, the following happens atomically (in hardware):</p>
+
+<pre><code><span class="lang-tag">ASM</span>; What the CPU does when it executes 'syscall':
+;
+; 1. Save current RIP (return address) into RCX
+;    RCX = address of instruction after syscall
+;
+; 2. Save current RFLAGS into R11
+;    R11 = RFLAGS (processor flags)
+;
+; 3. Load RIP from IA32_LSTAR MSR
+;    RIP = MSR[0xC0000082]  (this points to KiSystemCall64)
+;
+; 4. Load CS and SS from IA32_STAR MSR
+;    CS = kernel code segment selector
+;    SS = kernel stack segment selector
+;
+; 5. Mask RFLAGS with IA32_FMASK MSR
+;    RFLAGS &= ~MSR[0xC0000084]  (clears IF, disables interrupts)
+;
+; 6. CPL changes from 3 to 0 (Ring 3 -> Ring 0)</code></pre>
+
+<p>The key Model-Specific Register (MSR) is <strong>IA32_LSTAR</strong> (address <code>0xC0000082</code>). Windows sets this to point to <code>nt!KiSystemCall64</code> during boot. Every <code>syscall</code> instruction jumps to this single kernel entry point.</p>
+
+<div class="card warn">
+<h4>Why RCX is Clobbered</h4>
+<p>The <code>syscall</code> instruction saves the return address in <strong>RCX</strong>. This destroys whatever was in RCX. Since the Windows x64 calling convention passes the first parameter in RCX, the ntdll stub must save RCX before executing syscall. That is why every stub starts with <code>mov r10, rcx</code> -- it moves the first parameter to R10 where the kernel expects it. If you build a direct syscall stub and forget this step, your first parameter will be the return address instead of your intended value.</p>
+</div>
+
+<h2>KiSystemCall64: The Kernel Entry Point</h2>
+<p>When <code>syscall</code> transfers control to <code>KiSystemCall64</code>, the kernel performs several operations:</p>
+
+<pre><code><span class="lang-tag">ASM</span>; Simplified KiSystemCall64 flow:
+;
+; 1. Swap to kernel stack (via KPCR->Prcb->RspBase)
+;    mov rsp, gs:[0x1A8]     ; load kernel stack pointer
+;
+; 2. Build a KTRAP_FRAME on the kernel stack
+;    push saved registers (RCX, R11, RBP, etc.)
+;
+; 3. Validate the syscall number (EAX)
+;    cmp eax, [KeServiceDescriptorTable.Limit]
+;    jae KiSystemServiceExit  ; invalid SSN -> return error
+;
+; 4. Index into the SSDT to find the target function
+;    lea r10, [KeServiceDescriptorTable.Base]
+;    movsxd r11, [r10 + rax*4]  ; load encoded offset
+;    sar r11, 4                  ; decode (shift right 4)
+;    add r10, r11                ; r10 = kernel function address
+;
+; 5. Copy user-mode arguments from user stack to kernel stack
+;
+; 6. Call the kernel function (e.g., NtAllocateVirtualMemory)
+;
+; 7. Return via sysret (or iretq) back to Ring 3</code></pre>
+
+<h2>The System Service Descriptor Table (SSDT)</h2>
+<p>The <strong>SSDT</strong> (also known as <code>KeServiceDescriptorTable</code>) is a kernel-mode structure that maps SSNs to kernel function addresses. It contains:</p>
+
+<table>
+<tr><th>Field</th><th>Purpose</th></tr>
+<tr><td><code>ServiceTableBase</code></td><td>Array of encoded offsets to Nt* kernel functions</td></tr>
+<tr><td><code>ServiceCounterTableBase</code></td><td>Performance counters (unused on retail builds)</td></tr>
+<tr><td><code>NumberOfServices</code></td><td>Total number of valid syscall numbers</td></tr>
+<tr><td><code>ParamTableBase</code></td><td>Array of byte-sized parameter counts for stack argument copying</td></tr>
+</table>
+
+<p>On x64 Windows, the SSDT does not store raw pointers. Instead, it stores <strong>4-byte signed offsets</strong> relative to the table base. The lower 4 bits encode the number of parameters (for stack argument copying). The kernel decodes each entry by shifting right by 4 and adding to the table base address.</p>
+
+<pre><code><span class="lang-tag">C</span>// How the kernel resolves a syscall number to a function pointer:
+typedef struct _KSERVICE_TABLE_DESCRIPTOR {
+    PLONG   ServiceTableBase;      // Array of encoded offsets
+    PULONG  ServiceCounterTableBase;
+    ULONG   NumberOfServices;      // e.g., ~470 on Win10 21H2
+    PUCHAR  ParamTableBase;        // Bytes: num params per service
+} KSERVICE_TABLE_DESCRIPTOR;
+
+// Decoding: given SSN in EAX
+LONG encodedOffset = ServiceTableBase[SSN];
+PVOID kernelFunc = (PBYTE)ServiceTableBase + (encodedOffset >> 4);</code></pre>
+
+<div class="card green">
+<h4>Why SSN Is The Key</h4>
+<p>The entire dispatch mechanism hinges on the value in <strong>EAX</strong> at the time the <code>syscall</code> instruction executes. EAX holds the System Service Number (SSN). The kernel uses it as an index into the SSDT to find the function to call. If you know the SSN for <code>NtAllocateVirtualMemory</code> and you set EAX to that value before executing <code>syscall</code>, the kernel will allocate memory for you -- regardless of whether you called through ntdll or not. This is the entire foundation of Hell's Gate.</p>
+</div>
+
+<h2>The Return Path: <code>sysret</code></h2>
+<p>After the kernel function completes, the kernel returns to user mode via the <code>sysret</code> instruction (or <code>iretq</code> in some edge cases). The <code>sysret</code> instruction reverses the <code>syscall</code> process:</p>
+
+<pre><code><span class="lang-tag">ASM</span>; What the CPU does when it executes 'sysret':
+;
+; 1. Load RIP from RCX (return to user code)
+; 2. Load RFLAGS from R11
+; 3. Load CS and SS from IA32_STAR MSR (user segments)
+; 4. CPL changes from 0 to 3 (Ring 0 -> Ring 3)
+;
+; The function's return value is in RAX (NTSTATUS)</code></pre>
+
+<p>After <code>sysret</code>, execution resumes at the instruction after the <code>syscall</code> in user mode. RAX contains the <strong>NTSTATUS</strong> return code indicating success or failure.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Complete Syscall Round-Trip</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box" style="width:100%">1. User code: <code>mov r10, rcx</code> (save 1st param)</div>
+<div class="box" style="width:100%">2. User code: <code>mov eax, SSN</code> (load syscall number)</div>
+<div class="box hl" style="width:100%">3. User code: <code>syscall</code> (Ring 3 &rarr; Ring 0)</div>
+<div class="box g" style="width:100%">4. Kernel: KiSystemCall64 &rarr; SSDT[EAX] &rarr; Nt* function</div>
+<div class="box g" style="width:100%">5. Kernel: Execute operation, set NTSTATUS in RAX</div>
+<div class="box hl" style="width:100%">6. Kernel: <code>sysret</code> (Ring 0 &rarr; Ring 3)</div>
+<div class="box" style="width:100%">7. User code: <code>ret</code> (return to caller with NTSTATUS)</div>
+</div>
+</div>
+
+<h2>Legacy: <code>int 0x2e</code> and the WoW64 Path</h2>
+<p>On older x86 Windows (32-bit), the transition used <code>int 0x2e</code> (interrupt) or <code>sysenter</code> instead of <code>syscall</code>. On x64 Windows running 32-bit (WoW64) processes, the syscall goes through <strong>wow64cpu.dll</strong> which transitions to 64-bit mode and then issues the 64-bit <code>syscall</code>. Hell's Gate targets native x64 processes and uses the <code>syscall</code> instruction directly.</p>
+
+<div class="quiz" id="quiz2">
+<h4>Pop Quiz: Syscall Architecture</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: What MSR does the CPU read to find the kernel entry point when <code>syscall</code> executes?</p>
+<label data-opt="0"><input type="radio" name="q2_0"> IA32_SYSENTER_EIP</label>
+<label data-opt="1"><input type="radio" name="q2_0"> IA32_STAR</label>
+<label data-opt="2"><input type="radio" name="q2_0"> IA32_LSTAR (0xC0000082)</label>
+<label data-opt="3"><input type="radio" name="q2_0"> IA32_KERNEL_GS_BASE</label>
+<div class="explain">IA32_LSTAR (Long STAR) at MSR 0xC0000082 contains the RIP value loaded when syscall executes. On Windows, this points to nt!KiSystemCall64.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: Why does the ntdll stub execute <code>mov r10, rcx</code> before <code>syscall</code>?</p>
+<label data-opt="0"><input type="radio" name="q2_1"> R10 is where the kernel stack pointer is stored</label>
+<label data-opt="1"><input type="radio" name="q2_1"> Because syscall clobbers RCX with the return address, so the first parameter must be saved elsewhere</label>
+<label data-opt="2"><input type="radio" name="q2_1"> R10 is a special register that the kernel always reads first</label>
+<label data-opt="3"><input type="radio" name="q2_1"> It is a NOP-equivalent used for alignment</label>
+<div class="explain">The syscall instruction stores RIP (the return address) in RCX, destroying the first parameter. The stub saves it to R10 first. The kernel's KiSystemCall64 knows to read the first parameter from R10 instead of RCX.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q3: The SSDT on x64 Windows stores entries as 4-byte signed values. How are they decoded to function pointers?</p>
+<label data-opt="0"><input type="radio" name="q3_1"> They are absolute 32-bit addresses zero-extended to 64-bit</label>
+<label data-opt="1"><input type="radio" name="q3_1"> They are XOR-encrypted and decrypted at dispatch time</label>
+<label data-opt="2"><input type="radio" name="q3_1"> They are page-frame numbers multiplied by PAGE_SIZE</label>
+<label data-opt="3"><input type="radio" name="q3_1"> Shift right by 4 bits and add to the SSDT base address</label>
+<div class="explain">Each SSDT entry encodes a relative offset in the upper 28 bits and a parameter count in the lower 4 bits. The kernel shifts right by 4 (discarding the param count) and adds the result to the ServiceTableBase to get the kernel function address.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz2')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module1.html">&larr; Previous: EDR Hooking</a>
+<a class="primary" href="module3.html">Next: System Service Numbers &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Synthetic Frame Construction - SilentMoonwalk Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F319;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#06b6d4;--accent2:#0891b2;--gradient:linear-gradient(135deg,#06b6d4,#0891b2)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>SilentMoonwalk Course</h2><span>Call Stack Spoofing Masterclass</span></div>
+  <a class="home-link" href="../SilentMoonwalk_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Stack Telemetry</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> x64 Stack Frames</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> ROP Fundamentals</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> Desync Theory</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Gadget Discovery</a>
+  <a class="mod-link active" href="module6.html"><span class="diff d2">6</span> Synthetic Frames</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Full Spoof Engine</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Detection &amp; Counters</a>
+</nav>
+
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 6: Synthetic Frame Construction</h1>
+<p class="subtitle">Crafting fake stack frames that survive RtlVirtualUnwind byte by byte.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>This is where theory meets implementation. We'll walk through the exact process of building a single synthetic stack frame that, when processed by <code>RtlVirtualUnwind</code>, produces the correct caller RIP and RSP. Each byte must be placed precisely &mdash; one wrong offset and the unwind chain diverges.</p>
+</div>
+
+<h2>Anatomy of a Synthetic Frame</h2>
+<p>A synthetic frame must mirror exactly what a real function call would produce on the stack. Let's dissect a concrete example. Consider spoofing a frame for a function with this UNWIND_INFO:</p>
+
+<pre><code><span class="lang-tag">Text</span>Function: kernel32!SomeInternalFunc
+BeginAddress: 0x00012340
+EndAddress:   0x000123A0
+UNWIND_INFO:
+  Version:       1
+  Flags:         0 (UNW_FLAG_NHANDLER)
+  SizeOfProlog:  14
+  CountOfCodes:  4
+  FrameRegister: 0 (none)
+  FrameOffset:   0
+
+  Unwind Codes (processed in reverse order during unwind):
+    [0] CodeOffset=14, Op=UWOP_ALLOC_SMALL, OpInfo=5  --> alloc (5*8)+8 = 0x30 bytes
+    [1] CodeOffset=7,  Op=UWOP_PUSH_NONVOL, OpInfo=6  --> push RSI
+    [2] CodeOffset=5,  Op=UWOP_PUSH_NONVOL, OpInfo=3  --> push RBX
+    [3] CodeOffset=4,  Op=UWOP_PUSH_NONVOL, OpInfo=7  --> push RDI</code></pre>
+
+<p>This tells us the prologue does:</p>
+<pre><code><span class="lang-tag">x86-64 ASM</span>; Function prologue (what actually happens in memory):
+push rdi          ; RSP -= 8, save RDI      (CodeOffset=4)
+push rbx          ; RSP -= 8, save RBX      (CodeOffset=5)
+push rsi          ; RSP -= 8, save RSI      (CodeOffset=7)
+sub rsp, 0x30     ; RSP -= 0x30, local vars (CodeOffset=14)
+; Total RSP change: 8 + 8 + 8 + 0x30 = 0x48 bytes
+; Plus the 8-byte return address from CALL = 0x50 total</code></pre>
+
+<h2>Building the Fake Frame</h2>
+<p>To build a synthetic frame for this function, we must lay out the stack exactly as the prologue would have left it. The unwinder will reverse these operations:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Synthetic Frame Memory Layout</h4>
+<div class="flow" style="flex-direction:column;gap:2px;align-items:stretch;max-width:620px;margin:0 auto">
+<div class="box" style="width:100%;font-size:.75rem">Lower address (current RSP for this frame)</div>
+<div class="box g" style="width:100%;text-align:left">[RSP+0x00] Local variable space (0x30 bytes) &mdash; can contain gadget addresses for ROP execution</div>
+<div class="box g" style="width:100%;text-align:left">[RSP+0x30] Saved RSI value &mdash; unwinder reads this to restore RSI</div>
+<div class="box g" style="width:100%;text-align:left">[RSP+0x38] Saved RBX value &mdash; unwinder reads this to restore RBX</div>
+<div class="box g" style="width:100%;text-align:left">[RSP+0x40] Saved RDI value &mdash; unwinder reads this to restore RDI</div>
+<div class="box hl" style="width:100%;text-align:left">[RSP+0x48] Return address &rarr; must point into the NEXT function in the spoofed chain</div>
+<div class="box" style="width:100%;font-size:.75rem">Higher address (previous frame starts here)</div>
+</div>
+</div>
+
+<pre><code><span class="lang-tag">C++</span>// Building one synthetic frame
+void BuildSyntheticFrame(
+    PBYTE stackBuffer,       // Pointer to our stack memory
+    DWORD frameOffset,       // Where this frame starts (offset from RSP)
+    PVOID returnAddress,     // Return addr (points into next target func)
+    DWORD64 savedRDI,        // Plausible value for saved RDI
+    DWORD64 savedRBX,        // Plausible value for saved RBX
+    DWORD64 savedRSI         // Plausible value for saved RSI
+) {
+    PBYTE frame = stackBuffer + frameOffset;
+
+    // Zero out the local variable area (0x30 bytes)
+    // In practice, SilentMoonwalk places ROP gadget addresses here
+    memset(frame, 0, 0x30);
+
+    // Place saved non-volatile registers at the correct offsets
+    // These are in REVERSE order of the pushes (last push = lowest address)
+    *(PDWORD64)(frame + 0x30) = savedRSI;    // UWOP_PUSH_NONVOL RSI
+    *(PDWORD64)(frame + 0x38) = savedRBX;    // UWOP_PUSH_NONVOL RBX
+    *(PDWORD64)(frame + 0x40) = savedRDI;    // UWOP_PUSH_NONVOL RDI
+
+    // Place the return address at the top of the frame
+    // (from the caller's perspective, this is where CALL stored it)
+    *(PVOID*)(frame + 0x48) = returnAddress;
+
+    // Total frame size: 0x50 bytes (0x48 + 8 for return addr)
+    // This must match what RtlVirtualUnwind computes:
+    //   UWOP_ALLOC_SMALL(5) = 0x30
+    //   3 x UWOP_PUSH_NONVOL = 3 * 8 = 0x18
+    //   Total unwind: 0x30 + 0x18 = 0x48, then read [RSP] for ret addr
+    //   New RSP = RSP + 0x48 + 8 = RSP + 0x50
+}</code></pre>
+
+<h2>The Return Address Placement Rule</h2>
+<p>The return address must point to a specific instruction inside the next function in the chain. It cannot just be the function's start address &mdash; it must be an instruction that <strong>would plausibly be a call site or code after a call</strong>. Specifically:</p>
+
+<div class="card warn">
+<h4>Where Must the Return Address Point?</h4>
+<ul>
+<li>The address must be within the <code>BeginAddress</code> to <code>EndAddress</code> range of the target function's RUNTIME_FUNCTION entry.</li>
+<li>The offset from <code>BeginAddress</code> must be <strong>greater than or equal to SizeOfProlog</strong>. Otherwise, the unwinder applies only partial unwind codes, computing a wrong frame size for that function.</li>
+<li>Ideally, it points to an instruction right after a CALL (a realistic return point). This adds plausibility if an EDR cross-references the instruction at the return address.</li>
+</ul>
+</div>
+
+<pre><code><span class="lang-tag">C++</span>// Finding a suitable return address within a target function
+PVOID FindReturnAddress(PRUNTIME_FUNCTION pFunc, DWORD64 imageBase) {
+    PUNWIND_INFO pUnwind = (PUNWIND_INFO)(imageBase + pFunc->UnwindData);
+
+    // The return address should be AFTER the prologue
+    // Choose an offset past SizeOfProlog but well within the function
+    DWORD safeOffset = pUnwind->SizeOfProlog + 1;
+
+    // Verify we're still within function bounds
+    DWORD funcSize = pFunc->EndAddress - pFunc->BeginAddress;
+    if (safeOffset >= funcSize) {
+        // Function too small, pick minimum valid offset
+        safeOffset = pUnwind->SizeOfProlog;
+    }
+
+    return (PVOID)(imageBase + pFunc->BeginAddress + safeOffset);
+}</code></pre>
+
+<h2>Saved Register Values: The Plausibility Problem</h2>
+<p>When RtlVirtualUnwind encounters <code>UWOP_PUSH_NONVOL</code>, it reads the saved register value from the stack and updates the CONTEXT structure. While the unwinder itself doesn't validate these values, a sophisticated EDR <em>could</em> check them for plausibility:</p>
+
+<table>
+<tr><th>Register</th><th>Suspicious Values</th><th>Plausible Values</th></tr>
+<tr><td>RBX</td><td>0x0, 0xDEADBEEF, addresses in unbacked memory</td><td>Address within a loaded module, small integer, or pointer to stack/heap data</td></tr>
+<tr><td>RSI</td><td>NULL (unusual), impossibly large values</td><td>Valid pointer or reasonable counter value</td></tr>
+<tr><td>RDI</td><td>Clearly fabricated patterns</td><td>Address within module or plausible data pointer</td></tr>
+<tr><td>RBP</td><td>Points outside thread stack range</td><td>Address within the thread's stack bounds (TEB.StackBase to TEB.StackLimit)</td></tr>
+<tr><td>R12-R15</td><td>Values that don't match typical usage</td><td>Module addresses, heap pointers, or small integers</td></tr>
+</table>
+
+<pre><code><span class="lang-tag">C++</span>// Generating plausible saved register values
+DWORD64 GeneratePlausibleRegValue(HMODULE hNtdll, HMODULE hKernel32) {
+    // Strategy: use addresses of real functions as "saved" values.
+    // A register might reasonably contain a function pointer, a module
+    // base address, or a pointer to data within a loaded module.
+
+    // Option 1: Point into ntdll's .data section
+    PIMAGE_NT_HEADERS pNt = RtlImageNtHeader(hNtdll);
+    PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+    for (WORD i = 0; i &lt; pNt->FileHeader.NumberOfSections; i++) {
+        if (memcmp(pSec[i].Name, ".data", 5) == 0) {
+            // Return an address within ntdll's .data section
+            return (DWORD64)hNtdll + pSec[i].VirtualAddress + 0x100;
+        }
+    }
+
+    // Option 2: Use a known function address
+    return (DWORD64)GetProcAddress(hKernel32, "BaseThreadInitThunk");
+}</code></pre>
+
+<h2>Chaining Multiple Frames</h2>
+<p>A complete spoofed call stack consists of multiple synthetic frames chained together. The return address of frame N must point into the function that frame N+1 represents. The total stack space consumed must be contiguous:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Building a complete synthetic call chain
+struct FrameSpec {
+    PRUNTIME_FUNCTION pFunc;   // Target function
+    DWORD             frameSize; // Computed from UNWIND_INFO
+    PVOID             retAddr;   // Points into NEXT function
+};
+
+void BuildSyntheticCallChain(
+    PBYTE stackBuffer,
+    std::vector&lt;FrameSpec&gt;&amp; chain
+) {
+    DWORD currentOffset = 0;
+
+    for (size_t i = 0; i &lt; chain.size(); i++) {
+        FrameSpec&amp; spec = chain[i];
+
+        // Zero the frame area
+        memset(stackBuffer + currentOffset, 0, spec.frameSize);
+
+        // Place return address at the end of the frame
+        // (frameSize includes the allocation + pushed regs,
+        //  return address sits right above the pushed regs)
+        DWORD retAddrOffset = currentOffset + spec.frameSize;
+        *(PVOID*)(stackBuffer + retAddrOffset) = spec.retAddr;
+
+        // Place plausible saved register values at correct offsets
+        // (must match the UWOP_PUSH_NONVOL sequence for this function)
+        PlaceSavedRegisters(stackBuffer + currentOffset, spec.pFunc);
+
+        // Advance past this frame (frame data + return address)
+        currentOffset += spec.frameSize + 8;
+    }
+}</code></pre>
+
+<h2>Handling UWOP_SET_FPREG (Frame Pointer Functions)</h2>
+<p>Some functions use a frame pointer register (typically RBP) via <code>UWOP_SET_FPREG</code>. This operation sets the frame register to RSP + FrameOffset*16 at a specific point in the prologue. During unwinding, the unwinder restores RSP from the frame register rather than accumulating offsets. This requires special handling:</p>
+
+<pre><code><span class="lang-tag">C++</span>// When a function uses UWOP_SET_FPREG:
+// The unwinder sets RSP = FrameRegister - (FrameOffset * 16)
+// BEFORE processing remaining unwind codes.
+//
+// For synthetic frames, we must ensure that the saved frame register
+// value (e.g., saved RBP) on the stack, when used as the base,
+// produces the correct RSP for the frame above.
+
+void HandleFramePointerFunction(
+    PBYTE frame,
+    PUNWIND_INFO pUnwind,
+    DWORD64 desiredCallerRsp
+) {
+    if (pUnwind->FrameRegister != 0) {
+        // FrameRegister is set (e.g., 5 = RBP)
+        // The unwinder will do: RSP = RBP - (FrameOffset * 16)
+        // We need: RBP = desiredCallerRsp + (FrameOffset * 16)
+        DWORD64 requiredFregValue =
+            desiredCallerRsp + (pUnwind->FrameOffset * 16);
+
+        // Place this value at the stack position where
+        // the frame register was saved
+        PlaceSavedReg(frame, pUnwind->FrameRegister, requiredFregValue);
+    }
+}</code></pre>
+
+<div class="card">
+<h4>Frame Pointer Complexity</h4>
+<p>Functions with frame pointers add significant complexity to synthetic frame construction because the unwinder's RSP computation depends on a register value read from the stack. This creates a circular dependency: the frame must contain the right value for the frame register, which depends on where the next frame should be, which depends on the current frame's size. SilentMoonwalk handles this by computing the required values in advance and placing them during frame construction.</p>
+</div>
+
+<h2>Validation: Testing Synthetic Frames</h2>
+<p>After constructing a synthetic stack, SilentMoonwalk can validate it by calling <code>RtlVirtualUnwind</code> in a test loop to verify the unwind chain produces the expected sequence of RIP values:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Validate that our synthetic stack unwinds correctly
+bool ValidateSyntheticStack(
+    PCONTEXT ctx,                    // Initial context (RIP/RSP)
+    std::vector&lt;PVOID&gt;&amp; expectedRips // Expected return addresses
+) {
+    for (size_t i = 0; i &lt; expectedRips.size(); i++) {
+        DWORD64 imageBase;
+        PRUNTIME_FUNCTION pFunc = RtlLookupFunctionEntry(
+            ctx->Rip, &imageBase, NULL
+        );
+
+        if (!pFunc) {
+            // Leaf function - just pop return address
+            ctx->Rip = *(DWORD64*)(ctx->Rsp);
+            ctx->Rsp += 8;
+        } else {
+            PVOID handlerData;
+            DWORD64 establisher;
+            RtlVirtualUnwind(
+                UNW_FLAG_NHANDLER, imageBase, ctx->Rip,
+                pFunc, ctx, &handlerData, &establisher, NULL
+            );
+        }
+
+        if (ctx->Rip != (DWORD64)expectedRips[i]) {
+            // Unwind produced wrong RIP - frame construction error!
+            return false;
+        }
+    }
+    return true; // All frames unwound correctly
+}</code></pre>
+
+<div class="quiz" id="quiz6">
+<h4>Pop Quiz: Synthetic Frame Construction</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: A function's UNWIND_INFO contains UWOP_ALLOC_SMALL(OpInfo=3) and two UWOP_PUSH_NONVOL entries. What is the total frame size (excluding the return address)?</p>
+<label data-opt="0"><input type="radio" name="q6_0"> 0x20 bytes</label>
+<label data-opt="1"><input type="radio" name="q6_0"> 0x30 bytes &mdash; ALLOC_SMALL = (3*8)+8 = 0x20, plus 2 pushes = 16 bytes, total 0x30</label>
+<label data-opt="2"><input type="radio" name="q6_0"> 0x28 bytes</label>
+<label data-opt="3"><input type="radio" name="q6_0"> 0x38 bytes</label>
+<div class="explain">UWOP_ALLOC_SMALL with OpInfo=3 allocates (3*8)+8 = 32 = 0x20 bytes. Each UWOP_PUSH_NONVOL adds 8 bytes. Total: 0x20 + 8 + 8 = 0x30 bytes. The return address sits above this at offset 0x30 from the frame RSP.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: Why must the return address in a synthetic frame point to an offset past SizeOfProlog?</p>
+<label data-opt="0"><input type="radio" name="q6_1"> Because instructions before SizeOfProlog are encrypted</label>
+<label data-opt="1"><input type="radio" name="q6_1"> Because the return address must be in the .data section</label>
+<label data-opt="2"><input type="radio" name="q6_1"> Because the unwinder only applies unwind codes at offsets &le; the instruction offset; pointing into the prologue means fewer codes apply, producing a wrong frame size</label>
+<label data-opt="3"><input type="radio" name="q6_1"> Because the prologue hasn't been compiled yet at runtime</label>
+<div class="explain">RtlVirtualUnwind determines which unwind codes apply based on the instruction's offset within the function. If the RIP points into the prologue (before all operations have occurred), not all unwind codes take effect, and the computed stack adjustment will be too small, throwing off the entire chain.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: Why does UWOP_SET_FPREG complicate synthetic frame construction?</p>
+<label data-opt="0"><input type="radio" name="q6_2"> Because the unwinder computes RSP from a saved register value, creating a dependency between the frame contents and the frame layout</label>
+<label data-opt="1"><input type="radio" name="q6_2"> Because UWOP_SET_FPREG is deprecated and causes crashes</label>
+<label data-opt="2"><input type="radio" name="q6_2"> Because it requires kernel-mode access to modify</label>
+<label data-opt="3"><input type="radio" name="q6_2"> Because frame pointer functions cannot be used in ROP chains</label>
+<div class="explain">When a function uses UWOP_SET_FPREG, the unwinder restores RSP from the frame register value (e.g., RBP) stored on the stack, rather than just adding offsets. The synthetic frame must contain a precisely computed value for the saved frame register so that when the unwinder reads it, the resulting RSP lands exactly at the right position for the next frame.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz6')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Previous: Gadget Discovery</a>
+<a class="primary" href="module7.html">Next: The Full Spoof Engine &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

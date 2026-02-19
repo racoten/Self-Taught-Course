@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: What Are Beacon Object Files? - COFFLoader Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4E6;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f97316;--accent2:#ea580c;--gradient:linear-gradient(135deg,#f97316,#ea580c)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>COFFLoader Course</h2><span>BOF Loader Masterclass</span></div>
+  <a class="home-link" href="../COFFLoader_index.html">&larr; Course Home</a>
+  <a class="mod-link active" href="module1.html"><span class="diff d1">1</span> What Are BOFs?</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> COFF Format Deep Dive</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> The BOF API Contract</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> COFF Section Loading</a>
+  <a class="mod-link" href="module5.html"><span class="diff d2">5</span> Symbol Resolution</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Relocation Processing</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Beacon Compat Layer</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Security</a>
+</nav>
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: What Are Beacon Object Files?</h1>
+<p class="subtitle">In-process execution of compiled C, without a PE, without a new process, without fork-and-run.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>Beacon Object Files (BOFs) are the foundation of modern post-exploitation tooling. Before you can understand how COFFLoader (by <strong>TrustedSec</strong>) parses and executes them, you need to understand what they are, why they exist, and what problem they solve compared to older execute-assembly and fork-and-run techniques. This module covers the concept, the motivation, and the architecture of BOF-based execution.</p>
+</div>
+
+<h2>The Problem: Post-Exploitation Tooling</h2>
+<p>After an implant (Beacon, Sliver, Havoc, etc.) gains execution on a target, the operator needs to run additional tools: enumerate users, dump credentials, query Active Directory, manipulate tokens. Historically, there were two approaches to running these tools, and both had serious OPSEC problems.</p>
+
+<h3>Approach 1: Fork-and-Run</h3>
+<p>The implant spawns a new sacrificial process (e.g., <code>rundll32.exe</code>), injects shellcode or a reflective DLL into it, executes the tool, captures output, and then kills the process. This was the default model in Cobalt Strike for years.</p>
+
+<pre><code><span class="lang-tag">TEXT</span>Fork-and-Run Execution Flow:
+  Beacon Process (PID 1234)
+    |
+    +-- CreateProcess("rundll32.exe", SUSPENDED)  --> New Process (PID 5678)
+    +-- VirtualAllocEx(PID 5678, RWX)
+    +-- WriteProcessMemory(PID 5678, payload)
+    +-- ResumeThread(PID 5678)
+    +-- ReadPipe(output)                          <-- Tool runs in PID 5678
+    +-- TerminateProcess(PID 5678)                <-- Sacrificial process dies</code></pre>
+
+<div class="card warn">
+<h4>Fork-and-Run OPSEC Failures</h4>
+<p>Every fork-and-run execution creates a new process, triggers kernel callbacks (PsSetCreateProcessNotifyRoutine), generates cross-process memory allocation and write events, and leaves a terminated process in ETW logs. EDRs correlate these events trivially: a process that spawns rundll32, writes RWX memory into it, and pipes output back is textbook injection behavior. Each command execution is a fresh detection opportunity.</p>
+</div>
+
+<h3>Approach 2: Execute-Assembly</h3>
+<p>Cobalt Strike's <code>execute-assembly</code> loads the .NET CLR into a sacrificial process and runs a .NET assembly. While more flexible, it still spawns a new process, loads the CLR (observable via ETW's CLR loading events and <code>clr.dll</code> module loads), and the .NET assembly lands in memory where AMSI can scan it.</p>
+
+<h2>The BOF Solution: In-Process Execution</h2>
+<p>Beacon Object Files, introduced in Cobalt Strike 4.1 (June 2020), take a fundamentally different approach. Instead of spawning a new process, a BOF runs <strong>inside the Beacon process itself</strong>, in the same thread context. No new process. No cross-process injection. No CLR. No DLL on disk.</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">BOF vs Fork-and-Run</h4>
+<div class="flow">
+<div class="box r">Fork &amp; Run<br><small>New process, injection, pipe</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box y">execute-assembly<br><small>New process, CLR, AMSI</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">BOF<br><small>Same process, same thread</small></div>
+</div>
+</div>
+
+<p>A BOF is a <strong>compiled C object file</strong> in COFF format -- the intermediate output of the compiler before linking. It is not a PE (no PE headers, no import table, no entry point in the traditional sense). The Beacon (or COFFLoader) acts as a miniature linker: it parses the COFF headers, loads sections into memory, resolves symbols, applies relocations, and calls the entry function.</p>
+
+<pre><code><span class="lang-tag">C</span>// A minimal BOF -- this is the ENTIRE source file
+#include &lt;windows.h&gt;
+#include "beacon.h"
+
+void go(char* args, int len) {
+    BeaconPrintf(CALLBACK_OUTPUT, "Hello from BOF! PID: %d\n", GetCurrentProcessId());
+}</code></pre>
+
+<p>The function <code>go</code> is the conventional entry point for a BOF (though COFFLoader allows specifying any function name). The BOF includes <code>beacon.h</code> which declares the Beacon API functions. When compiled, the BOF produces a <code>.o</code> (object) file -- raw COFF, no linking step.</p>
+
+<h2>What is a COFF Object File?</h2>
+<p>COFF (Common Object File Format) is the object file format used by Microsoft's toolchain (MSVC) and MinGW. When you compile a C source file with <code>cl.exe /c</code> or <code>x86_64-w64-mingw32-gcc -c</code>, the compiler produces a <code>.obj</code> or <code>.o</code> file in COFF format. This file contains:</p>
+
+<table>
+<tr><th>Component</th><th>Purpose</th></tr>
+<tr><td>COFF File Header</td><td>Machine type (x64/x86), number of sections, pointer to symbol table</td></tr>
+<tr><td>Section Table</td><td>Array of section headers (.text, .data, .rdata, .bss) with sizes, offsets, characteristics</td></tr>
+<tr><td>Section Data</td><td>Raw bytes for each section (compiled code, initialized data, read-only data)</td></tr>
+<tr><td>Relocation Table</td><td>Per-section list of addresses that need fixups (because absolute addresses are unknown until load time)</td></tr>
+<tr><td>Symbol Table</td><td>Names and metadata for all defined and external symbols (functions, variables, imports)</td></tr>
+<tr><td>String Table</td><td>Storage for symbol names longer than 8 characters</td></tr>
+</table>
+
+<p>Critically, a COFF object file is <strong>not directly executable</strong>. It contains unresolved external references (e.g., calls to <code>BeaconPrintf</code>, <code>GetCurrentProcessId</code>) and relocations that assume a base address of zero. A linker (or a COFF loader) must resolve these references and apply relocations before the code can run.</p>
+
+<h2>Why COFFLoader Exists</h2>
+<p>Cobalt Strike's Beacon has a built-in COFF loader that can execute BOFs. But what if you are not using Cobalt Strike? What if you are developing a custom C2, or you want to test BOFs from the command line, or you want to integrate BOF execution into another framework?</p>
+
+<p><strong>COFFLoader</strong> by TrustedSec is a standalone, open-source COFF loader written in C. It implements the same parsing, loading, linking, and execution pipeline that Cobalt Strike's Beacon performs internally, but as a standalone program. It provides a Beacon API compatibility layer so that BOFs written for Cobalt Strike work without modification.</p>
+
+<pre><code><span class="lang-tag">TEXT</span>COFFLoader Usage:
+  COFFLoader.exe go path/to/bof.o [optional hex-encoded arguments]
+
+  - "go"           = name of the entry function to call
+  - "bof.o"        = the compiled COFF object file
+  - hex arguments  = optional BeaconDataParse-compatible argument buffer</code></pre>
+
+<h2>In-Process Execution: Why It Matters</h2>
+<p>The key advantage of BOFs (and by extension, COFFLoader) is that execution happens <strong>entirely within the calling process</strong>. This has profound implications for both capability and stealth.</p>
+
+<div class="card green">
+<h4>Advantages of In-Process BOF Execution</h4>
+<table>
+<tr><th>Property</th><th>Fork-and-Run</th><th>BOF / COFFLoader</th></tr>
+<tr><td>Process creation</td><td>New process per command</td><td>None -- runs in current process</td></tr>
+<tr><td>Cross-process APIs</td><td>VirtualAllocEx, WriteProcessMemory</td><td>None -- local memory only</td></tr>
+<tr><td>Token/handle inheritance</td><td>Must duplicate or impersonate</td><td>Inherits caller's token and handles</td></tr>
+<tr><td>Memory footprint</td><td>Full PE or DLL loaded</td><td>Small .o file, typically 2-20 KB</td></tr>
+<tr><td>ETW visibility</td><td>Process creation, module loads, thread creation</td><td>Only VirtualAlloc for section memory</td></tr>
+<tr><td>Cleanup</td><td>Must terminate sacrificial process</td><td>VirtualFree the loaded sections</td></tr>
+</table>
+</div>
+
+<p>Because a BOF runs in the same process and thread, it automatically inherits the current access token, any impersonated tokens, open handles, and the process environment. A BOF that queries Active Directory can use the Beacon's existing Kerberos ticket. A BOF that accesses a file share uses the Beacon's current impersonation context. No token duplication or pass-through is needed.</p>
+
+<h2>The Tradeoff: Stability Risk</h2>
+<p>In-process execution is a double-edged sword. If a BOF crashes (null pointer dereference, buffer overflow, unhandled exception), it crashes the <strong>entire Beacon process</strong>. There is no sacrificial process to absorb the fault. This is why BOFs must be carefully written and tested -- a bug does not just lose output, it loses the implant.</p>
+
+<div class="card warn">
+<h4>BOF Stability Rules</h4>
+<p>BOFs must not call <code>ExitProcess</code> or <code>exit()</code>. They must not use C runtime functions that rely on CRT initialization (the CRT is not initialized for the BOF). They must not leak memory (no garbage collector, no cleanup after <code>go()</code> returns unless explicitly coded). They must handle errors gracefully because an unhandled exception means the Beacon dies.</p>
+</div>
+
+<h2>COFFLoader Architecture Overview</h2>
+<p>At a high level, COFFLoader performs these steps to execute a BOF. Each step will be covered in detail in subsequent modules:</p>
+
+<pre><code><span class="lang-tag">TEXT</span>COFFLoader Execution Pipeline:
+
+1. Read COFF file into memory buffer
+2. Parse COFF file header (validate machine type, get section/symbol counts)
+3. Locate section table, symbol table, string table
+4. Allocate RWX memory for each section (VirtualAlloc)
+5. Copy section raw data into allocated memory
+6. Build function pointer table for Beacon API (InternalFunctions[30])
+7. For each section, process relocations:
+   a. Look up the target symbol
+   b. Resolve symbol to address (internal section, Beacon API, or DLL import)
+   c. Apply the relocation fixup based on type (ADDR64, REL32, ADDR32NB, etc.)
+8. Find the entry function symbol (e.g., "go" or "_go")
+9. Cast the entry address to a function pointer and call it
+10. Capture output from BeaconPrintf/BeaconOutput
+11. Free allocated memory (VirtualFree)</code></pre>
+
+<h2>BOF Compilation</h2>
+<p>A BOF is compiled but <strong>not linked</strong>. The <code>-c</code> flag tells the compiler to produce an object file and stop before the linking stage:</p>
+
+<pre><code><span class="lang-tag">BASH</span># MinGW (cross-compile from Linux for Windows x64)
+x86_64-w64-mingw32-gcc -c bof.c -o bof.o
+
+# MSVC (on Windows)
+cl.exe /c /GS- bof.c /Fo bof.obj
+
+# Key flags:
+#   -c          = compile only, do not link
+#   /GS-        = disable stack cookies (no CRT to handle them)
+#   -o / /Fo    = output object file name</code></pre>
+
+<p>The <code>/GS-</code> flag is important for MSVC: it disables stack buffer security checks (__security_check_cookie) which require the CRT to be initialized. Since a BOF runs without CRT initialization, stack cookies would cause a crash.</p>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: BOF Fundamentals</h4>
+<div class="quiz-q" data-correct="2">
+<p>Q1: What is the primary OPSEC advantage of BOFs over fork-and-run execution?</p>
+<label data-opt="0"><input type="radio" name="q1_1"> BOFs are encrypted on disk</label>
+<label data-opt="1"><input type="radio" name="q1_1"> BOFs use kernel-mode execution to avoid EDR</label>
+<label data-opt="2"><input type="radio" name="q1_1"> BOFs execute in-process without spawning a new process or cross-process injection</label>
+<label data-opt="3"><input type="radio" name="q1_1"> BOFs run in a virtual machine sandbox</label>
+<div class="explain">BOFs run inside the existing Beacon/loader process in the same thread, eliminating process creation events, cross-process memory operations, and the associated ETW telemetry that EDRs use to detect fork-and-run execution.</div>
+</div>
+<div class="quiz-q" data-correct="1">
+<p>Q2: What file format is a compiled BOF?</p>
+<label data-opt="0"><input type="radio" name="q2_1"> PE (Portable Executable) with no imports</label>
+<label data-opt="1"><input type="radio" name="q2_1"> COFF (Common Object File Format) -- an unlinked object file</label>
+<label data-opt="2"><input type="radio" name="q2_1"> ELF (Executable and Linkable Format)</label>
+<label data-opt="3"><input type="radio" name="q2_1"> Raw shellcode with no headers</label>
+<div class="explain">A BOF is compiled with the -c flag (compile only, no linking), producing a COFF .obj/.o file. It contains section data, symbols, and relocations but is not a complete executable -- the loader must perform linking at runtime.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: Why is the /GS- flag important when compiling BOFs with MSVC?</p>
+<label data-opt="0"><input type="radio" name="q3_1"> It disables stack cookies that require CRT initialization, which BOFs do not have</label>
+<label data-opt="1"><input type="radio" name="q3_1"> It enables position-independent code generation</label>
+<label data-opt="2"><input type="radio" name="q3_1"> It strips debug symbols to reduce file size</label>
+<label data-opt="3"><input type="radio" name="q3_1"> It enables static linking of the C runtime</label>
+<div class="explain">The /GS- flag disables the __security_check_cookie stack protection. This mechanism requires __security_cookie to be initialized by the CRT. Since BOFs run without CRT initialization, leaving /GS enabled would cause a crash when the function epilogue tries to validate the cookie.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: COFF File Format Deep Dive &rarr;</a>
+</div>
+</main>
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

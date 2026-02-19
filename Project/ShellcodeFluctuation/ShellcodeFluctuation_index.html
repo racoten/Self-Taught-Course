@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShellcodeFluctuation - Memory Fluctuation Evasion Masterclass</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A0;</text></svg>">
+<style>
+:root {
+  --bg: #080b12;
+  --surface: #0f1320;
+  --surface2: #161b2e;
+  --border: #1e2740;
+  --text: #e2e8f0;
+  --dim: #64748b;
+  --accent: #10b981;
+  --accent2: #059669;
+  --gradient: linear-gradient(135deg, #10b981, #059669);
+  --code-font: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; overflow-x: hidden; }
+::selection { background: var(--accent); color: var(--bg); }
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+.bg-grid {
+  position: fixed; inset: 0;
+  background-image: linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
+  background-size: 60px 60px; pointer-events: none; z-index: 0;
+}
+.bg-glow { position: fixed; width: 500px; height: 500px; border-radius: 50%; filter: blur(150px); opacity: .08; pointer-events: none; z-index: 0; }
+.bg-glow.g1 { background: #10b981; top: -200px; right: -100px; }
+.bg-glow.g2 { background: #059669; bottom: -200px; left: -100px; }
+
+.back-link { position: relative; z-index: 1; display: inline-block; padding: 20px 30px; color: var(--dim); text-decoration: none; font-size: .85rem; transition: color .2s; }
+.back-link:hover { color: var(--accent); }
+
+header { position: relative; z-index: 1; text-align: center; padding: 20px 20px 10px; }
+header h1 { font-size: 2.4rem; font-weight: 800; background: var(--gradient); background-size: 300% 300%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: gradientShift 8s ease infinite; }
+@keyframes gradientShift { 0%,100%{background-position:0% 50%} 50%{background-position:100% 50%} }
+header .tagline { color: var(--dim); font-size: .95rem; margin-top: 8px; font-family: var(--code-font); }
+header .separator { width: 80px; height: 3px; background: var(--gradient); margin: 24px auto 0; border-radius: 2px; }
+
+.course-meta { position: relative; z-index: 1; display: flex; justify-content: center; gap: 30px; padding: 24px 20px; flex-wrap: wrap; }
+.meta-badge { text-align: center; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 24px; min-width: 120px; }
+.meta-badge .val { font-size: 1.4rem; font-weight: 800; font-family: var(--code-font); background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.meta-badge .lbl { font-size: .7rem; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
+
+.desc { position: relative; z-index: 1; max-width: 700px; margin: 20px auto; padding: 0 30px; text-align: center; color: #94a3b8; font-size: .92rem; line-height: 1.7; }
+
+.modules-grid { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; max-width: 1000px; margin: 30px auto; padding: 0 30px 60px; }
+
+.module-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 24px; text-decoration: none; color: inherit; display: block; transition: transform .3s, border-color .3s, box-shadow .3s; position: relative; overflow: hidden; }
+.module-card:hover { transform: translateY(-4px); border-color: var(--accent); box-shadow: 0 12px 40px -10px rgba(16, 185, 129, .15); }
+.module-card .num { position: absolute; top: 16px; right: 20px; font-size: 2rem; font-weight: 900; font-family: var(--code-font); opacity: .08; color: var(--accent); }
+.module-card .diff { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: .68rem; font-weight: 700; margin-bottom: 12px; text-transform: uppercase; letter-spacing: .5px; }
+.module-card .diff.easy { background: #10b98125; color: #10b981; }
+.module-card .diff.med { background: #f59e0b25; color: #f59e0b; }
+.module-card .diff.hard { background: #ef444425; color: #ef4444; }
+.module-card h3 { font-size: 1.1rem; margin-bottom: 8px; color: var(--text); }
+.module-card p { font-size: .82rem; color: var(--dim); line-height: 1.5; margin: 0; }
+
+.refs { position: relative; z-index: 1; max-width: 1000px; margin: 0 auto 40px; padding: 0 30px; }
+.refs-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px; }
+.refs-card h3 { color: var(--accent); font-size: 1.1rem; margin-bottom: 15px; }
+.refs-card ul { list-style: none; padding: 0; margin: 0; }
+.refs-card li { padding: 6px 0; font-size: .85rem; color: #94a3b8; }
+.refs-card li strong { color: var(--text); }
+.refs-card li code { background: var(--surface2); padding: 2px 8px; border-radius: 4px; font-family: var(--code-font); font-size: .8em; color: var(--accent); }
+
+footer { position: relative; z-index: 1; text-align: center; padding: 20px; color: var(--dim); font-size: .75rem; font-family: var(--code-font); border-top: 1px solid var(--border); max-width: 1000px; margin: 0 auto; }
+
+@media (max-width: 500px) {
+  header h1 { font-size: 1.6rem; }
+  .modules-grid { grid-template-columns: 1fr; padding: 0 16px 40px; }
+  .course-meta { gap: 12px; }
+  .meta-badge { padding: 12px 16px; min-width: 90px; }
+}
+</style>
+</head>
+<body>
+
+<div class="bg-grid"></div>
+<div class="bg-glow g1"></div>
+<div class="bg-glow g2"></div>
+
+<a href="../../index.html" class="back-link">&larr; Back to Dashboard</a>
+
+<header>
+  <h1>ShellcodeFluctuation</h1>
+  <p class="tagline">// Memory Fluctuation Evasion Masterclass</p>
+  <div class="separator"></div>
+</header>
+
+<div class="course-meta">
+  <div class="meta-badge"><div class="val">8</div><div class="lbl">Modules</div></div>
+  <div class="meta-badge"><div class="val">C++</div><div class="lbl">Language</div></div>
+  <div class="meta-badge"><div class="val">x64</div><div class="lbl">Architecture</div></div>
+  <div class="meta-badge"><div class="val">3</div><div class="lbl">Difficulty Tiers</div></div>
+</div>
+
+<p class="desc">Master in-memory evasion through shellcode memory fluctuation &mdash; dynamically toggling page permissions and XOR-encrypting shellcode contents during sleep to defeat memory scanners like Moneta, pe-sieve, and BeaconEye. Learn how to hook Sleep, implement the full encrypt-sleep-decrypt cycle, track shellcode regions, and integrate with ThreadStackSpoofer for dual-layer evasion. By <strong>mgeeky (Mariusz Banach)</strong>.</p>
+
+<div class="modules-grid">
+
+  <a href="modules/module1.html" class="module-card">
+    <span class="num">01</span>
+    <span class="diff easy">Beginner</span>
+    <h3>Memory Scanning Threat Model</h3>
+    <p>What Moneta, pe-sieve, and BeaconEye look for, the idle-time detection window, and why sleeping shellcode is vulnerable.</p>
+  </a>
+
+  <a href="modules/module2.html" class="module-card">
+    <span class="num">02</span>
+    <span class="diff easy">Beginner</span>
+    <h3>XOR Encryption for Memory Evasion</h3>
+    <p>Single-byte vs multi-byte XOR, why XOR is ideal for in-place toggling, XOR32 key generation, and performance.</p>
+  </a>
+
+  <a href="modules/module3.html" class="module-card">
+    <span class="num">03</span>
+    <span class="diff easy">Beginner</span>
+    <h3>VirtualProtect &amp; Page Permissions</h3>
+    <p>Toggling RW &harr; RX, PAGE_NOACCESS as an alternative, avoiding RWX entirely, and working-set implications.</p>
+  </a>
+
+  <a href="modules/module4.html" class="module-card">
+    <span class="num">04</span>
+    <span class="diff med">Intermediate</span>
+    <h3>Sleep Function Hooking</h3>
+    <p>Intercepting kernel32!Sleep, inline hooking with a trampoline, the MySleep handler architecture, and unhooking during sleep.</p>
+  </a>
+
+  <a href="modules/module5.html" class="module-card">
+    <span class="num">05</span>
+    <span class="diff med">Intermediate</span>
+    <h3>The Fluctuation Algorithm</h3>
+    <p>The complete cycle: flip to RW, XOR encrypt, unhook Sleep, sleep, re-hook, XOR decrypt, flip to RX.</p>
+  </a>
+
+  <a href="modules/module6.html" class="module-card">
+    <span class="num">06</span>
+    <span class="diff med">Intermediate</span>
+    <h3>Shellcode Region Tracking</h3>
+    <p>Identifying shellcode allocation boundaries, VirtualQuery for page-aligned operations, and multi-region support.</p>
+  </a>
+
+  <a href="modules/module7.html" class="module-card">
+    <span class="num">07</span>
+    <span class="diff hard">Advanced</span>
+    <h3>Thread Stack Spoofing Integration</h3>
+    <p>Combining fluctuation with ThreadStackSpoofer, dual-layer evasion during sleep, and return address overwriting.</p>
+  </a>
+
+  <a href="modules/module8.html" class="module-card">
+    <span class="num">08</span>
+    <span class="diff hard">Advanced</span>
+    <h3>Full Chain, Detection &amp; Comparison</h3>
+    <p>Ekko vs Fluctuation vs FOLIAGE, detection vectors, Moneta/pe-sieve bypass proof, limitations and future work.</p>
+  </a>
+
+</div>
+
+<div class="refs">
+  <div class="refs-card">
+    <h3>References &amp; Resources</h3>
+    <ul>
+      <li><strong>ShellcodeFluctuation Repository</strong> &mdash; <code>github.com/mgeeky/ShellcodeFluctuation</code></li>
+      <li><strong>ThreadStackSpoofer Repository</strong> &mdash; <code>github.com/mgeeky/ThreadStackSpoofer</code></li>
+      <li><strong>Moneta (forrest-orr)</strong> &mdash; <code>github.com/forrest-orr/moneta</code></li>
+      <li><strong>pe-sieve (hasherezade)</strong> &mdash; <code>github.com/hasherezade/pe-sieve</code></li>
+      <li><strong>BeaconEye (CCob)</strong> &mdash; <code>github.com/CCob/BeaconEye</code></li>
+      <li><strong>Ekko (C5pider)</strong> &mdash; <code>github.com/Cracked5pider/Ekko</code></li>
+      <li><strong>FOLIAGE (Austin Hudson)</strong> &mdash; <code>github.com/SecIdiot/FOLIAGE</code></li>
+      <li><strong>mgeeky's Red Teaming Experiments</strong> &mdash; <code>github.com/mgeeky/Penetration-Testing-Tools</code></li>
+    </ul>
+  </div>
+</div>
+
+<footer>
+  <p>shellcodefluctuation-course // built for learning, not for deployment</p>
+</footer>
+
+</body>
+</html>

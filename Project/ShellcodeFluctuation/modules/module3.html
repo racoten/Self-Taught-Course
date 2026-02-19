@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 3: VirtualProtect & Page Permissions - ShellcodeFluctuation Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4A0;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#10b981;--accent2:#059669;--gradient:linear-gradient(135deg,#10b981,#059669)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>ShellcodeFluctuation</h2><span>Memory Fluctuation Masterclass</span></div>
+  <a class="home-link" href="../ShellcodeFluctuation_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span>1. Memory Scanning Threat Model</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module2.html"><span>2. XOR Encryption for Memory</span><span class="diff d1">d1</span></a>
+  <a class="mod-link active" href="module3.html"><span>3. VirtualProtect &amp; Pages</span><span class="diff d1">d1</span></a>
+  <a class="mod-link" href="module4.html"><span>4. Sleep Function Hooking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module5.html"><span>5. The Fluctuation Algorithm</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module6.html"><span>6. Shellcode Region Tracking</span><span class="diff d2">d2</span></a>
+  <a class="mod-link" href="module7.html"><span>7. Thread Stack Spoofing</span><span class="diff d3">d3</span></a>
+  <a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 3: VirtualProtect &amp; Page Permissions</h1>
+<p class="subtitle">How memory page protections work, why toggling RW/RX matters, and the PAGE_NOACCESS alternative mode.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand Windows memory page protection constants, how <code>VirtualProtect</code> changes them at runtime, why ShellcodeFluctuation toggles between <code>PAGE_READWRITE</code> and <code>PAGE_EXECUTE_READ</code>, the alternative <code>PAGE_NOACCESS</code> mode with Vectored Exception Handling, and the working-set side effects of protection changes.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Windows Page Protection Constants</h2>
+
+<p>Every virtual memory page (4 KB on x86-64) has an associated protection attribute that controls what operations are permitted. The Memory Manager enforces these at the hardware level via Page Table Entries (PTEs).</p>
+
+<table>
+<tr><th>Constant</th><th>Value</th><th>Read</th><th>Write</th><th>Execute</th><th>Use Case</th></tr>
+<tr><td><code>PAGE_NOACCESS</code></td><td>0x01</td><td>No</td><td>No</td><td>No</td><td>Guard pages, decommitted memory</td></tr>
+<tr><td><code>PAGE_READONLY</code></td><td>0x02</td><td>Yes</td><td>No</td><td>No</td><td>Read-only data sections</td></tr>
+<tr><td><code>PAGE_READWRITE</code></td><td>0x04</td><td>Yes</td><td>Yes</td><td>No</td><td>Heap, stack, writable data</td></tr>
+<tr><td><code>PAGE_EXECUTE</code></td><td>0x10</td><td>No</td><td>No</td><td>Yes</td><td>Rare in practice</td></tr>
+<tr><td><code>PAGE_EXECUTE_READ</code></td><td>0x20</td><td>Yes</td><td>No</td><td>Yes</td><td>Normal code sections (.text)</td></tr>
+<tr><td><code>PAGE_EXECUTE_READWRITE</code></td><td>0x40</td><td>Yes</td><td>Yes</td><td>Yes</td><td>Self-modifying code (suspicious!)</td></tr>
+</table>
+
+<div class="card warn">
+<h4>RWX Is a Red Flag</h4>
+<p><code>PAGE_EXECUTE_READWRITE</code> (0x40) allows simultaneous read, write, and execute &mdash; which is almost never needed by legitimate applications. Memory scanners flag RWX pages immediately. ShellcodeFluctuation <strong>never</strong> uses RWX. Instead, it toggles between <code>PAGE_READWRITE</code> (writable, not executable) and <code>PAGE_EXECUTE_READ</code> (executable, not writable).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. The VirtualProtect API</h2>
+
+<p><code>VirtualProtect</code> changes the protection attributes of committed virtual memory pages. It is the core API that enables ShellcodeFluctuation's memory toggling.</p>
+
+<pre><code class="language-cpp">// VirtualProtect signature
+BOOL VirtualProtect(
+    LPVOID lpAddress,       // Starting address of the region
+    SIZE_T dwSize,          // Size of the region (rounded up to page boundary)
+    DWORD  flNewProtect,    // New protection constant
+    PDWORD lpflOldProtect   // Receives the previous protection
+);
+
+// Example: Toggle shellcode from RX to RW
+DWORD oldProtect;
+VirtualProtect(
+    shellcodeBase,          // Base address of shellcode allocation
+    shellcodeSize,          // Size of shellcode region
+    PAGE_READWRITE,         // New protection: writable, NOT executable
+    &oldProtect             // Will receive PAGE_EXECUTE_READ (0x20)
+);</code></pre>
+
+<p>Key behaviors of <code>VirtualProtect</code>:</p>
+
+<div class="card">
+<h4>VirtualProtect Behavior</h4>
+<ul>
+<li><strong>Page granularity</strong> &mdash; protection is applied at page boundaries (4 KB). If <code>dwSize</code> spans partial pages, the entire affected pages are changed</li>
+<li><strong>Returns old protection</strong> &mdash; the <code>lpflOldProtect</code> parameter receives the previous protection, which must be saved for later restoration</li>
+<li><strong>Cannot cross allocation boundaries</strong> &mdash; the address range must be within a single allocation (one <code>VirtualAlloc</code> call). Crossing boundaries causes failure</li>
+<li><strong>Thread-safe</strong> &mdash; protection changes are atomic at the page level. Other threads see either the old or new protection, never an intermediate state</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. The RW / RX Toggle Pattern</h2>
+
+<p>ShellcodeFluctuation's Mode 1 uses a two-state toggle between <code>PAGE_READWRITE</code> and <code>PAGE_EXECUTE_READ</code>. This is the primary fluctuation mode:</p>
+
+<pre><code class="language-cpp">// State 1: Shellcode is executable (normal operation)
+// Protection: PAGE_EXECUTE_READ (0x20)
+// Content:    Cleartext shellcode
+// Scanner:    DETECTS as "private executable memory"
+
+// ---- SLEEP REQUESTED ----
+
+// Step 1: Flip to writable
+DWORD oldProt;
+VirtualProtect(shellcodeBase, shellcodeSize,
+               PAGE_READWRITE, &oldProt);
+// Protection: PAGE_READWRITE (0x04)
+// Content:    Cleartext shellcode (briefly!)
+// Scanner:    Would see writable private memory (not flagged as executable)
+
+// Step 2: Encrypt in-place
+xor32(shellcodeBase, shellcodeSize, xorKey);
+// Protection: PAGE_READWRITE (0x04)
+// Content:    Encrypted gibberish
+// Scanner:    Sees non-executable memory with random data = CLEAN
+
+// ---- ACTUAL SLEEP HAPPENS HERE ----
+
+// Step 3: Decrypt in-place
+xor32(shellcodeBase, shellcodeSize, xorKey);
+// Protection: PAGE_READWRITE (0x04)
+// Content:    Cleartext shellcode (briefly!)
+
+// Step 4: Flip back to executable
+VirtualProtect(shellcodeBase, shellcodeSize,
+               PAGE_EXECUTE_READ, &oldProt);
+// Protection: PAGE_EXECUTE_READ (0x20)
+// Content:    Cleartext shellcode
+// Scanner:    DETECTS - but shellcode is already executing again</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Protection State Machine</h4>
+<div class="flow">
+<div class="flow box">RX + Plaintext<br><small>Executing</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">RW + Plaintext<br><small>Brief transition</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">RW + Encrypted<br><small>SLEEPING (safe)</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">RW + Plaintext<br><small>Brief transition</small></div>
+<div class="flow arrow">&rarr;</div>
+<div class="flow box">RX + Plaintext<br><small>Executing</small></div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Mode 2: PAGE_NOACCESS with VEH</h2>
+
+<p>ShellcodeFluctuation offers an alternative mode that uses <code>PAGE_NOACCESS</code> instead of <code>PAGE_READWRITE</code>. This creates a stronger evasion signal but requires a more complex recovery mechanism.</p>
+
+<pre><code class="language-cpp">// Mode 2: PAGE_NOACCESS fluctuation
+// Before sleep:
+VirtualProtect(shellcodeBase, shellcodeSize,
+               PAGE_NOACCESS, &oldProt);
+xor32(shellcodeBase, shellcodeSize, xorKey);
+// Note: We must encrypt BEFORE setting NOACCESS, or we
+// could set NOACCESS first (can't read/write after that).
+// Actually, the order matters: set RW first, encrypt,
+// then set NOACCESS.
+
+// The actual sequence for Mode 2:
+// 1. VirtualProtect -> PAGE_READWRITE
+// 2. XOR encrypt
+// 3. VirtualProtect -> PAGE_NOACCESS
+// 4. Sleep
+// Recovery happens via Vectored Exception Handler</code></pre>
+
+<p>When the shellcode wakes and the thread tries to execute code in the <code>PAGE_NOACCESS</code> region, an access violation exception occurs. A pre-registered Vectored Exception Handler (VEH) catches this and performs the decryption and protection restoration:</p>
+
+<pre><code class="language-cpp">// Vectored Exception Handler for PAGE_NOACCESS recovery
+LONG CALLBACK VehHandler(PEXCEPTION_POINTERS pExceptionInfo) {
+    // Check if the fault address is within our shellcode region
+    PVOID faultAddr = pExceptionInfo->ExceptionRecord->ExceptionAddress;
+
+    if (pExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION
+        && faultAddr >= shellcodeBase
+        && faultAddr < (BYTE*)shellcodeBase + shellcodeSize) {
+
+        // Step 1: Make writable so we can decrypt
+        DWORD oldProt;
+        VirtualProtect(shellcodeBase, shellcodeSize,
+                       PAGE_READWRITE, &oldProt);
+
+        // Step 2: Decrypt
+        xor32(shellcodeBase, shellcodeSize, xorKey);
+
+        // Step 3: Restore executable
+        VirtualProtect(shellcodeBase, shellcodeSize,
+                       PAGE_EXECUTE_READ, &oldProt);
+
+        // Continue execution - the faulting instruction will retry
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    // Not our fault - pass to next handler
+    return EXCEPTION_CONTINUE_SEARCH;
+}</code></pre>
+
+<div class="card green">
+<h4>Mode 2 Advantages</h4>
+<ul>
+<li><strong>Stronger signal during sleep</strong> &mdash; <code>PAGE_NOACCESS</code> memory cannot be read, written, or executed. Even if a scanner tries to read the memory, it gets an access violation</li>
+<li><strong>Automatic recovery</strong> &mdash; the VEH triggers on the first instruction the thread executes after waking, with no explicit "wake" code needed</li>
+<li><strong>Exception-based flow</strong> &mdash; no need to call <code>VirtualProtect</code> from within the hook handler on the wake path</li>
+</ul>
+</div>
+
+<div class="card warn">
+<h4>Mode 2 Disadvantages</h4>
+<ul>
+<li><strong>VEH registration is detectable</strong> &mdash; tools can enumerate registered vectored exception handlers</li>
+<li><strong>Exception overhead</strong> &mdash; the access violation and VEH dispatch add latency to the wake path (~microseconds, but nonzero)</li>
+<li><strong>Complexity</strong> &mdash; the VEH handler must correctly identify shellcode faults vs. legitimate exceptions</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Why Never RWX?</h2>
+
+<p>A naive implementation might use <code>PAGE_EXECUTE_READWRITE</code> to allow both writing (for encryption) and execution simultaneously. ShellcodeFluctuation explicitly avoids this:</p>
+
+<table>
+<tr><th>Approach</th><th>During Sleep</th><th>During Execution</th><th>Detection Risk</th></tr>
+<tr><td>Always RWX</td><td>RWX + Cleartext</td><td>RWX + Cleartext</td><td>Maximum &mdash; RWX is the strongest IOC</td></tr>
+<tr><td>Toggle RWX/RW</td><td>RW + Encrypted</td><td>RWX + Cleartext</td><td>High &mdash; RWX still present during execution</td></tr>
+<tr><td><strong>Toggle RW/RX (Mode 1)</strong></td><td>RW + Encrypted</td><td>RX + Cleartext</td><td>Minimal &mdash; no RWX at any time</td></tr>
+<tr><td><strong>Toggle NA/RX (Mode 2)</strong></td><td>NA + Encrypted</td><td>RX + Cleartext</td><td>Minimal &mdash; inaccessible during sleep</td></tr>
+</table>
+
+<p>The W^X (Write XOR Execute) principle states that memory should be either writable or executable, never both simultaneously. ShellcodeFluctuation enforces W^X at all times, matching legitimate application behavior.</p>
+
+<!-- ============================================================ -->
+<h2>6. Working Set Implications</h2>
+
+<p>Changing page protections has a subtle but detectable side effect: it can cause pages to be "softfaulted" back into the process working set, creating private copies of pages that were previously shared.</p>
+
+<pre><code class="language-cpp">// When VirtualProtect changes protection on private memory:
+//
+// 1. The kernel updates the Page Table Entry (PTE)
+// 2. TLB entries are invalidated (TLB flush for affected pages)
+// 3. The page's VAD (Virtual Address Descriptor) is updated
+//
+// For PRIVATE memory (VirtualAlloc):
+//   - No copy-on-write issues
+//   - The page already has a private PTE
+//   - Minimal side effects
+//
+// For MAPPED memory (e.g., kernel32.dll):
+//   - Changing protection triggers copy-on-write
+//   - Creates a private copy of the affected page
+//   - This is how Moneta detects Sleep hook modifications</code></pre>
+
+<div class="card highlight">
+<h4>The kernel32 Copy-on-Write IOC</h4>
+<p>When ShellcodeFluctuation installs its inline hook on <code>kernel32!Sleep</code>, it must write to kernel32's .text section. Because kernel32 is a memory-mapped file, writing triggers copy-on-write, creating a private page. Moneta detects this as "Modified code in kernel32.dll" &mdash; even if the hook bytes themselves are temporarily removed. The private page evidence persists. This IOC is addressed in Module 5 by temporarily unhooking before sleep.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. VirtualProtect Call Monitoring</h2>
+
+<p>EDR products can monitor <code>VirtualProtect</code> calls as a detection vector. Frequent toggling between RW and RX on the same region is itself suspicious:</p>
+
+<table>
+<tr><th>Detection Method</th><th>What It Catches</th><th>Mitigation</th></tr>
+<tr><td><strong>ETW events</strong></td><td>VirtualProtect calls logged via ETW (Microsoft-Windows-Kernel-Memory)</td><td>ETW patching (separate technique, not part of ShellcodeFluctuation)</td></tr>
+<tr><td><strong>Ntdll hooks</strong></td><td>EDR hook on <code>NtProtectVirtualMemory</code> sees protection changes</td><td>Direct syscalls to bypass ntdll hooks</td></tr>
+<tr><td><strong>Kernel callbacks</strong></td><td><code>PsSetCreateProcessNotifyRoutine</code> and related callbacks</td><td>Not easily mitigated from user mode</td></tr>
+<tr><td><strong>Pattern analysis</strong></td><td>Periodic RW/RX toggling correlated with Sleep intervals</td><td>Jitter on sleep intervals, randomized timing</td></tr>
+</table>
+
+<p>ShellcodeFluctuation accepts the <code>VirtualProtect</code> call as a necessary cost. The protection change is a single call per sleep cycle, occurring at the natural boundary between active and idle states. Most EDR products do not flag individual <code>VirtualProtect</code> calls on private memory.</p>
+
+<!-- ============================================================ -->
+<h2>8. Practical Protection Sequence</h2>
+
+<p>Putting it all together, here is the complete protection sequence for both modes as they relate to <code>VirtualProtect</code>:</p>
+
+<pre><code class="language-cpp">// Mode 1 (PAGE_READWRITE): Complete protection sequence
+void fluctuateMode1(LPVOID base, SIZE_T size, DWORD key) {
+    DWORD oldProt;
+
+    // Entering sleep: RX -> RW -> encrypt -> sleep
+    VirtualProtect(base, size, PAGE_READWRITE, &oldProt);
+    xor32((BYTE*)base, size, key);
+    // ... sleep ...
+    xor32((BYTE*)base, size, key);
+    VirtualProtect(base, size, PAGE_EXECUTE_READ, &oldProt);
+}
+
+// Mode 2 (PAGE_NOACCESS): Complete protection sequence
+void fluctuateMode2(LPVOID base, SIZE_T size, DWORD key) {
+    DWORD oldProt;
+
+    // Entering sleep: RX -> RW -> encrypt -> NOACCESS -> sleep
+    VirtualProtect(base, size, PAGE_READWRITE, &oldProt);
+    xor32((BYTE*)base, size, key);
+    VirtualProtect(base, size, PAGE_NOACCESS, &oldProt);
+    // ... sleep ...
+    // Recovery via VEH: NOACCESS fault -> RW -> decrypt -> RX
+}</code></pre>
+
+<!-- ============================================================ -->
+<div class="quiz">
+<h2>Knowledge Check</h2>
+
+<div class="quiz-q" data-answer="B">
+<p>Q1: Why does ShellcodeFluctuation never use PAGE_EXECUTE_READWRITE (RWX)?</p>
+<div class="quiz-btn" data-choice="A">A) RWX is not supported on modern Windows</div>
+<div class="quiz-btn" data-choice="B">B) RWX is the strongest memory scanner IOC - simultaneous read/write/execute is almost never legitimate</div>
+<div class="quiz-btn" data-choice="C">C) RWX memory cannot be encrypted</div>
+<div class="quiz-btn" data-choice="D">D) VirtualProtect does not support changing to RWX</div>
+</div>
+
+<div class="quiz-q" data-answer="D">
+<p>Q2: How does Mode 2 (PAGE_NOACCESS) recover when the shellcode thread wakes up?</p>
+<div class="quiz-btn" data-choice="A">A) The OS automatically restores RX permissions after sleep</div>
+<div class="quiz-btn" data-choice="B">B) A timer callback restores permissions</div>
+<div class="quiz-btn" data-choice="C">C) The thread calls VirtualProtect before executing</div>
+<div class="quiz-btn" data-choice="D">D) A Vectored Exception Handler catches the access violation and decrypts/restores permissions</div>
+</div>
+
+<div class="quiz-q" data-answer="C">
+<p>Q3: What side effect does hooking kernel32!Sleep produce that Moneta can detect?</p>
+<div class="quiz-btn" data-choice="A">A) kernel32.dll is unloaded from memory</div>
+<div class="quiz-btn" data-choice="B">B) The Sleep function is removed from the export table</div>
+<div class="quiz-btn" data-choice="C">C) Copy-on-write creates a private page in kernel32's .text section, flagged as "Modified code"</div>
+<div class="quiz-btn" data-choice="D">D) kernel32.dll's digital signature is invalidated</div>
+</div>
+</div>
+
+<div class="nav-btns">
+<a href="module2.html">&larr; Prev: XOR Encryption for Memory Evasion</a>
+<a class="primary" href="module4.html">Next: Sleep Function Hooking &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

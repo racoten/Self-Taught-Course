@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 6: Decoder Stub Generation - Shoggoth Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F419;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#a855f7;--accent2:#7c3aed;--gradient:linear-gradient(135deg,#a855f7,#7c3aed)}</style>
+</head>
+<body>
+<button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+<nav>
+<div class="logo">
+<h2>Shoggoth Course</h2>
+<span>Polymorphic Engine Masterclass</span>
+</div>
+<a class="home-link" href="../Shoggoth_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span>1. Signatures &amp; Polymorphism</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module2.html"><span>2. Polymorphic Engine Concepts</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module3.html"><span>3. asmjit: Runtime Codegen</span><span class="diff d1">d1</span></a>
+<a class="mod-link" href="module4.html"><span>4. Shoggoth Architecture</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module5.html"><span>5. The Encryption Layer</span><span class="diff d2">d2</span></a>
+<a class="mod-link active" href="module6.html"><span>6. Decoder Stub Generation</span><span class="diff d2">d2</span></a>
+<a class="mod-link" href="module7.html"><span>7. Junk Code &amp; Anti-Analysis</span><span class="diff d3">d3</span></a>
+<a class="mod-link" href="module8.html"><span>8. Full Chain &amp; Detection</span><span class="diff d3">d3</span></a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 6: Decoder Stub Generation</h1>
+<p class="subtitle">How asmjit emits polymorphic x86-64 decoder stubs with register randomization, operation-specific code generation, and position-independent data access.</p>
+
+<div class="card highlight">
+<h4>Module Objective</h4>
+<p>Understand how Shoggoth uses asmjit to generate the RC4 decoder stub and the block cipher decoder stub, how register randomization is implemented at the code generation level, how each operation in the block cipher chain maps to x86-64 instructions, and how the stubs locate their encrypted data using RIP-relative addressing.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Stub Generation Overview</h2>
+
+<p>Shoggoth generates two decoder stubs, one per encryption stage. Each stub is built using a fresh <code>CodeHolder</code> and <code>x86::Assembler</code> instance, with randomly selected registers and junk code interleaved. The generation process follows a consistent pattern:</p>
+
+<div class="diagram">
+<h4>Stub Generation Pipeline</h4>
+<div class="flow">
+<div class="box">Random Register<br>Assignment</div>
+<div class="arrow">&rarr;</div>
+<div class="box">Emit Prologue<br><small>Save registers, locate data</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box hl">Emit Decryption<br>Loop Body</div>
+<div class="arrow">&rarr;</div>
+<div class="box">Emit Epilogue<br><small>Restore, jump to payload</small></div>
+<div class="arrow">&rarr;</div>
+<div class="box g">Extract Raw Bytes</div>
+</div>
+</div>
+
+<p>The critical innovation is that each step involves random choices: which registers hold which values, whether the loop counts up or down, how the loop pointer advances, and where junk instructions are inserted. The result is that two invocations produce functionally equivalent but structurally different machine code.</p>
+
+<!-- ============================================================ -->
+<h2>2. Register Randomization Implementation</h2>
+
+<p>Before emitting any instructions, Shoggoth randomly assigns CPU registers to the roles needed by the decoder. The available pool excludes <code>RSP</code> (stack pointer, cannot be clobbered) and may reserve <code>RBP</code> depending on the calling convention needs:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Register assignment for block cipher decoder
+// Randomly shuffle and assign roles from the GPR pool
+std::vector&lt;x86::Gp&gt; gprPool = {
+    x86::rax, x86::rbx, x86::rcx, x86::rdx,
+    x86::rsi, x86::rdi, x86::r8,  x86::r9,
+    x86::r10, x86::r11, x86::r12, x86::r13,
+    x86::r14, x86::r15
+};
+
+std::shuffle(gprPool.begin(), gprPool.end(), rng);
+
+// Assign roles from shuffled pool
+x86::Gp regDataPtr   = gprPool[0];  // Pointer to encrypted data
+x86::Gp regBlockCount = gprPool[1]; // Number of 8-byte blocks
+x86::Gp regCurrent   = gprPool[2];  // Current block value
+x86::Gp regKey       = gprPool[3];  // Operation key / temp
+x86::Gp regIndex     = gprPool[4];  // Block index / loop counter</code></pre>
+
+<p>Since x86-64 encodes register numbers into the REX prefix and ModR/M byte, different register assignments produce different instruction encodings. For example, <code>xor rax, rbx</code> encodes as <code>48 31 D8</code> while <code>xor r10, r14</code> encodes as <code>4D 31 F2</code> &mdash; completely different bytes for the same logical operation.</p>
+
+<table>
+<tr><th>Instruction</th><th>Example Encoding (RAX, RBX)</th><th>Example Encoding (R10, R14)</th><th>Bytes Changed</th></tr>
+<tr><td><code>xor regA, regB</code></td><td><code>48 31 D8</code></td><td><code>4D 31 F2</code></td><td>All 3 bytes differ</td></tr>
+<tr><td><code>mov regA, imm64</code></td><td><code>48 B8 xx xx xx xx xx xx xx xx</code></td><td><code>49 BA xx xx xx xx xx xx xx xx</code></td><td>Opcode bytes differ</td></tr>
+<tr><td><code>add [regA], regB</code></td><td><code>48 01 18</code></td><td><code>4D 01 32</code></td><td>All 3 bytes differ</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. Block Cipher Decoder Stub</h2>
+
+<p>The block cipher decoder processes encrypted data in 8-byte (QWORD) chunks, applying the inverse operation chain to each block. Here is how Shoggoth generates this stub using asmjit:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Simplified block cipher decoder generation
+void generateBlockDecoder(x86::Assembler&amp; a,
+                          const std::vector&lt;Operation&gt;&amp; inverseChain,
+                          x86::Gp regPtr, x86::Gp regCount,
+                          x86::Gp regVal, x86::Gp regKey,
+                          size_t encryptedSize) {
+    Label loopStart = a.newLabel();
+    Label loopEnd   = a.newLabel();
+    Label dataLabel = a.newLabel();
+
+    // Locate encrypted data via RIP-relative LEA
+    a.lea(regPtr, x86::ptr(x86::rip, dataLabel));
+
+    // Set block count
+    size_t blockCount = encryptedSize / 8;
+    a.mov(regCount, blockCount);
+
+    // === Decryption Loop ===
+    a.bind(loopStart);
+
+    // Load current 8-byte block
+    a.mov(regVal, x86::qword_ptr(regPtr));
+
+    // Apply inverse operations (reversed order from encryption)
+    for (const auto&amp; op : inverseChain) {
+        // Insert junk code between operations (see Module 7)
+        insertGarbageInstructions(a, rng);
+
+        switch (op.type) {
+            case OP_XOR:
+                a.mov(regKey, op.key);    // load key as imm64
+                a.xor_(regVal, regKey);
+                break;
+            case OP_SUB:  // inverse of ADD
+                a.mov(regKey, op.key);
+                a.sub(regVal, regKey);
+                break;
+            case OP_ADD:  // inverse of SUB
+                a.mov(regKey, op.key);
+                a.add(regVal, regKey);
+                break;
+            case OP_ROR:  // inverse of ROL
+                a.ror(regVal, (int)op.key);
+                break;
+            case OP_ROL:  // inverse of ROR
+                a.rol(regVal, (int)op.key);
+                break;
+            case OP_NOT:
+                a.not_(regVal);
+                break;
+            case OP_NEG:
+                a.neg(regVal);
+                break;
+            case OP_DEC:  // inverse of INC
+                a.dec(regVal);
+                break;
+            case OP_INC:  // inverse of DEC
+                a.inc(regVal);
+                break;
+        }
+    }
+
+    // Store decrypted block back
+    a.mov(x86::qword_ptr(regPtr), regVal);
+
+    // Advance pointer and loop
+    a.add(regPtr, 8);
+    a.dec(regCount);
+    a.jnz(loopStart);
+
+    a.bind(loopEnd);
+    // Fall through to next stub or jump to payload
+
+    a.bind(dataLabel);
+    // Encrypted data follows here in the final output
+}</code></pre>
+
+<p>Each run produces different code because: (1) the registers <code>regPtr</code>, <code>regCount</code>, <code>regVal</code>, <code>regKey</code> are randomly assigned, (2) the operation chain itself varies (different operations, different keys), (3) junk instructions are inserted between each real operation, and (4) the key values embedded as immediate operands are different.</p>
+
+<!-- ============================================================ -->
+<h2>4. RC4 Decoder Stub</h2>
+
+<p>The RC4 decoder is more complex because it must implement both the KSA (Key Scheduling Algorithm) and PRGA (Pseudo-Random Generation Algorithm) in x86-64 assembly. The stub needs a 256-byte S-box array, which it allocates on the stack:</p>
+
+<pre><span class="lang-tag">C++</span><code>// Simplified RC4 decoder generation with asmjit
+void generateRC4Decoder(x86::Assembler&amp; a,
+                        x86::Gp regI, x86::Gp regJ,
+                        x86::Gp regN, x86::Gp regTemp,
+                        x86::Gp regData, x86::Gp regKeyPtr,
+                        size_t keyLen, size_t dataLen) {
+    Label ksaLoop = a.newLabel();
+    Label prgaLoop = a.newLabel();
+    Label keyData  = a.newLabel();
+
+    // Allocate 256-byte S-box on stack
+    a.sub(x86::rsp, 256);
+    // regSbox points to stack allocation
+    a.mov(regTemp, x86::rsp);
+
+    // === KSA: Initialize S[i] = i ===
+    Label initLoop = a.newLabel();
+    a.xor_(regI, regI);            // i = 0
+    a.bind(initLoop);
+    a.mov(x86::byte_ptr(regTemp, regI), regI.r8Lo());
+    a.inc(regI);
+    a.cmp(regI, 256);
+    a.jne(initLoop);
+
+    // === KSA: Permute S using key ===
+    a.lea(regKeyPtr, x86::ptr(x86::rip, keyData));
+    a.xor_(regI, regI);            // i = 0
+    a.xor_(regJ, regJ);            // j = 0
+    a.bind(ksaLoop);
+    // j = (j + S[i] + key[i % keyLen]) & 0xFF
+    // ... (KSA permutation logic)
+    // Swap S[i] and S[j]
+    a.inc(regI);
+    a.cmp(regI, 256);
+    a.jne(ksaLoop);
+
+    // === PRGA: Generate keystream and XOR with data ===
+    a.lea(regData, x86::ptr(x86::rip, /* offset to encrypted data */));
+    a.xor_(regI, regI);
+    a.xor_(regJ, regJ);
+    a.mov(regN, dataLen);
+    a.bind(prgaLoop);
+    // i = (i + 1) & 0xFF
+    // j = (j + S[i]) & 0xFF
+    // Swap S[i], S[j]
+    // k = S[(S[i] + S[j]) & 0xFF]
+    // data[n] ^= k
+    a.dec(regN);
+    a.jnz(prgaLoop);
+
+    // Restore stack and continue
+    a.add(x86::rsp, 256);
+
+    a.bind(keyData);
+    // RC4 key bytes follow here
+}</code></pre>
+
+<div class="card warn">
+<h4>Stack Usage in PIC Code</h4>
+<p>The RC4 decoder allocates the 256-byte S-box on the stack. This is safe in PIC code because the stack pointer is always valid regardless of where the code is loaded. However, the stub must carefully balance <code>sub rsp</code> and <code>add rsp</code> to avoid corrupting the stack frame. Shoggoth ensures the RSP adjustment is always correctly matched.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. RIP-Relative Data Access</h2>
+
+<p>Both decoder stubs must locate their data (encryption keys, the encrypted payload) without using absolute addresses. Shoggoth uses two PIC techniques:</p>
+
+<h3>5.1 LEA with RIP-Relative Offset</h3>
+
+<p>The standard x86-64 approach &mdash; <code>lea reg, [rip + offset]</code> computes the address of data relative to the current instruction pointer:</p>
+
+<pre><span class="lang-tag">ASM</span><code>; RIP-relative addressing to locate key data
+    lea  rsi, [rip + key_data]    ; rsi = address of key_data
+    ; ...use rsi to read key bytes...
+
+key_data:
+    db 0xDE, 0xAD, 0xBE, 0xEF    ; embedded key</code></pre>
+
+<h3>5.2 CALL/POP Technique</h3>
+
+<p>An alternative PIC technique sometimes used: <code>CALL</code> pushes the return address (next instruction) onto the stack, then <code>POP</code> retrieves it into a register. This gives the address of the code itself, from which data offsets can be calculated:</p>
+
+<pre><span class="lang-tag">ASM</span><code>; CALL/POP technique for PIC addressing
+    call get_rip          ; push address of 'pop rsi' onto stack
+get_rip:
+    pop  rsi              ; rsi = address of this instruction
+    add  rsi, offset      ; adjust to point at data section</code></pre>
+
+<p>asmjit&rsquo;s label system handles the RIP-relative approach transparently &mdash; you bind a label to the data location and reference it in a <code>lea</code> instruction, and asmjit computes the correct displacement automatically.</p>
+
+<!-- ============================================================ -->
+<h2>6. Equivalent Instruction Substitution in Practice</h2>
+
+<p>Beyond register randomization, Shoggoth can substitute individual instructions with equivalent alternatives. Here are concrete examples used in the decoder stubs:</p>
+
+<table>
+<tr><th>Operation Needed</th><th>Option A</th><th>Option B</th><th>Option C</th></tr>
+<tr><td>Zero a register</td><td><code>xor reg, reg</code> (2-3 bytes)</td><td><code>sub reg, reg</code> (2-3 bytes)</td><td><code>mov reg, 0</code> (7 bytes for 64-bit)</td></tr>
+<tr><td>Copy register</td><td><code>mov dst, src</code></td><td><code>lea dst, [src]</code></td><td><code>push src; pop dst</code></td></tr>
+<tr><td>Increment</td><td><code>inc reg</code></td><td><code>add reg, 1</code></td><td><code>lea reg, [reg+1]</code></td></tr>
+<tr><td>Compare to zero</td><td><code>test reg, reg</code></td><td><code>cmp reg, 0</code></td><td><code>or reg, reg</code></td></tr>
+<tr><td>Negate</td><td><code>neg reg</code></td><td><code>not reg; inc reg</code> (two&rsquo;s complement)</td><td><code>xor reg, -1; add reg, 1</code></td></tr>
+</table>
+
+<p>The engine randomly selects between available options for common operations, further differentiating the output. Combined with register randomization, even simple setup code like zeroing a counter becomes unpredictable: one run might use <code>xor r14, r14</code>, another <code>sub rbx, rbx</code>, another <code>mov rdi, 0</code>.</p>
+
+<!-- ============================================================ -->
+<h2>7. Putting It All Together</h2>
+
+<p>The complete decoder stub generation for a typical two-stage encryption produces output structured like this:</p>
+
+<div class="card">
+<h4>Generated Output Byte Layout</h4>
+<pre><span class="lang-tag">Layout</span><code>Offset 0x0000: [Junk Instructions - variable size]
+Offset 0x00XX: [Block Cipher Decoder - variable size]
+               - RIP-relative LEA to locate data
+               - Block decryption loop with random ops
+               - Junk between each operation
+Offset 0x0YYY: [Junk Instructions - variable size]
+Offset 0x0ZZZ: [RC4 Decoder - variable size]
+               - Stack-allocated 256-byte S-box
+               - KSA loop with key from embedded data
+               - PRGA loop XORing with payload
+               - Stack cleanup
+Offset 0x0AAA: [RC4 Key Data - variable size]
+Offset 0x0BBB: [Encrypted Payload - fixed size]</code></pre>
+</div>
+
+<p>Every field marked &ldquo;variable size&rdquo; changes between generations. Even the encrypted payload changes because the keys are different. The total output size varies between runs, which is itself a polymorphic property &mdash; file size cannot be used as a reliable indicator.</p>
+
+<!-- ============================================================ -->
+<div class="quiz" id="quiz6">
+<h4>Knowledge Check</h4>
+
+<div class="quiz-q" data-correct="1">
+<p>Q1: Why does changing the register assignment change the machine code bytes?</p>
+<label data-opt="0"><input type="radio" name="q1"> Different registers have different performance characteristics that affect code generation</label>
+<label data-opt="1"><input type="radio" name="q1"> x86-64 encodes the register number into the REX prefix and ModR/M byte, so different registers produce different opcode bytes</label>
+<label data-opt="2"><input type="radio" name="q1"> Some registers require additional alignment instructions</label>
+<label data-opt="3"><input type="radio" name="q1"> The operating system assigns different memory addresses to different registers</label>
+<div class="explain">In x86-64 encoding, the register number is encoded in the ModR/M byte (bits 5:3 for reg, bits 2:0 for r/m) and the REX prefix (R, X, B extension bits for registers R8-R15). Changing which register is used in an instruction changes these encoding bytes, producing completely different machine code for the same logical operation.</div>
+</div>
+
+<div class="quiz-q" data-correct="2">
+<p>Q2: How does the RC4 decoder stub handle the 256-byte S-box allocation?</p>
+<label data-opt="0"><input type="radio" name="q2"> It uses a global variable in the .data section</label>
+<label data-opt="1"><input type="radio" name="q2"> It allocates memory using VirtualAlloc at runtime</label>
+<label data-opt="2"><input type="radio" name="q2"> It allocates the S-box on the stack by subtracting 256 from RSP</label>
+<label data-opt="3"><input type="radio" name="q3"> It embeds the S-box as static data after the code section</label>
+<div class="explain">The RC4 decoder allocates the 256-byte S-box on the stack with <code>sub rsp, 256</code>. This is the correct PIC approach &mdash; the stack is always available regardless of where the code is loaded, and it avoids the need for API calls (like VirtualAlloc) that would require import resolution. The stub restores RSP when done.</div>
+</div>
+
+<div class="quiz-q" data-correct="3">
+<p>Q3: What is the purpose of the <code>lea reg, [rip + label]</code> pattern in the decoder stubs?</p>
+<label data-opt="0"><input type="radio" name="q3a"> To calculate arithmetic on the instruction pointer</label>
+<label data-opt="1"><input type="radio" name="q3a"> To create a far jump to a different code segment</label>
+<label data-opt="2"><input type="radio" name="q3a"> To set the stack frame pointer</label>
+<label data-opt="3"><input type="radio" name="q3a"> To compute the address of embedded data (keys, encrypted payload) relative to the current code position, enabling position-independent access</label>
+<div class="explain">The <code>lea reg, [rip + offset]</code> instruction computes the address of a data location relative to the current instruction pointer. Since the offset between the code and its data is fixed at generation time, this works regardless of where the code is loaded in memory &mdash; which is essential for position-independent code.</div>
+</div>
+
+<button class="quiz-btn" onclick="gradeQuiz('quiz6')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module5.html">&larr; Prev: The Encryption Layer</a>
+<a class="primary" href="module7.html">Next: Junk Code &amp; Anti-Analysis &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

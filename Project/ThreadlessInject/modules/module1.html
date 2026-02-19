@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 1: The Thread Creation Problem - ThreadlessInject Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9F5;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#14b8a6;--accent2:#0d9488;--gradient:linear-gradient(135deg,#14b8a6,#0d9488)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>ThreadlessInject Course</h2>
+<span>Threadless Injection Masterclass</span>
+</div>
+<a class="home-link" href="../ThreadlessInject_index.html">&larr; Course Home</a>
+<a class="mod-link active" href="module1.html"><span class="diff d1">1</span> Thread Creation Problem</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Remote Function Hooking</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> Target Function Selection</a>
+<a class="mod-link" href="module4.html"><span class="diff d2">4</span> Remote Memory Allocation</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hook Stub Architecture</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Installing Remote Hook</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Execution &amp; Cleanup</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge easy">Difficulty: Beginner</span>
+<h1>Module 1: The Thread Creation Problem</h1>
+<p class="subtitle">Every classic injection technique has the same Achilles' heel: creating a thread in a remote process.</p>
+
+<div class="card highlight">
+<h4>Why This Module?</h4>
+<p>Before understanding ThreadlessInject by <strong>CCob (EthicalChaos)</strong>, you must understand the problem it solves. Traditional process injection techniques rely on creating a new thread in the target process to execute injected code. This single operation generates a cascade of telemetry that modern EDR products exploit ruthlessly. ThreadlessInject exists because thread creation is, from an attacker's perspective, the loudest thing you can do.</p>
+</div>
+
+<h2>The Classic Injection Pattern</h2>
+<p>Nearly every traditional process injection technique follows the same three-step pattern. First, you allocate memory in the target process. Second, you write your payload (shellcode or a DLL) into that memory. Third, you trigger execution of that payload. It is this third step &mdash; triggering execution &mdash; that has historically been the most detectable, because the most common approach is to create a new thread in the remote process.</p>
+
+<p>The canonical implementation uses <code>CreateRemoteThread</code>, a Win32 API exported by <code>kernel32.dll</code>. This function asks the kernel to create a new thread in a specified process, starting execution at an address you control:</p>
+
+<pre><code><span class="lang-tag">C++</span>// Classic injection: allocate, write, execute via new thread
+HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPid);
+
+// Step 1: Allocate memory in target
+LPVOID remoteBuf = VirtualAllocEx(hProcess, NULL, shellcodeLen,
+    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+// Step 2: Write shellcode
+WriteProcessMemory(hProcess, remoteBuf, shellcode, shellcodeLen, NULL);
+
+// Step 3: Create a remote thread to execute it
+HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
+    (LPTHREAD_START_ROUTINE)remoteBuf, NULL, 0, NULL);</code></pre>
+
+<p>This pattern works, but it is trivially detectable. The call to <code>CreateRemoteThread</code> triggers a well-documented chain of kernel events that security products monitor.</p>
+
+<h2>Kernel-Level Thread Creation Callbacks</h2>
+<p>Windows provides a documented mechanism for kernel-mode drivers to receive notifications whenever a new thread is created: <code>PsSetCreateThreadNotifyRoutine</code>. Every major EDR product registers a callback with this function. When your <code>CreateRemoteThread</code> call creates a new thread, the kernel walks its list of registered callbacks and invokes each one, passing a <code>PS_CREATE_NOTIFY_INFO</code> structure that includes the creating process ID, the target process ID, and the new thread ID.</p>
+
+<table>
+<tr><th>Kernel Callback</th><th>What It Reports</th><th>Used By</th></tr>
+<tr><td><code>PsSetCreateThreadNotifyRoutine</code></td><td>New thread creation: creator PID, target PID, thread ID</td><td>All major EDRs</td></tr>
+<tr><td><code>PsSetCreateProcessNotifyRoutineEx</code></td><td>New process creation with full image path</td><td>All major EDRs</td></tr>
+<tr><td><code>PsSetLoadImageNotifyRoutine</code></td><td>DLL/image loads into any process</td><td>All major EDRs</td></tr>
+<tr><td><code>ObRegisterCallbacks</code></td><td>Handle operations (OpenProcess, OpenThread)</td><td>Most EDRs</td></tr>
+</table>
+
+<p>The critical observation is this: when process A creates a thread in process B, the EDR driver sees that the <strong>creating process</strong> differs from the <strong>target process</strong>. A thread created by a process in itself is normal. A thread created by an external process is immediately suspicious, and the EDR will flag it for further analysis or outright block it.</p>
+
+<div class="card warn">
+<h4>Cross-Process Thread Creation = Immediate Alert</h4>
+<p>EDR products like CrowdStrike Falcon, Microsoft Defender for Endpoint, and SentinelOne all monitor <code>PsSetCreateThreadNotifyRoutine</code>. When they detect cross-process thread creation (creator PID != target PID), this alone is often sufficient to flag the operation as suspicious and trigger deeper behavioral analysis or termination.</p>
+</div>
+
+<h2>ETW Telemetry: Even More Visibility</h2>
+<p><strong>Event Tracing for Windows (ETW)</strong> provides additional userland telemetry on thread creation. The <code>Microsoft-Windows-Kernel-Process</code> ETW provider emits <code>ThreadStart</code> and <code>ThreadStop</code> events for every thread in the system. EDR agents subscribe to these events and correlate them with their kernel callback data.</p>
+
+<p>The ETW telemetry includes the thread's start address, which is the address passed to <code>CreateRemoteThread</code>. If this start address points into a region that was recently allocated with <code>VirtualAllocEx</code> and has executable permissions, the detection is practically certain. The sequence "allocate remote RWX memory, write to it, create thread pointing to it" is one of the most well-known attack patterns in the Windows ecosystem.</p>
+
+<pre><code><span class="lang-tag">C++</span>// What the ETW event looks like to the EDR:
+// Event: ThreadStart/Start
+// Fields:
+//   ProcessId:      target.exe (PID 1234)
+//   ThreadId:       newly created thread
+//   StartAddress:   0x00000213A0010000  <-- points to VirtualAllocEx'd memory
+//   StackBase:      ...
+//   StackLimit:     ...
+//
+// EDR correlation:
+//   - StartAddress is in private, recently-allocated, RWX memory
+//   - Creating process (attacker.exe) != target process (target.exe)
+//   - VERDICT: Malicious remote thread injection</code></pre>
+
+<h2>Alternatives to CreateRemoteThread (Still Loud)</h2>
+<p>Attackers have tried many variations to avoid <code>CreateRemoteThread</code> detection, but all share the fundamental problem of creating a new thread or scheduling code execution through monitored mechanisms:</p>
+
+<div class="diagram">
+<h4>Traditional Injection Execution Methods</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box r" style="width:100%"><strong>CreateRemoteThread</strong> &mdash; direct remote thread, trivially detected</div>
+<div class="box r" style="width:100%"><strong>NtCreateThreadEx</strong> &mdash; native API, same kernel callback fires</div>
+<div class="box r" style="width:100%"><strong>RtlCreateUserThread</strong> &mdash; undocumented ntdll API, still creates a thread</div>
+<div class="box y" style="width:100%"><strong>QueueUserAPC</strong> &mdash; queues to existing thread but requires alertable state</div>
+<div class="box y" style="width:100%"><strong>SetThreadContext</strong> &mdash; hijacks existing thread, but suspicious context change</div>
+<div class="box y" style="width:100%"><strong>NtQueueApcThread</strong> &mdash; native APC queue, monitored by modern EDRs</div>
+</div>
+</div>
+
+<p>Even when attackers use lower-level native API functions like <code>NtCreateThreadEx</code>, the kernel callback still fires because the actual thread creation happens in the kernel. The <code>PsSetCreateThreadNotifyRoutine</code> callback is triggered by the kernel's internal thread creation path, not by the specific userland API that was called. Switching from <code>CreateRemoteThread</code> to <code>NtCreateThreadEx</code> is merely cosmetic from a detection standpoint.</p>
+
+<h2>APC-Based Injection: Better, But Still Detectable</h2>
+<p>Asynchronous Procedure Calls (APCs) represent a step forward because they execute code on an <strong>existing</strong> thread rather than creating a new one. However, APCs have their own problems. The target thread must be in an <strong>alertable wait state</strong> (meaning it called <code>SleepEx</code>, <code>WaitForSingleObjectEx</code>, or similar with the <code>bAlertable</code> flag set to TRUE). Not all threads are in an alertable state, making APC injection unreliable. Additionally, modern EDR products now monitor <code>NtQueueApcThread</code> calls where the calling process differs from the target process.</p>
+
+<pre><code><span class="lang-tag">C++</span>// APC injection: still requires finding an alertable thread
+// and the cross-process QueueUserAPC call is monitored
+HANDLE hThread = OpenThread(THREAD_SET_CONTEXT, FALSE, targetThreadId);
+QueueUserAPC((PAPCFUNC)remoteShellcodeAddr, hThread, 0);
+// Problem 1: thread must be in alertable wait state
+// Problem 2: cross-process APC queuing is now monitored by EDRs
+// Problem 3: if thread never enters alertable state, payload never runs</code></pre>
+
+<div class="card green">
+<h4>The ThreadlessInject Insight</h4>
+<p>What if you could make the target process execute your code <strong>without creating a thread and without queuing an APC</strong>? What if, instead of telling the target process to run something new, you modified something the target is <em>already doing</em> so that it runs your code as part of its normal operation? This is the core insight behind ThreadlessInject: <strong>hook a function that the target process already calls regularly, so that the next time an existing thread calls that function, your code runs</strong>.</p>
+</div>
+
+<h2>The Detection Surface Summary</h2>
+<p>To appreciate why ThreadlessInject is significant, consider the full detection surface of traditional injection:</p>
+
+<table>
+<tr><th>Detection Layer</th><th>What It Catches</th><th>ThreadlessInject Avoids?</th></tr>
+<tr><td>Kernel thread callbacks</td><td>Cross-process thread creation</td><td>Yes &mdash; no new thread</td></tr>
+<tr><td>ETW thread events</td><td>Thread start address in suspicious memory</td><td>Yes &mdash; no new thread</td></tr>
+<tr><td>Handle monitoring</td><td>OpenProcess with suspicious access rights</td><td>Partial &mdash; still needs handle</td></tr>
+<tr><td>Memory scanning</td><td>RWX memory regions, shellcode patterns</td><td>Partial &mdash; still allocates memory</td></tr>
+<tr><td>API hooking (userland)</td><td>Calls to CreateRemoteThread, WriteProcessMemory</td><td>Yes &mdash; uses Nt* APIs</td></tr>
+<tr><td>Behavioral analysis</td><td>Pattern: alloc + write + thread creation</td><td>Yes &mdash; no thread in pattern</td></tr>
+</table>
+
+<p>ThreadlessInject eliminates the single most detectable component of the injection chain &mdash; the thread creation event &mdash; while accepting that some detection surface (like cross-process memory allocation and writing) remains. The trade-off is heavily in the attacker's favor because thread creation was by far the strongest signal available to defenders.</p>
+
+<div class="quiz" id="quiz1">
+<h4>Pop Quiz: The Thread Creation Problem</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: Why does switching from CreateRemoteThread to NtCreateThreadEx not evade kernel-level detection?</p>
+<label data-opt="0"><input type="radio" name="q1_0"> NtCreateThreadEx is slower and easier to monitor</label>
+<label data-opt="1"><input type="radio" name="q1_0"> The PsSetCreateThreadNotifyRoutine callback fires on the kernel's internal thread creation path, regardless of which userland API was used</label>
+<label data-opt="2"><input type="radio" name="q1_0"> NtCreateThreadEx is a documented API that EDRs hook directly</label>
+<label data-opt="3"><input type="radio" name="q1_0"> Windows blocks NtCreateThreadEx for cross-process calls</label>
+<div class="explain">Correct! The kernel callback PsSetCreateThreadNotifyRoutine is triggered by the kernel's internal thread creation logic (PspInsertThread), not by any specific userland API. Whether you call CreateRemoteThread, NtCreateThreadEx, or RtlCreateUserThread, the same kernel code path runs and the same callback fires.</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: What is the primary limitation of APC-based injection?</p>
+<label data-opt="0"><input type="radio" name="q1_1"> APCs can only target the main thread</label>
+<label data-opt="1"><input type="radio" name="q1_1"> APCs require SYSTEM privileges</label>
+<label data-opt="2"><input type="radio" name="q1_1"> The target thread must be in an alertable wait state for the APC to execute</label>
+<label data-opt="3"><input type="radio" name="q1_1"> APCs are limited to 4096 bytes of code</label>
+<div class="explain">APCs only execute when the target thread enters an alertable wait state (by calling SleepEx, WaitForSingleObjectEx, MsgWaitForMultipleObjectsEx, etc. with bAlertable=TRUE). If the thread never enters this state, the queued APC will never run, making APC injection unreliable.</div>
+</div>
+<div class="quiz-q" data-correct="0">
+<p>Q3: What is the core innovation of ThreadlessInject?</p>
+<label data-opt="0"><input type="radio" name="q1_2"> It hooks a function the target already calls, so an existing thread executes the payload without creating any new threads</label>
+<label data-opt="1"><input type="radio" name="q1_2"> It uses a kernel driver to inject code directly into kernel memory</label>
+<label data-opt="2"><input type="radio" name="q1_2"> It encrypts the shellcode so EDRs cannot scan it</label>
+<label data-opt="3"><input type="radio" name="q1_2"> It injects into the Windows kernel thread pool</label>
+<div class="explain">ThreadlessInject's key innovation is modifying (hooking) a function that the target process already calls regularly. When an existing thread in the target process next calls that hooked function, the hook redirects execution to the attacker's shellcode. No new thread is created, so kernel thread creation callbacks never fire.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz1')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<span></span>
+<a class="primary" href="module2.html">Next: Remote Function Hooking &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>

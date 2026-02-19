@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 4: ntdll.dll Stub Anatomy - HellsGate Course</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+<link rel="stylesheet" href="../../../assets/course.css">
+<style>:root{--accent:#e11d48;--accent2:#be123c;--gradient:linear-gradient(135deg,#e11d48,#be123c)}</style>
+</head>
+<body>
+
+<button class="hamburger" onclick="document.querySelector('nav').classList.toggle('open')">&#9776;</button>
+
+<nav>
+<div class="logo">
+<h2>HellsGate Course</h2>
+<span>Dynamic SSN &amp; Direct Syscalls</span>
+</div>
+<a class="home-link" href="../HellsGate_index.html">&larr; Course Home</a>
+<a class="mod-link" href="module1.html"><span class="diff d1">1</span> EDR Hooking</a>
+<a class="mod-link" href="module2.html"><span class="diff d1">2</span> Syscall Architecture</a>
+<a class="mod-link" href="module3.html"><span class="diff d1">3</span> SSN Basics</a>
+<a class="mod-link active" href="module4.html"><span class="diff d2">4</span> ntdll Stub Anatomy</a>
+<a class="mod-link" href="module5.html"><span class="diff d2">5</span> Hell's Gate Algorithm</a>
+<a class="mod-link" href="module6.html"><span class="diff d2">6</span> Direct Syscall Exec</a>
+<a class="mod-link" href="module7.html"><span class="diff d3">7</span> Halo's &amp; Tartarus Gate</a>
+<a class="mod-link" href="module8.html"><span class="diff d3">8</span> Full Chain &amp; Detection</a>
+</nav>
+
+<main>
+<span class="diff-badge medium">Difficulty: Intermediate</span>
+<h1>Module 4: ntdll.dll Stub Anatomy</h1>
+<p class="subtitle">The 20-byte pattern that every direct syscall technique is built on.</p>
+
+<div class="card highlight">
+<h4>From Theory to Bytes</h4>
+<p>Now we move from abstract concepts to concrete bytes. Every Nt*/Zw* syscall function in ntdll.dll follows a predictable machine code pattern. Hell's Gate reads these bytes directly from memory to extract the SSN. In this module, you will learn the exact byte layout of a syscall stub, how to find these stubs via the Export Address Table (EAT), and the data structures Hell's Gate uses to represent them.</p>
+</div>
+
+<h2>The Syscall Stub Pattern</h2>
+<p>On x64 Windows 10 and later, every Nt* syscall stub in ntdll.dll follows this byte pattern:</p>
+
+<pre><code><span class="lang-tag">ASM</span>; Standard ntdll syscall stub layout (x64, Windows 10+)
+; Total: approximately 20 bytes
+;
+; Offset  Bytes              Instruction
+; ------  -----------------  -----------
+; 0x00    4c 8b d1           mov r10, rcx        ; save 1st param (RCX clobbered by syscall)
+; 0x03    b8 XX XX 00 00     mov eax, &lt;SSN&gt;      ; load System Service Number
+; 0x08    f6 04 25 08 03 fe  test byte ptr [7FFE0308h], 1  ; check SharedUserData
+; 0x0F    7f 01                                   ; (VBS/HVCI check)
+; 0x10    75 03              jnz  short +3        ; if set, use int 2e path
+; 0x12    0f 05              syscall              ; Ring 3 -> Ring 0
+; 0x14    c3                 ret                  ; return to caller
+; 0x15    cd 2e              int 0x2e             ; alternative syscall path
+; 0x17    c3                 ret</code></pre>
+
+<div class="card warn">
+<h4>Stub Layout Varies by Windows Version</h4>
+<p>The exact byte layout has changed across Windows versions. On Windows 7, the stub is simpler (no hypervisor check). On early Windows 10 builds, the test/jnz sequence differs. The <strong>critical constant</strong> that Hell's Gate relies on is the first 8 bytes: the <code>mov r10, rcx</code> (3 bytes) followed by <code>mov eax, SSN</code> (5 bytes). These are stable across all x64 Windows versions. Hell's Gate checks for the byte pattern <code>4c 8b d1 b8</code> at the start to confirm a clean, unhooked stub.</p>
+</div>
+
+<h2>Byte-Level Breakdown</h2>
+<p>Let us examine the bytes that Hell's Gate reads and validates:</p>
+
+<table>
+<tr><th>Offset</th><th>Bytes</th><th>Meaning</th><th>Hell's Gate Check</th></tr>
+<tr><td>0x00</td><td><code>4c 8b d1</code></td><td><code>mov r10, rcx</code></td><td>Byte 0 must be <code>0x4c</code>, byte 1 must be <code>0x8b</code>, byte 2 must be <code>0xd1</code></td></tr>
+<tr><td>0x03</td><td><code>b8</code></td><td><code>mov eax,</code> (opcode)</td><td>Byte 3 must be <code>0xb8</code></td></tr>
+<tr><td>0x04</td><td><code>XX XX 00 00</code></td><td>SSN value (little-endian DWORD)</td><td>Extract as <code>*(WORD*)(stub + 4)</code> -- the SSN</td></tr>
+<tr><td>0x06-0x07</td><td><code>00 00</code></td><td>High 2 bytes of SSN (always zero, SSNs &lt; 0x10000)</td><td>Used as secondary validation</td></tr>
+</table>
+
+<p>Hell's Gate reads the SSN from bytes at offset 4 and 5 of the stub. Since SSNs are always less than ~500, bytes 6 and 7 are always <code>0x00</code>, which provides an additional integrity check.</p>
+
+<pre><code><span class="lang-tag">C</span>// How Hell's Gate reads the SSN from a stub pointer
+// 'pFunctionAddress' points to the start of the Nt* function
+BYTE* stub = (BYTE*)pFunctionAddress;
+
+// Validate the stub pattern
+if (stub[0] == 0x4c &&    // mov r10, rcx
+    stub[1] == 0x8b &&
+    stub[2] == 0xd1 &&
+    stub[3] == 0xb8) {    // mov eax, &lt;imm32&gt;
+
+    // Extract SSN from bytes 4-5 (little-endian 16-bit)
+    WORD ssn = *(WORD*)(stub + 4);
+    // ssn now holds the System Service Number
+}</code></pre>
+
+<h2>Finding Stubs via the Export Address Table</h2>
+<p>To find the syscall stubs, Hell's Gate walks the <strong>Export Address Table (EAT)</strong> of ntdll.dll. The EAT is a PE data structure that maps function names to their addresses. Here is the process:</p>
+
+<div class="diagram">
+<h4 style="color:var(--accent);margin-bottom:15px;text-align:center">EAT Walking Process</h4>
+<div class="flow" style="flex-direction:column;gap:4px;align-items:stretch;max-width:600px;margin:0 auto">
+<div class="box" style="width:100%">1. Find ntdll.dll base address (PEB &rarr; InMemoryOrderModuleList)</div>
+<div class="box" style="width:100%">2. Parse PE headers: DOS Header &rarr; NT Headers &rarr; Optional Header</div>
+<div class="box" style="width:100%">3. Locate Export Directory: DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]</div>
+<div class="box hl" style="width:100%">4. Walk AddressOfNames[] array to find target function name</div>
+<div class="box hl" style="width:100%">5. Use AddressOfNameOrdinals[] to get the ordinal index</div>
+<div class="box g" style="width:100%">6. Use AddressOfFunctions[ordinal] to get the function RVA</div>
+<div class="box g" style="width:100%">7. Add ntdll base + RVA = absolute address of syscall stub</div>
+</div>
+</div>
+
+<h2>Hell's Gate Data Structures</h2>
+<p>The original Hell's Gate code defines two key structures to represent a resolved syscall:</p>
+
+<pre><code><span class="lang-tag">C</span>// From HellsGate main.c - the VX_TABLE_ENTRY structure
+typedef struct _VX_TABLE_ENTRY {
+    PVOID   pAddress;        // Address of the Nt* function in ntdll
+    DWORD64 dwHash;          // DJB2 hash of the function name
+    WORD    wSystemCall;     // The resolved SSN (System Service Number)
+} VX_TABLE_ENTRY, *PVX_TABLE_ENTRY;
+
+// The VX_TABLE holds entries for all syscalls we need
+typedef struct _VX_TABLE {
+    VX_TABLE_ENTRY NtAllocateVirtualMemory;
+    VX_TABLE_ENTRY NtProtectVirtualMemory;
+    VX_TABLE_ENTRY NtCreateThreadEx;
+    VX_TABLE_ENTRY NtWaitForSingleObject;
+} VX_TABLE, *PVX_TABLE;</code></pre>
+
+<p>Each <code>VX_TABLE_ENTRY</code> stores three pieces of information: the address of the function in ntdll (for reading the stub bytes), a hash of the function name (for locating it in the EAT without storing the plaintext name), and the resolved SSN (the value that will be placed in EAX before <code>syscall</code>).</p>
+
+<h2>PEB Walking to Find ntdll Base</h2>
+<p>Before parsing the EAT, Hell's Gate needs the base address of ntdll.dll. It finds this by walking the <strong>Process Environment Block (PEB)</strong>:</p>
+
+<pre><code><span class="lang-tag">C</span>// Hell's Gate finds ntdll.dll through the PEB
+// The PEB is accessible via the TEB (Thread Environment Block)
+// which is at gs:[0x60] on x64 Windows
+
+// PEB->Ldr->InMemoryOrderModuleList contains loaded modules
+// Module order: [0] = process exe, [1] = ntdll.dll
+
+PPEB pPeb = (PPEB)__readgsqword(0x60);  // Read PEB from TEB
+
+PLDR_DATA_TABLE_ENTRY pLdrEntry =
+    (PLDR_DATA_TABLE_ENTRY)
+    ((PBYTE)pPeb->Ldr->InMemoryOrderModuleList.Flink->Flink  // 2nd entry = ntdll
+     - 0x10);  // adjust for LIST_ENTRY offset
+
+PVOID ntdllBase = pLdrEntry->DllBase;  // ntdll.dll base address</code></pre>
+
+<div class="card green">
+<h4>Why ntdll Is Always Second</h4>
+<p>In the <code>InMemoryOrderModuleList</code>, the first entry is always the process executable itself. The second entry is always <strong>ntdll.dll</strong>, because it is the first DLL loaded by the kernel (it is mapped before the process entry point runs). This is reliable across all Windows versions and is a standard technique used by many offensive tools.</p>
+</div>
+
+<h2>API Hashing: Avoiding Plaintext Strings</h2>
+<p>Hell's Gate does not store function names as plaintext strings (which would be trivially detectable by static analysis). Instead, it uses <strong>DJB2 hashing</strong> to compare function names:</p>
+
+<pre><code><span class="lang-tag">C</span>// DJB2 hash function used by Hell's Gate
+DWORD64 djb2(PBYTE str) {
+    DWORD64 dwHash = 0x7734773477347734;  // Custom seed
+    CHAR c;
+
+    while (c = *str++)
+        dwHash = ((dwHash << 0x5) + dwHash) + c;  // hash * 33 + c
+
+    return dwHash;
+}
+
+// Pre-computed hashes for target functions:
+// djb2("NtAllocateVirtualMemory") = 0xF5BD373480A6B89B
+// djb2("NtProtectVirtualMemory")  = 0x858BCB1046FB6A37
+// djb2("NtCreateThreadEx")        = 0x64DC7DB288C5015F
+// djb2("NtWaitForSingleObject")   = 0xC6A2FA174E551BCB</code></pre>
+
+<p>When walking the EAT, Hell's Gate computes the DJB2 hash of each exported function name and compares it against pre-computed target hashes. This avoids embedding suspicious strings like "NtAllocateVirtualMemory" in the binary.</p>
+
+<div class="card">
+<h4>The Hashing Trade-Off</h4>
+<p>API hashing prevents simple string-based detection, but it introduces a different signature: the hash values and the hashing algorithm themselves become IOCs (Indicators of Compromise). Threat intelligence teams maintain databases of known API hash values. Using a custom seed (as Hell's Gate does with <code>0x7734773477347734</code>) helps, but the DJB2 algorithm structure is still recognizable.</p>
+</div>
+
+<div class="quiz" id="quiz4">
+<h4>Pop Quiz: Stub Anatomy</h4>
+<div class="quiz-q" data-correct="1">
+<p>Q1: In the ntdll syscall stub, at what byte offset is the SSN located?</p>
+<label data-opt="0"><input type="radio" name="q4_0"> Offset 0x00 (first byte)</label>
+<label data-opt="1"><input type="radio" name="q4_0"> Offset 0x04 (bytes 4-5, after <code>4c 8b d1 b8</code>)</label>
+<label data-opt="2"><input type="radio" name="q4_0"> Offset 0x08 (after the test instruction)</label>
+<label data-opt="3"><input type="radio" name="q4_0"> Offset 0x12 (right before syscall)</label>
+<div class="explain">The first 3 bytes are <code>mov r10, rcx</code> (4c 8b d1), byte 3 is the <code>mov eax</code> opcode (b8), and bytes 4-7 are the SSN as a 32-bit little-endian immediate. The SSN occupies bytes 4 and 5 (with bytes 6-7 being 0x00 since SSNs are small).</div>
+</div>
+<div class="quiz-q" data-correct="2">
+<p>Q2: How does Hell's Gate detect that a stub has NOT been hooked?</p>
+<label data-opt="0"><input type="radio" name="q4_1"> It checks if the function is in the EAT</label>
+<label data-opt="1"><input type="radio" name="q4_1"> It verifies the file hash of ntdll.dll</label>
+<label data-opt="2"><input type="radio" name="q4_1"> It checks that the first 4 bytes match <code>4c 8b d1 b8</code> (the expected stub pattern)</label>
+<label data-opt="3"><input type="radio" name="q4_1"> It compares against a known-clean copy on disk</label>
+<div class="explain">Hell's Gate validates that the stub starts with the expected byte sequence: 0x4c 0x8b 0xd1 (mov r10, rcx) followed by 0xb8 (mov eax, imm32). If these bytes are different (e.g., replaced by E9 for a JMP hook), the stub is hooked.</div>
+</div>
+<div class="quiz-q" data-correct="3">
+<p>Q3: Why does Hell's Gate use DJB2 hashing instead of string comparison for function names?</p>
+<label data-opt="0"><input type="radio" name="q4_2"> DJB2 is faster than strcmp</label>
+<label data-opt="1"><input type="radio" name="q4_2"> String comparison does not work with Unicode</label>
+<label data-opt="2"><input type="radio" name="q4_2"> The EAT does not store function names</label>
+<label data-opt="3"><input type="radio" name="q4_2"> To avoid embedding plaintext API names in the binary, which are trivially detected by static analysis</label>
+<div class="explain">Storing "NtAllocateVirtualMemory" as a string in the binary is an obvious detection signature. Hashing the target names and comparing hash values at runtime hides the intent from static string scanning, though the hash values themselves can become known IOCs.</div>
+</div>
+<button class="quiz-btn" onclick="gradeQuiz('quiz4')">Check Answers</button>
+<div class="quiz-result"></div>
+</div>
+
+<div class="nav-btns">
+<a href="module3.html">&larr; Previous: SSN Basics</a>
+<a class="primary" href="module5.html">Next: Hell's Gate Algorithm &rarr;</a>
+</div>
+</main>
+
+<script src="../../../assets/course.js"></script>
+</body>
+</html>
