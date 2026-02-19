@@ -16,6 +16,8 @@
   --code-font: 'Cascadia Code', 'Fira Code', monospace;
 }
 
+html { scroll-behavior: smooth; }
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
@@ -104,18 +106,16 @@ header .separator {
   display: flex;
   justify-content: center;
   gap: 40px;
-  padding: 24px 20px 10px;
   flex-wrap: wrap;
+  margin-top: 32px;
 }
 
-.stat {
-  text-align: center;
-}
+.stat { text-align: center; }
 
 .stat .num {
+  font-family: var(--code-font);
   font-size: 1.6rem;
   font-weight: 800;
-  font-family: var(--code-font);
   background: linear-gradient(135deg, #00d4ff, #c084fc);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -129,6 +129,118 @@ header .separator {
   margin-top: 2px;
 }
 
+/* CATEGORY NAV */
+.cat-nav {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  max-width: 1400px;
+  margin: 28px auto 0;
+  padding: 0 30px;
+}
+
+.cat-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-size: .78rem;
+  font-family: var(--code-font);
+  text-decoration: none;
+  transition: border-color .3s, color .3s, background .3s;
+  letter-spacing: .3px;
+  white-space: nowrap;
+}
+
+.cat-link:hover {
+  border-color: #7c3aed60;
+  color: var(--text);
+  background: var(--surface2);
+}
+
+.cat-link .cat-icon {
+  font-size: .6rem;
+  opacity: .5;
+}
+
+/* COURSE SECTIONS */
+.course-section {
+  position: relative;
+  z-index: 1;
+  max-width: 1400px;
+  margin: 0 auto;
+  scroll-margin-top: 24px;
+}
+
+.course-section:first-of-type {
+  margin-top: 40px;
+}
+
+/* CATEGORY HEADER */
+.cat-header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 30px;
+  margin-bottom: 8px;
+}
+
+.cat-header-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
+}
+
+.cat-header-content {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.cat-number {
+  font-family: var(--code-font);
+  font-size: .7rem;
+  font-weight: 800;
+  color: var(--dim);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  letter-spacing: 1px;
+  opacity: .7;
+}
+
+.cat-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -.3px;
+  line-height: 1.2;
+}
+
+.cat-desc {
+  font-size: .75rem;
+  color: var(--dim);
+  font-family: var(--code-font);
+  margin-top: 2px;
+}
+
+.cat-count {
+  font-size: .7rem;
+  color: var(--dim);
+  font-family: var(--code-font);
+  white-space: nowrap;
+  opacity: .6;
+}
+
 /* COURSE GRID */
 .courses {
   position: relative;
@@ -136,9 +248,7 @@ header .separator {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   gap: 30px;
-  max-width: 1400px;
-  margin: 40px auto;
-  padding: 0 30px 60px;
+  padding: 0 30px 40px;
 }
 
 /* COURSE CARD */
@@ -147,17 +257,12 @@ header .separator {
   border: 1px solid var(--border);
   border-radius: 16px;
   overflow: hidden;
-  transition: transform .3s, box-shadow .3s, border-color .3s;
-  cursor: pointer;
   text-decoration: none;
-  color: inherit;
-  display: block;
+  color: var(--text);
+  transition: transform .3s, border-color .3s, box-shadow .3s;
   position: relative;
-}
-
-.course-card:hover {
-  transform: translateY(-6px);
-  box-shadow: 0 20px 60px -15px rgba(0,0,0,.5);
+  display: flex;
+  flex-direction: column;
 }
 
 .course-card::before {
@@ -166,6 +271,7 @@ header .separator {
   inset: 0;
   border-radius: 16px;
   padding: 1px;
+  background: linear-gradient(135deg, #00d4ff, #7c3aed);
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
@@ -174,229 +280,66 @@ header .separator {
   pointer-events: none;
 }
 
-/* ACELDR CARD */
-.course-card.aceldr:hover {
-  border-color: #00d4ff40;
+.course-card:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 12px 40px rgba(0,0,0,.4);
 }
 
-.course-card.aceldr::before {
-  background: linear-gradient(135deg, #00d4ff, #7c3aed);
-}
+/* CARD COLOR THEMES */
+.course-card.aceldr:hover { border-color: #00d4ff40; }
+.course-card.aceldr::before { background: linear-gradient(135deg, #00d4ff, #7c3aed); }
+.course-card.aceldr:hover::before { opacity: 1; }
+.course-card.aceldr .card-banner { background: linear-gradient(135deg, #00d4ff15, #7c3aed15); border-bottom: 1px solid #00d4ff20; }
+.course-card.aceldr .card-banner .icon-wrap { background: linear-gradient(135deg, #00d4ff, #7c3aed); }
+.course-card.aceldr .card-title { background: linear-gradient(135deg, #00d4ff, #7c3aed); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.course-card.aceldr .module-item .num { background: #00d4ff20; color: #00d4ff; }
+.course-card.aceldr .launch-btn { background: linear-gradient(135deg, #00d4ff, #7c3aed); }
 
-.course-card.aceldr:hover::before {
-  opacity: 1;
-}
+.course-card.stardust:hover { border-color: #c084fc40; }
+.course-card.stardust::before { background: linear-gradient(135deg, #c084fc, #38bdf8); }
+.course-card.stardust:hover::before { opacity: 1; }
+.course-card.stardust .card-banner { background: linear-gradient(135deg, #c084fc15, #38bdf815); border-bottom: 1px solid #c084fc20; }
+.course-card.stardust .card-banner .icon-wrap { background: linear-gradient(135deg, #c084fc, #38bdf8); }
+.course-card.stardust .card-title { background: linear-gradient(135deg, #c084fc, #38bdf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.course-card.stardust .module-item .num { background: #c084fc20; color: #c084fc; }
+.course-card.stardust .launch-btn { background: linear-gradient(135deg, #c084fc, #38bdf8); }
 
-.course-card.aceldr .card-banner {
-  background: linear-gradient(135deg, #00d4ff15, #7c3aed15);
-  border-bottom: 1px solid #00d4ff20;
-}
+.course-card.layeredsyscall:hover { border-color: #22d3ee40; }
+.course-card.layeredsyscall::before { background: linear-gradient(135deg, #22d3ee, #f97316); }
+.course-card.layeredsyscall:hover::before { opacity: 1; }
+.course-card.layeredsyscall .card-banner { background: linear-gradient(135deg, #22d3ee15, #f9731615); border-bottom: 1px solid #22d3ee20; }
+.course-card.layeredsyscall .card-banner .icon-wrap { background: linear-gradient(135deg, #22d3ee, #f97316); }
+.course-card.layeredsyscall .card-title { background: linear-gradient(135deg, #22d3ee, #f97316); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.course-card.layeredsyscall .module-item .num { background: #22d3ee20; color: #22d3ee; }
+.course-card.layeredsyscall .launch-btn { background: linear-gradient(135deg, #22d3ee, #f97316); }
 
-.course-card.aceldr .card-banner .icon-wrap {
-  background: linear-gradient(135deg, #00d4ff, #7c3aed);
-}
+.course-card.hooka:hover { border-color: #4ade8040; }
+.course-card.hooka::before { background: linear-gradient(135deg, #4ade80, #2dd4bf); }
+.course-card.hooka:hover::before { opacity: 1; }
+.course-card.hooka .card-banner { background: linear-gradient(135deg, #4ade8015, #2dd4bf15); border-bottom: 1px solid #4ade8020; }
+.course-card.hooka .card-banner .icon-wrap { background: linear-gradient(135deg, #4ade80, #2dd4bf); }
+.course-card.hooka .card-title { background: linear-gradient(135deg, #4ade80, #2dd4bf); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.course-card.hooka .module-item .num { background: #4ade8020; color: #4ade80; }
+.course-card.hooka .launch-btn { background: linear-gradient(135deg, #4ade80, #2dd4bf); }
 
-.course-card.aceldr .card-title {
-  background: linear-gradient(135deg, #00d4ff, #7c3aed);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
+.course-card.functionpeekaboo:hover { border-color: #f9731640; }
+.course-card.functionpeekaboo::before { background: linear-gradient(135deg, #f97316, #ef4444); }
+.course-card.functionpeekaboo:hover::before { opacity: 1; }
+.course-card.functionpeekaboo .card-banner { background: linear-gradient(135deg, #f9731615, #ef444415); border-bottom: 1px solid #f9731620; }
+.course-card.functionpeekaboo .card-banner .icon-wrap { background: linear-gradient(135deg, #f97316, #ef4444); }
+.course-card.functionpeekaboo .card-title { background: linear-gradient(135deg, #f97316, #ef4444); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.course-card.functionpeekaboo .module-item .num { background: #f9731620; color: #f97316; }
+.course-card.functionpeekaboo .launch-btn { background: linear-gradient(135deg, #f97316, #ef4444); }
 
-.course-card.aceldr .module-item .num {
-  background: #00d4ff20;
-  color: #00d4ff;
-}
+.course-card.draugr:hover { border-color: #a855f740; }
+.course-card.draugr::before { background: linear-gradient(135deg, #a855f7, #ec4899); }
+.course-card.draugr:hover::before { opacity: 1; }
+.course-card.draugr .card-banner { background: linear-gradient(135deg, #a855f715, #ec489915); border-bottom: 1px solid #a855f720; }
+.course-card.draugr .card-banner .icon-wrap { background: linear-gradient(135deg, #a855f7, #ec4899); }
+.course-card.draugr .card-title { background: linear-gradient(135deg, #a855f7, #ec4899); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.course-card.draugr .module-item .num { background: #a855f720; color: #a855f7; }
+.course-card.draugr .launch-btn { background: linear-gradient(135deg, #a855f7, #ec4899); }
 
-.course-card.aceldr .launch-btn {
-  background: linear-gradient(135deg, #00d4ff, #7c3aed);
-}
-
-/* STARDUST CARD */
-.course-card.stardust:hover {
-  border-color: #c084fc40;
-}
-
-.course-card.stardust::before {
-  background: linear-gradient(135deg, #c084fc, #38bdf8);
-}
-
-.course-card.stardust:hover::before {
-  opacity: 1;
-}
-
-.course-card.stardust .card-banner {
-  background: linear-gradient(135deg, #c084fc15, #38bdf815);
-  border-bottom: 1px solid #c084fc20;
-}
-
-.course-card.stardust .card-banner .icon-wrap {
-  background: linear-gradient(135deg, #c084fc, #38bdf8);
-}
-
-.course-card.stardust .card-title {
-  background: linear-gradient(135deg, #c084fc, #38bdf8);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.course-card.stardust .module-item .num {
-  background: #c084fc20;
-  color: #c084fc;
-}
-
-.course-card.stardust .launch-btn {
-  background: linear-gradient(135deg, #c084fc, #38bdf8);
-}
-
-/* LAYEREDSYSCALL CARD */
-.course-card.layeredsyscall:hover {
-  border-color: #22d3ee40;
-}
-
-.course-card.layeredsyscall::before {
-  background: linear-gradient(135deg, #22d3ee, #f97316);
-}
-
-.course-card.layeredsyscall:hover::before {
-  opacity: 1;
-}
-
-.course-card.layeredsyscall .card-banner {
-  background: linear-gradient(135deg, #22d3ee15, #f9731615);
-  border-bottom: 1px solid #22d3ee20;
-}
-
-.course-card.layeredsyscall .card-banner .icon-wrap {
-  background: linear-gradient(135deg, #22d3ee, #f97316);
-}
-
-.course-card.layeredsyscall .card-title {
-  background: linear-gradient(135deg, #22d3ee, #f97316);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.course-card.layeredsyscall .module-item .num {
-  background: #22d3ee20;
-  color: #22d3ee;
-}
-
-.course-card.layeredsyscall .launch-btn {
-  background: linear-gradient(135deg, #22d3ee, #f97316);
-}
-
-/* HOOKA CARD */
-.course-card.hooka:hover {
-  border-color: #4ade8040;
-}
-
-.course-card.hooka::before {
-  background: linear-gradient(135deg, #4ade80, #2dd4bf);
-}
-
-.course-card.hooka:hover::before {
-  opacity: 1;
-}
-
-.course-card.hooka .card-banner {
-  background: linear-gradient(135deg, #4ade8015, #2dd4bf15);
-  border-bottom: 1px solid #4ade8020;
-}
-
-.course-card.hooka .card-banner .icon-wrap {
-  background: linear-gradient(135deg, #4ade80, #2dd4bf);
-}
-
-.course-card.hooka .card-title {
-  background: linear-gradient(135deg, #4ade80, #2dd4bf);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.course-card.hooka .module-item .num {
-  background: #4ade8020;
-  color: #4ade80;
-}
-
-.course-card.hooka .launch-btn {
-  background: linear-gradient(135deg, #4ade80, #2dd4bf);
-}
-
-/* FUNCTIONPEEKABOO CARD */
-.course-card.functionpeekaboo:hover {
-  border-color: #f9731640;
-}
-
-.course-card.functionpeekaboo::before {
-  background: linear-gradient(135deg, #f97316, #ef4444);
-}
-
-.course-card.functionpeekaboo:hover::before {
-  opacity: 1;
-}
-
-.course-card.functionpeekaboo .card-banner {
-  background: linear-gradient(135deg, #f9731615, #ef444415);
-  border-bottom: 1px solid #f9731620;
-}
-
-.course-card.functionpeekaboo .card-banner .icon-wrap {
-  background: linear-gradient(135deg, #f97316, #ef4444);
-}
-
-.course-card.functionpeekaboo .card-title {
-  background: linear-gradient(135deg, #f97316, #ef4444);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.course-card.functionpeekaboo .module-item .num {
-  background: #f9731620;
-  color: #f97316;
-}
-
-.course-card.functionpeekaboo .launch-btn {
-  background: linear-gradient(135deg, #f97316, #ef4444);
-}
-
-/* DRAUGR CARD */
-.course-card.draugr:hover {
-  border-color: #a855f740;
-}
-
-.course-card.draugr::before {
-  background: linear-gradient(135deg, #a855f7, #ec4899);
-}
-
-.course-card.draugr:hover::before {
-  opacity: 1;
-}
-
-.course-card.draugr .card-banner {
-  background: linear-gradient(135deg, #a855f715, #ec489915);
-  border-bottom: 1px solid #a855f720;
-}
-
-.course-card.draugr .card-banner .icon-wrap {
-  background: linear-gradient(135deg, #a855f7, #ec4899);
-}
-
-.course-card.draugr .card-title {
-  background: linear-gradient(135deg, #a855f7, #ec4899);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.course-card.draugr .module-item .num {
-  background: #a855f720;
-  color: #a855f7;
-}
-
-.course-card.draugr .launch-btn {
-  background: linear-gradient(135deg, #a855f7, #ec4899);
-}
-
-/* HELLSGATE CARD */
 .course-card.hellsgate:hover { border-color: #e11d4840; }
 .course-card.hellsgate::before { background: linear-gradient(135deg, #e11d48, #be123c); }
 .course-card.hellsgate:hover::before { opacity: 1; }
@@ -406,7 +349,6 @@ header .separator {
 .course-card.hellsgate .module-item .num { background: #e11d4820; color: #e11d48; }
 .course-card.hellsgate .launch-btn { background: linear-gradient(135deg, #e11d48, #be123c); }
 
-/* EKKO CARD */
 .course-card.ekko:hover { border-color: #8b5cf640; }
 .course-card.ekko::before { background: linear-gradient(135deg, #8b5cf6, #6d28d9); }
 .course-card.ekko:hover::before { opacity: 1; }
@@ -416,7 +358,6 @@ header .separator {
 .course-card.ekko .module-item .num { background: #8b5cf620; color: #8b5cf6; }
 .course-card.ekko .launch-btn { background: linear-gradient(135deg, #8b5cf6, #6d28d9); }
 
-/* SILENTMOONWALK CARD */
 .course-card.silentmoonwalk:hover { border-color: #06b6d440; }
 .course-card.silentmoonwalk::before { background: linear-gradient(135deg, #06b6d4, #0891b2); }
 .course-card.silentmoonwalk:hover::before { opacity: 1; }
@@ -426,7 +367,6 @@ header .separator {
 .course-card.silentmoonwalk .module-item .num { background: #06b6d420; color: #06b6d4; }
 .course-card.silentmoonwalk .launch-btn { background: linear-gradient(135deg, #06b6d4, #0891b2); }
 
-/* POOLPARTY CARD */
 .course-card.poolparty:hover { border-color: #f59e0b40; }
 .course-card.poolparty::before { background: linear-gradient(135deg, #f59e0b, #d97706); }
 .course-card.poolparty:hover::before { opacity: 1; }
@@ -436,7 +376,6 @@ header .separator {
 .course-card.poolparty .module-item .num { background: #f59e0b20; color: #f59e0b; }
 .course-card.poolparty .launch-btn { background: linear-gradient(135deg, #f59e0b, #d97706); }
 
-/* THREADLESSINJECT CARD */
 .course-card.threadlessinject:hover { border-color: #14b8a640; }
 .course-card.threadlessinject::before { background: linear-gradient(135deg, #14b8a6, #0d9488); }
 .course-card.threadlessinject:hover::before { opacity: 1; }
@@ -446,7 +385,6 @@ header .separator {
 .course-card.threadlessinject .module-item .num { background: #14b8a620; color: #14b8a6; }
 .course-card.threadlessinject .launch-btn { background: linear-gradient(135deg, #14b8a6, #0d9488); }
 
-/* DONUT CARD */
 .course-card.donut:hover { border-color: #ec489940; }
 .course-card.donut::before { background: linear-gradient(135deg, #ec4899, #db2777); }
 .course-card.donut:hover::before { opacity: 1; }
@@ -456,7 +394,6 @@ header .separator {
 .course-card.donut .module-item .num { background: #ec489920; color: #ec4899; }
 .course-card.donut .launch-btn { background: linear-gradient(135deg, #ec4899, #db2777); }
 
-/* SHELLCODEFLUCTUATION CARD */
 .course-card.shellcodefluctuation:hover { border-color: #10b98140; }
 .course-card.shellcodefluctuation::before { background: linear-gradient(135deg, #10b981, #059669); }
 .course-card.shellcodefluctuation:hover::before { opacity: 1; }
@@ -466,7 +403,6 @@ header .separator {
 .course-card.shellcodefluctuation .module-item .num { background: #10b98120; color: #10b981; }
 .course-card.shellcodefluctuation .launch-btn { background: linear-gradient(135deg, #10b981, #059669); }
 
-/* SHELLGHOST CARD */
 .course-card.shellghost:hover { border-color: #64748b40; }
 .course-card.shellghost::before { background: linear-gradient(135deg, #64748b, #475569); }
 .course-card.shellghost:hover::before { opacity: 1; }
@@ -476,7 +412,6 @@ header .separator {
 .course-card.shellghost .module-item .num { background: #64748b20; color: #64748b; }
 .course-card.shellghost .launch-btn { background: linear-gradient(135deg, #64748b, #475569); }
 
-/* SHOGGOTH CARD */
 .course-card.shoggoth:hover { border-color: #a855f740; }
 .course-card.shoggoth::before { background: linear-gradient(135deg, #a855f7, #7c3aed); }
 .course-card.shoggoth:hover::before { opacity: 1; }
@@ -486,7 +421,6 @@ header .separator {
 .course-card.shoggoth .module-item .num { background: #a855f720; color: #a855f7; }
 .course-card.shoggoth .launch-btn { background: linear-gradient(135deg, #a855f7, #7c3aed); }
 
-/* PROCESSGHOSTING CARD */
 .course-card.processghosting:hover { border-color: #6366f140; }
 .course-card.processghosting::before { background: linear-gradient(135deg, #6366f1, #4f46e5); }
 .course-card.processghosting:hover::before { opacity: 1; }
@@ -496,7 +430,6 @@ header .separator {
 .course-card.processghosting .module-item .num { background: #6366f120; color: #6366f1; }
 .course-card.processghosting .launch-btn { background: linear-gradient(135deg, #6366f1, #4f46e5); }
 
-/* COFFLOADER CARD */
 .course-card.coffloader:hover { border-color: #f9731640; }
 .course-card.coffloader::before { background: linear-gradient(135deg, #f97316, #ea580c); }
 .course-card.coffloader:hover::before { opacity: 1; }
@@ -506,7 +439,6 @@ header .separator {
 .course-card.coffloader .module-item .num { background: #f9731620; color: #f97316; }
 .course-card.coffloader .launch-btn { background: linear-gradient(135deg, #f97316, #ea580c); }
 
-/* NIDHOGG CARD */
 .course-card.nidhogg:hover { border-color: #dc262640; }
 .course-card.nidhogg::before { background: linear-gradient(135deg, #dc2626, #b91c1c); }
 .course-card.nidhogg:hover::before { opacity: 1; }
@@ -527,46 +459,46 @@ header .separator {
 
 /* CARD BANNER */
 .card-banner {
-  padding: 28px 28px 24px;
   display: flex;
-  align-items: flex-start;
-  gap: 18px;
+  align-items: center;
+  gap: 14px;
+  padding: 24px;
+  border-bottom: 1px solid var(--border);
 }
 
-.icon-wrap {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
+.card-banner .icon-wrap {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 1.4rem;
 }
 
 .card-title {
-  font-size: 1.4rem;
-  font-weight: 800;
-  line-height: 1.2;
+  font-size: 1.15rem;
+  font-weight: 700;
 }
 
 .card-subtitle {
+  font-size: .72rem;
   color: var(--dim);
-  font-size: .82rem;
-  margin-top: 4px;
+  margin-top: 2px;
   font-family: var(--code-font);
 }
 
 /* CARD BODY */
 .card-body {
-  padding: 0 28px 6px;
+  padding: 0 24px 6px;
+  flex: 1;
 }
 
 .card-desc {
+  font-size: .82rem;
   color: #94a3b8;
-  font-size: .88rem;
-  line-height: 1.6;
-  margin-bottom: 20px;
+  line-height: 1.55;
+  margin: 16px 0 14px;
 }
 
 /* TAGS */
@@ -574,105 +506,109 @@ header .separator {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .tag {
-  font-size: .68rem;
-  padding: 4px 10px;
+  font-size: .65rem;
+  padding: 3px 10px;
   border-radius: 20px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .5px;
 }
 
-.tag.beginner { background: #10b98120; color: #10b981; }
-.tag.intermediate { background: #f59e0b20; color: #f59e0b; }
-.tag.advanced { background: #ef444420; color: #ef4444; }
-.tag.lang { background: #64748b20; color: #94a3b8; }
+.tag.beginner { background: #22c55e18; color: #4ade80; border: 1px solid #22c55e30; }
+.tag.intermediate { background: #eab30818; color: #fbbf24; border: 1px solid #eab30830; }
+.tag.advanced { background: #ef444418; color: #f87171; border: 1px solid #ef444430; }
+.tag.lang { background: var(--surface2); color: var(--dim); border: 1px solid var(--border); }
 
 /* MODULE LIST */
 .module-list {
   list-style: none;
-  margin: 0;
-  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .module-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 0;
-  font-size: .82rem;
+  font-size: .78rem;
   color: #94a3b8;
+  padding: 5px 0;
 }
 
 .module-item .num {
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
+  font-family: var(--code-font);
+  font-size: .65rem;
+  font-weight: 700;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: .68rem;
-  font-weight: 800;
+  border-radius: 6px;
   flex-shrink: 0;
-  font-family: var(--code-font);
 }
 
-.module-item .diff-dot {
+.diff-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-.diff-green { background: #10b981; }
-.diff-yellow { background: #f59e0b; }
-.diff-red { background: #ef4444; }
+.diff-dot.diff-green { background: #4ade80; }
+.diff-dot.diff-yellow { background: #fbbf24; }
+.diff-dot.diff-red { background: #f87171; }
 
 /* CARD FOOTER */
 .card-footer {
-  padding: 20px 28px 24px;
+  padding: 16px 24px 24px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  border-top: 1px solid var(--border);
+  margin-top: auto;
 }
 
 .meta {
   display: flex;
-  gap: 18px;
+  gap: 16px;
 }
 
 .meta-item {
-  font-size: .75rem;
-  color: var(--dim);
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  font-size: .72rem;
+  color: var(--dim);
+  font-family: var(--code-font);
 }
 
 .meta-item svg {
   width: 14px;
   height: 14px;
-  opacity: .6;
 }
 
 .launch-btn {
-  padding: 10px 28px;
   border: none;
-  border-radius: 10px;
   color: #fff;
+  font-size: .75rem;
   font-weight: 700;
-  font-size: .85rem;
+  padding: 8px 20px;
+  border-radius: 8px;
   cursor: pointer;
-  transition: transform .15s, box-shadow .3s;
-  letter-spacing: .3px;
+  font-family: var(--code-font);
+  letter-spacing: .5px;
+  transition: opacity .3s, transform .2s;
 }
 
 .launch-btn:hover {
-  transform: scale(1.05);
-  box-shadow: 0 8px 25px -5px rgba(0,0,0,.4);
+  opacity: .9;
+  transform: scale(1.04);
 }
 
 /* FOOTER */
@@ -690,13 +626,23 @@ footer {
 }
 
 /* RESPONSIVE */
+@media (max-width: 900px) {
+  .cat-header-content { gap: 10px; }
+  .cat-count { display: none; }
+}
+
 @media (max-width: 500px) {
   header h1 { font-size: 1.6rem; }
-  .courses { grid-template-columns: 1fr; padding: 0 16px 40px; gap: 20px; }
+  .courses { grid-template-columns: 1fr; padding: 0 16px 30px; gap: 20px; }
   .card-banner { padding: 20px; }
   .card-body { padding: 0 20px 6px; }
   .card-footer { padding: 16px 20px 20px; }
   .stats-bar { gap: 24px; }
+  .cat-nav { padding: 0 16px; gap: 6px 8px; }
+  .cat-link { padding: 6px 12px; font-size: .72rem; }
+  .cat-header { padding: 0 16px; flex-direction: column; gap: 8px; text-align: center; }
+  .cat-header-line { width: 60px; align-self: center; }
+  .cat-header-content { flex-direction: column; gap: 8px; }
 }
 </style>
 </head>
@@ -723,12 +669,42 @@ footer {
     <div class="label">Modules</div>
   </div>
   <div class="stat">
+    <div class="num">6</div>
+    <div class="label">Categories</div>
+  </div>
+  <div class="stat">
     <div class="num">3</div>
     <div class="label">Difficulty Tiers</div>
   </div>
 </div>
 
-<div class="courses">
+<nav class="cat-nav">
+  <a href="#cat-loaders" class="cat-link"><span class="cat-icon">&#x2B22;</span> Reflective Loading &amp; PIC</a>
+  <a href="#cat-syscalls" class="cat-link"><span class="cat-icon">&#x2B22;</span> Syscalls &amp; API Evasion</a>
+  <a href="#cat-injection" class="cat-link"><span class="cat-icon">&#x2B22;</span> Process Injection</a>
+  <a href="#cat-sleep" class="cat-link"><span class="cat-icon">&#x2B22;</span> Sleep &amp; Memory Evasion</a>
+  <a href="#cat-callstack" class="cat-link"><span class="cat-icon">&#x2B22;</span> Call Stack &amp; Control Flow</a>
+  <a href="#cat-payload" class="cat-link"><span class="cat-icon">&#x2B22;</span> Payload Engineering &amp; Kernel</a>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- CATEGORY 1: REFLECTIVE LOADING & PIC                   -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<section id="cat-loaders" class="course-section">
+  <div class="cat-header">
+    <div class="cat-header-line"></div>
+    <div class="cat-header-content">
+      <span class="cat-number">01</span>
+      <div>
+        <h2 class="cat-title">Reflective Loading &amp; PIC</h2>
+        <p class="cat-desc">Building position-independent loaders</p>
+      </div>
+      <span class="cat-count">5 courses &middot; 43 modules</span>
+    </div>
+    <div class="cat-header-line"></div>
+  </div>
+
+  <div class="courses">
 
   <!-- ACELDR CARD -->
   <a href="Project/AceLdr/AceLdr_index.html" class="course-card aceldr">
@@ -741,20 +717,17 @@ footer {
         <div class="card-subtitle">Memory Evasion Masterclass</div>
       </div>
     </div>
-
     <div class="card-body">
       <p class="card-desc">
         Deep dive into reflective DLL loading, return address spoofing, IAT hooking, and the FOLIAGE sleep mask.
         Master Windows memory internals from PE parsing to full evasion chains.
       </p>
-
       <div class="tags">
         <span class="tag beginner">Beginner</span>
         <span class="tag intermediate">Intermediate</span>
         <span class="tag advanced">Advanced</span>
         <span class="tag lang">C / ASM</span>
       </div>
-
       <ul class="module-list">
         <li class="module-item"><span class="num">1</span><span class="diff-dot diff-green"></span> Windows Memory 101</li>
         <li class="module-item"><span class="num">2</span><span class="diff-dot diff-green"></span> PE File Format</li>
@@ -767,7 +740,6 @@ footer {
         <li class="module-item"><span class="num">9</span><span class="diff-dot diff-red"></span> Full Chain &amp; Integration</li>
       </ul>
     </div>
-
     <div class="card-footer">
       <div class="meta">
         <div class="meta-item">
@@ -794,20 +766,17 @@ footer {
         <div class="card-subtitle">Modern Implant Template Masterclass</div>
       </div>
     </div>
-
     <div class="card-body">
       <p class="card-desc">
         Build position-independent C++20 shellcode from scratch. No PE headers, no DLL, no loader stub &mdash; pure PIC implant code
         with compile-time hashing, PEB walking, and module stomping.
       </p>
-
       <div class="tags">
         <span class="tag beginner">Beginner</span>
         <span class="tag intermediate">Intermediate</span>
         <span class="tag advanced">Advanced</span>
         <span class="tag lang">C++20 / NASM</span>
       </div>
-
       <ul class="module-list">
         <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Why Stardust Exists</li>
         <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> C++20 for Shellcode</li>
@@ -821,7 +790,6 @@ footer {
         <li class="module-item"><span class="num">10</span><span class="diff-dot diff-red"></span> Full Chain &amp; Extending</li>
       </ul>
     </div>
-
     <div class="card-footer">
       <div class="meta">
         <div class="meta-item">
@@ -837,43 +805,87 @@ footer {
     </div>
   </a>
 
-  <!-- LAYEREDSYSCALL CARD -->
-  <a href="Project/LayeredSyscall/LayeredSyscall_index.html" class="course-card layeredsyscall">
+  <!-- CRYSTALLOADERS CARD -->
+  <a href="Project/CrystalLoaders/CrystalLoaders_index.html" class="course-card crystalloaders">
     <div class="card-banner">
       <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
       </div>
       <div>
-        <div class="card-title">LayeredSyscall</div>
-        <div class="card-subtitle">VEH Syscall Evasion Masterclass</div>
+        <div class="card-title">Crystal-Loaders</div>
+        <div class="card-subtitle">PIC Reflective Loaders with Crystal Palace</div>
       </div>
     </div>
-
     <div class="card-body">
       <p class="card-desc">
-        Generate legitimate call stack frames with indirect syscalls by abusing Vectored Exception Handling.
-        Hardware breakpoints, CPU trap flags, and context manipulation to bypass user-land EDR hooks.
+        Position-independent reflective DLL loading built with Crystal Palace: spec-driven PIC linker,
+        LibTCG PE loading, LibGate indirect syscalls, DFR, Beacon User Data, and extending loaders beyond PoC.
       </p>
-
       <div class="tags">
         <span class="tag beginner">Beginner</span>
         <span class="tag intermediate">Intermediate</span>
         <span class="tag advanced">Advanced</span>
-        <span class="tag lang">C++ / x64</span>
+        <span class="tag lang">C / x64 PIC</span>
       </div>
-
       <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> EDR Hooks &amp; Detection</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Syscall Internals &amp; SSN</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> Exception Handling &amp; VEH</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Hardware Breakpoints</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Dual-Handler Architecture</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> Call Stack Construction</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Argument Marshalling</li>
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> The Loader Problem</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Crystal Palace</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-yellow"></span> LibTCG</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> LibGate Syscalls</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> UDRL Walkthrough</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> Beacon User Data</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Post-Ex &amp; Aggressor</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Extending Loaders</li>
+      </ul>
+    </div>
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          8 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  <!-- DONUT CARD -->
+  <a href="Project/Donut/Donut_index.html" class="course-card donut">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="4.93" y1="4.93" x2="9.17" y2="9.17"/><line x1="14.83" y1="14.83" x2="19.07" y2="19.07"/></svg>
+      </div>
+      <div>
+        <div class="card-title">Donut</div>
+        <div class="card-subtitle">PE-to-Shellcode Masterclass</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p class="card-desc">
+        Convert any EXE, DLL, VBScript, JScript, or .NET assembly into position-independent shellcode.
+        In-memory PE loading, CLR hosting, Chaskey encryption, and AMSI/ETW/WLDP bypass stubs.
+      </p>
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C / x86/x64</span>
+      </div>
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> The PE-to-Shellcode Problem</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> PE Loader Fundamentals</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> .NET CLR Hosting</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Donut Module Architecture</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> The Donut Loader</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Encryption &amp; Anti-Detection</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Advanced Payload Types</li>
         <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Detection</li>
       </ul>
     </div>
-
     <div class="card-footer">
       <div class="meta">
         <div class="meta-item">
@@ -889,43 +901,39 @@ footer {
     </div>
   </a>
 
-  <!-- HOOKA CARD -->
-  <a href="Project/Hooka/Hooka_index.html" class="course-card hooka">
+  <!-- COFFLOADER CARD -->
+  <a href="Project/COFFLoader/COFFLoader_index.html" class="course-card coffloader">
     <div class="card-banner">
       <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0022 16z"/><polyline points="7.5 4.21 12 6.81 16.5 4.21"/><polyline points="7.5 19.79 7.5 14.6 3 12"/><polyline points="21 12 16.5 14.6 16.5 19.79"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0022 16z"/><line x1="7.5" y1="4.21" x2="12" y2="6.81"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
       </div>
       <div>
-        <div class="card-title">Hooka</div>
-        <div class="card-subtitle">Shellcode Loader Generator Masterclass</div>
+        <div class="card-title">COFFLoader</div>
+        <div class="card-subtitle">Beacon Object File Loader</div>
       </div>
     </div>
-
     <div class="card-body">
       <p class="card-desc">
-        Generate shellcode loaders with comprehensive evasion. Injection techniques, syscall gates, NTDLL unhooking,
-        AMSI/ETW patching, sandbox detection &mdash; all from a Go library and CLI generator.
+        Load and execute Beacon Object Files outside Cobalt Strike. COFF parsing, section loading, symbol resolution,
+        relocation processing, and implementing the Beacon API compatibility layer.
       </p>
-
       <div class="tags">
         <span class="tag beginner">Beginner</span>
         <span class="tag intermediate">Intermediate</span>
         <span class="tag advanced">Advanced</span>
-        <span class="tag lang">Go / Windows</span>
+        <span class="tag lang">C / x64</span>
       </div>
-
       <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Shellcode Loader Intro</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Injection Techniques</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> Syscalls &amp; Gates</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Unhooking &amp; Patching</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Sandbox &amp; Protection</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Encryption &amp; Obfuscation</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> The Hooka Go Library</li>
-        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> CLI Generator &amp; Full Chain</li>
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> What Are Beacon Object Files?</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> COFF File Format Deep Dive</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> The BOF API Contract</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> COFF Section Loading</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Symbol Resolution &amp; Linking</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Relocation Processing</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> The Beacon Compatibility Layer</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Writing BOFs</li>
       </ul>
     </div>
-
     <div class="card-footer">
       <div class="meta">
         <div class="meta-item">
@@ -941,109 +949,27 @@ footer {
     </div>
   </a>
 
-  <!-- FUNCTIONPEEKABOO CARD -->
-  <a href="Project/FunctionPeekaboo/FunctionPeekaboo_index.html" class="course-card functionpeekaboo">
-    <div class="card-banner">
-      <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M20 12c-1.5 0-3-2-4-2s-2.5 2-4 2-3-2-4-2-2.5 2-4 2"/><path d="M20 12c-1.5 0-3 2-4 2s-2.5-2-4-2-3 2-4 2-2.5-2-4-2"/></svg>
-      </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- CATEGORY 2: SYSCALLS & API EVASION                     -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<section id="cat-syscalls" class="course-section">
+  <div class="cat-header">
+    <div class="cat-header-line"></div>
+    <div class="cat-header-content">
+      <span class="cat-number">02</span>
       <div>
-        <div class="card-title">FunctionPeekaboo</div>
-        <div class="card-subtitle">LLVM Self-Masking Functions</div>
+        <h2 class="cat-title">Syscalls &amp; API Evasion</h2>
+        <p class="cat-desc">Stealthy OS interaction</p>
       </div>
+      <span class="cat-count">3 courses &middot; 24 modules</span>
     </div>
+    <div class="cat-header-line"></div>
+  </div>
 
-    <div class="card-body">
-      <p class="card-desc">
-        Compiler-level per-function self-masking via LLVM backend modifications. XOR encryption keeps ~98% of code masked
-        even at sleep&nbsp;0, defeating memory scanners while maintaining CET compatibility.
-      </p>
-
-      <div class="tags">
-        <span class="tag beginner">Beginner</span>
-        <span class="tag intermediate">Intermediate</span>
-        <span class="tag advanced">Advanced</span>
-        <span class="tag lang">C++ / LLVM</span>
-      </div>
-
-      <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Memory Scanning &amp; Sleep</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> LLVM Compiler Architecture</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> PE Internals &amp; Sections</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Registration &amp; X86RetModPass</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Prologue &amp; Epilogue Stubs</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> The Handler &amp; XOR Engine</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Init &amp; Runtime Flow</li>
-        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Detection, CET &amp; Nighthawk</li>
-      </ul>
-    </div>
-
-    <div class="card-footer">
-      <div class="meta">
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
-          8 Modules
-        </div>
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          Deep Dive
-        </div>
-      </div>
-      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
-    </div>
-  </a>
-
-  <!-- DRAUGR CARD -->
-  <a href="Project/Draugr/Draugr_index.html" class="course-card draugr">
-    <div class="card-banner">
-      <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><path d="M13 19l6-6"/><path d="M16 16l4 4"/><path d="M19 21l2-2"/><path d="M14.5 6.5L18 3h3v3l-3.5 3.5"/></svg>
-      </div>
-      <div>
-        <div class="card-title">Draugr</div>
-        <div class="card-subtitle">Synthetic Stack Frame Evasion</div>
-      </div>
-    </div>
-
-    <div class="card-body">
-      <p class="card-desc">
-        Construct synthetic call stacks that fool EDR stack walkers. Beacon Object Files, x64 unwind metadata parsing,
-        JMP RBX gadgets, and indirect syscalls &mdash; making shellcode look like normal thread initialization.
-      </p>
-
-      <div class="tags">
-        <span class="tag beginner">Beginner</span>
-        <span class="tag intermediate">Intermediate</span>
-        <span class="tag advanced">Advanced</span>
-        <span class="tag lang">C++ / ASM / BOF</span>
-      </div>
-
-      <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> EDR Call Stack Analysis</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Beacon Object Files</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> x64 Stack Unwinding</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> SSN &amp; Indirect Syscalls</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Spoof Assembly Routine</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> Synthetic Frame Construction</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Gadgets &amp; Clean Return</li>
-        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Detection</li>
-      </ul>
-    </div>
-
-    <div class="card-footer">
-      <div class="meta">
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
-          8 Modules
-        </div>
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          Deep Dive
-        </div>
-      </div>
-      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
-    </div>
-  </a>
+  <div class="courses">
 
   <!-- HELLSGATE CARD -->
   <a href="Project/HellsGate/HellsGate_index.html" class="course-card hellsgate">
@@ -1093,37 +1019,37 @@ footer {
     </div>
   </a>
 
-  <!-- EKKO CARD -->
-  <a href="Project/Ekko/Ekko_index.html" class="course-card ekko">
+  <!-- LAYEREDSYSCALL CARD -->
+  <a href="Project/LayeredSyscall/LayeredSyscall_index.html" class="course-card layeredsyscall">
     <div class="card-banner">
       <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
       </div>
       <div>
-        <div class="card-title">Ekko</div>
-        <div class="card-subtitle">Sleep Obfuscation Masterclass</div>
+        <div class="card-title">LayeredSyscall</div>
+        <div class="card-subtitle">VEH Syscall Evasion Masterclass</div>
       </div>
     </div>
     <div class="card-body">
       <p class="card-desc">
-        Timer-based sleep obfuscation using ROP chains, RC4 encryption, and NtContinue context manipulation.
-        Encrypt implant memory during sleep to evade idle-time memory scanners.
+        Generate legitimate call stack frames with indirect syscalls by abusing Vectored Exception Handling.
+        Hardware breakpoints, CPU trap flags, and context manipulation to bypass user-land EDR hooks.
       </p>
       <div class="tags">
         <span class="tag beginner">Beginner</span>
         <span class="tag intermediate">Intermediate</span>
         <span class="tag advanced">Advanced</span>
-        <span class="tag lang">C / x64</span>
+        <span class="tag lang">C++ / x64</span>
       </div>
       <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Why Sleep Obfuscation Matters</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Timer Queues &amp; Waitable Timers</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> RC4 Encryption in Evasion</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> ROP Gadgets &amp; NtContinue</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> The Ekko Timer Chain</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Context Manipulation</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Stack &amp; Return Address Handling</li>
-        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain, Detection &amp; Variants</li>
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> EDR Hooks &amp; Detection</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Syscall Internals &amp; SSN</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> Exception Handling &amp; VEH</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Hardware Breakpoints</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Dual-Handler Architecture</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> Call Stack Construction</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Argument Marshalling</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Detection</li>
       </ul>
     </div>
     <div class="card-footer">
@@ -1141,37 +1067,37 @@ footer {
     </div>
   </a>
 
-  <!-- SILENTMOONWALK CARD -->
-  <a href="Project/SilentMoonwalk/SilentMoonwalk_index.html" class="course-card silentmoonwalk">
+  <!-- HOOKA CARD -->
+  <a href="Project/Hooka/Hooka_index.html" class="course-card hooka">
     <div class="card-banner">
       <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0022 16z"/><polyline points="7.5 4.21 12 6.81 16.5 4.21"/><polyline points="7.5 19.79 7.5 14.6 3 12"/><polyline points="21 12 16.5 14.6 16.5 19.79"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
       </div>
       <div>
-        <div class="card-title">SilentMoonwalk</div>
-        <div class="card-subtitle">Dynamic Call Stack Spoofing</div>
+        <div class="card-title">Hooka</div>
+        <div class="card-subtitle">Shellcode Loader Generator Masterclass</div>
       </div>
     </div>
     <div class="card-body">
       <p class="card-desc">
-        Dynamically spoof call stacks to defeat EDR stack walking. Stack desynchronization, synthetic RUNTIME_FUNCTION
-        entries, ROP-driven frame fabrication, and full syscall dispatch with clean stacks.
+        Generate shellcode loaders with comprehensive evasion. Injection techniques, syscall gates, NTDLL unhooking,
+        AMSI/ETW patching, sandbox detection &mdash; all from a Go library and CLI generator.
       </p>
       <div class="tags">
         <span class="tag beginner">Beginner</span>
         <span class="tag intermediate">Intermediate</span>
         <span class="tag advanced">Advanced</span>
-        <span class="tag lang">C++ / x64</span>
+        <span class="tag lang">Go / Windows</span>
       </div>
       <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> EDR Call Stack Telemetry</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> x64 Stack Frames &amp; Unwinding</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> ROP Fundamentals</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Stack Desynchronization Theory</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Gadget Discovery &amp; Selection</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Synthetic Frame Construction</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> The Full Spoof Engine</li>
-        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Detection &amp; Countermeasures</li>
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Shellcode Loader Intro</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Injection Techniques</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> Syscalls &amp; Gates</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Unhooking &amp; Patching</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Sandbox &amp; Protection</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Encryption &amp; Obfuscation</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> The Hooka Go Library</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> CLI Generator &amp; Full Chain</li>
       </ul>
     </div>
     <div class="card-footer">
@@ -1188,6 +1114,28 @@ footer {
       <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
     </div>
   </a>
+
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- CATEGORY 3: PROCESS INJECTION                          -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<section id="cat-injection" class="course-section">
+  <div class="cat-header">
+    <div class="cat-header-line"></div>
+    <div class="cat-header-content">
+      <span class="cat-number">03</span>
+      <div>
+        <h2 class="cat-title">Process Injection</h2>
+        <p class="cat-desc">Getting code into remote processes</p>
+      </div>
+      <span class="cat-count">4 courses &middot; 33 modules</span>
+    </div>
+    <div class="cat-header-line"></div>
+  </div>
+
+  <div class="courses">
 
   <!-- POOLPARTY CARD -->
   <a href="Project/PoolParty/PoolParty_index.html" class="course-card poolparty">
@@ -1285,69 +1233,21 @@ footer {
     </div>
   </a>
 
-  <!-- DONUT CARD -->
-  <a href="Project/Donut/Donut_index.html" class="course-card donut">
+  <!-- PROCESSGHOSTING CARD -->
+  <a href="Project/ProcessGhosting/ProcessGhosting_index.html" class="course-card processghosting">
     <div class="card-banner">
       <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="4.93" y1="4.93" x2="9.17" y2="9.17"/><line x1="14.83" y1="14.83" x2="19.07" y2="19.07"/></svg>
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="9" y1="13" x2="15" y2="13" stroke-dasharray="2 2"/></svg>
       </div>
       <div>
-        <div class="card-title">Donut</div>
-        <div class="card-subtitle">PE-to-Shellcode Masterclass</div>
+        <div class="card-title">ProcessGhosting</div>
+        <div class="card-subtitle">Ghost Process Evasion</div>
       </div>
     </div>
     <div class="card-body">
       <p class="card-desc">
-        Convert any EXE, DLL, VBScript, JScript, or .NET assembly into position-independent shellcode.
-        In-memory PE loading, CLR hosting, Chaskey encryption, and AMSI/ETW/WLDP bypass stubs.
-      </p>
-      <div class="tags">
-        <span class="tag beginner">Beginner</span>
-        <span class="tag intermediate">Intermediate</span>
-        <span class="tag advanced">Advanced</span>
-        <span class="tag lang">C / x86/x64</span>
-      </div>
-      <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> The PE-to-Shellcode Problem</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> PE Loader Fundamentals</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> .NET CLR Hosting</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Donut Module Architecture</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> The Donut Loader</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Encryption &amp; Anti-Detection</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Advanced Payload Types</li>
-        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Detection</li>
-      </ul>
-    </div>
-    <div class="card-footer">
-      <div class="meta">
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
-          8 Modules
-        </div>
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          Deep Dive
-        </div>
-      </div>
-      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
-    </div>
-  </a>
-
-  <!-- SHELLCODEFLUCTUATION CARD -->
-  <a href="Project/ShellcodeFluctuation/ShellcodeFluctuation_index.html" class="course-card shellcodefluctuation">
-    <div class="card-banner">
-      <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-      </div>
-      <div>
-        <div class="card-title">ShellcodeFluctuation</div>
-        <div class="card-subtitle">Memory Fluctuation Evasion</div>
-      </div>
-    </div>
-    <div class="card-body">
-      <p class="card-desc">
-        Toggle shellcode memory between encrypted RW and executable RX on every sleep cycle.
-        Hook Sleep to XOR-encrypt shellcode during idle, defeating Moneta, pe-sieve, and BeaconEye scanners.
+        Create processes from delete-pending files that AV/EDR cannot scan. Write a payload to a temp file,
+        mark it delete-pending, create a section, spawn the process, then close the handle &mdash; the file vanishes.
       </p>
       <div class="tags">
         <span class="tag beginner">Beginner</span>
@@ -1356,13 +1256,13 @@ footer {
         <span class="tag lang">C++ / x64</span>
       </div>
       <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Memory Scanning Threat Model</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> XOR Encryption for Memory Evasion</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> VirtualProtect &amp; Page Permissions</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Sleep Function Hooking</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> The Fluctuation Algorithm</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Shellcode Region Tracking</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Thread Stack Spoofing Integration</li>
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Process Creation Internals</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> PE Tampering Techniques Overview</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> File System States &amp; Delete-Pending</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Creating the Ghost File</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Section Mapping from Ghost</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Process &amp; Thread Creation</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> AV/EDR Scan Timing Window</li>
         <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Comparison</li>
       </ul>
     </div>
@@ -1429,6 +1329,312 @@ footer {
     </div>
   </a>
 
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- CATEGORY 4: SLEEP & MEMORY EVASION                     -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<section id="cat-sleep" class="course-section">
+  <div class="cat-header">
+    <div class="cat-header-line"></div>
+    <div class="cat-header-content">
+      <span class="cat-number">04</span>
+      <div>
+        <h2 class="cat-title">Sleep &amp; Memory Evasion</h2>
+        <p class="cat-desc">Hiding in memory at rest</p>
+      </div>
+      <span class="cat-count">3 courses &middot; 25 modules</span>
+    </div>
+    <div class="cat-header-line"></div>
+  </div>
+
+  <div class="courses">
+
+  <!-- EKKO CARD -->
+  <a href="Project/Ekko/Ekko_index.html" class="course-card ekko">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      </div>
+      <div>
+        <div class="card-title">Ekko</div>
+        <div class="card-subtitle">Sleep Obfuscation Masterclass</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p class="card-desc">
+        Timer-based sleep obfuscation using ROP chains, RC4 encryption, and NtContinue context manipulation.
+        Encrypt implant memory during sleep to evade idle-time memory scanners.
+      </p>
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C / x64</span>
+      </div>
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Why Sleep Obfuscation Matters</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Timer Queues &amp; Waitable Timers</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> RC4 Encryption in Evasion</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> ROP Gadgets &amp; NtContinue</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> The Ekko Timer Chain</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Context Manipulation</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Stack &amp; Return Address Handling</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain, Detection &amp; Variants</li>
+      </ul>
+    </div>
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          8 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  <!-- SHELLCODEFLUCTUATION CARD -->
+  <a href="Project/ShellcodeFluctuation/ShellcodeFluctuation_index.html" class="course-card shellcodefluctuation">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      </div>
+      <div>
+        <div class="card-title">ShellcodeFluctuation</div>
+        <div class="card-subtitle">Memory Fluctuation Evasion</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p class="card-desc">
+        Toggle shellcode memory between encrypted RW and executable RX on every sleep cycle.
+        Hook Sleep to XOR-encrypt shellcode during idle, defeating Moneta, pe-sieve, and BeaconEye scanners.
+      </p>
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C++ / x64</span>
+      </div>
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Memory Scanning Threat Model</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> XOR Encryption for Memory Evasion</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> VirtualProtect &amp; Page Permissions</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Sleep Function Hooking</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> The Fluctuation Algorithm</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Shellcode Region Tracking</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Thread Stack Spoofing Integration</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Comparison</li>
+      </ul>
+    </div>
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          8 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  <!-- FUNCTIONPEEKABOO CARD -->
+  <a href="Project/FunctionPeekaboo/FunctionPeekaboo_index.html" class="course-card functionpeekaboo">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M20 12c-1.5 0-3-2-4-2s-2.5 2-4 2-3-2-4-2-2.5 2-4 2"/><path d="M20 12c-1.5 0-3 2-4 2s-2.5-2-4-2-3 2-4 2-2.5-2-4-2"/></svg>
+      </div>
+      <div>
+        <div class="card-title">FunctionPeekaboo</div>
+        <div class="card-subtitle">LLVM Self-Masking Functions</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p class="card-desc">
+        Compiler-level per-function self-masking via LLVM backend modifications. XOR encryption keeps ~98% of code masked
+        even at sleep&nbsp;0, defeating memory scanners while maintaining CET compatibility.
+      </p>
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C++ / LLVM</span>
+      </div>
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Memory Scanning &amp; Sleep</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> LLVM Compiler Architecture</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> PE Internals &amp; Sections</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Registration &amp; X86RetModPass</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Prologue &amp; Epilogue Stubs</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> The Handler &amp; XOR Engine</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Init &amp; Runtime Flow</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Detection, CET &amp; Nighthawk</li>
+      </ul>
+    </div>
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          8 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- CATEGORY 5: CALL STACK & CONTROL FLOW                  -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<section id="cat-callstack" class="course-section">
+  <div class="cat-header">
+    <div class="cat-header-line"></div>
+    <div class="cat-header-content">
+      <span class="cat-number">05</span>
+      <div>
+        <h2 class="cat-title">Call Stack &amp; Control Flow</h2>
+        <p class="cat-desc">Spoofing execution traces</p>
+      </div>
+      <span class="cat-count">2 courses &middot; 16 modules</span>
+    </div>
+    <div class="cat-header-line"></div>
+  </div>
+
+  <div class="courses">
+
+  <!-- SILENTMOONWALK CARD -->
+  <a href="Project/SilentMoonwalk/SilentMoonwalk_index.html" class="course-card silentmoonwalk">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+      </div>
+      <div>
+        <div class="card-title">SilentMoonwalk</div>
+        <div class="card-subtitle">Dynamic Call Stack Spoofing</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p class="card-desc">
+        Dynamically spoof call stacks to defeat EDR stack walking. Stack desynchronization, synthetic RUNTIME_FUNCTION
+        entries, ROP-driven frame fabrication, and full syscall dispatch with clean stacks.
+      </p>
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C++ / x64</span>
+      </div>
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> EDR Call Stack Telemetry</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> x64 Stack Frames &amp; Unwinding</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> ROP Fundamentals</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Stack Desynchronization Theory</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Gadget Discovery &amp; Selection</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Synthetic Frame Construction</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> The Full Spoof Engine</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Detection &amp; Countermeasures</li>
+      </ul>
+    </div>
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          8 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  <!-- DRAUGR CARD -->
+  <a href="Project/Draugr/Draugr_index.html" class="course-card draugr">
+    <div class="card-banner">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><path d="M13 19l6-6"/><path d="M16 16l4 4"/><path d="M19 21l2-2"/><path d="M14.5 6.5L18 3h3v3l-3.5 3.5"/></svg>
+      </div>
+      <div>
+        <div class="card-title">Draugr</div>
+        <div class="card-subtitle">Synthetic Stack Frame Evasion</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p class="card-desc">
+        Construct synthetic call stacks that fool EDR stack walkers. Beacon Object Files, x64 unwind metadata parsing,
+        JMP RBX gadgets, and indirect syscalls &mdash; making shellcode look like normal thread initialization.
+      </p>
+      <div class="tags">
+        <span class="tag beginner">Beginner</span>
+        <span class="tag intermediate">Intermediate</span>
+        <span class="tag advanced">Advanced</span>
+        <span class="tag lang">C++ / ASM / BOF</span>
+      </div>
+      <ul class="module-list">
+        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> EDR Call Stack Analysis</li>
+        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Beacon Object Files</li>
+        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> x64 Stack Unwinding</li>
+        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> SSN &amp; Indirect Syscalls</li>
+        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Spoof Assembly Routine</li>
+        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> Synthetic Frame Construction</li>
+        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Gadgets &amp; Clean Return</li>
+        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Detection</li>
+      </ul>
+    </div>
+    <div class="card-footer">
+      <div class="meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          8 Modules
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Deep Dive
+        </div>
+      </div>
+      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
+    </div>
+  </a>
+
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- CATEGORY 6: PAYLOAD ENGINEERING & KERNEL               -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<section id="cat-payload" class="course-section">
+  <div class="cat-header">
+    <div class="cat-header-line"></div>
+    <div class="cat-header-content">
+      <span class="cat-number">06</span>
+      <div>
+        <h2 class="cat-title">Payload Engineering &amp; Kernel</h2>
+        <p class="cat-desc">Polymorphism, encoding, and ring 0</p>
+      </div>
+      <span class="cat-count">2 courses &middot; 16 modules</span>
+    </div>
+    <div class="cat-header-line"></div>
+  </div>
+
+  <div class="courses">
+
   <!-- SHOGGOTH CARD -->
   <a href="Project/Shoggoth/Shoggoth_index.html" class="course-card shoggoth">
     <div class="card-banner">
@@ -1460,102 +1666,6 @@ footer {
         <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Decoder Stub Generation</li>
         <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Junk Code &amp; Anti-Analysis</li>
         <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Detection</li>
-      </ul>
-    </div>
-    <div class="card-footer">
-      <div class="meta">
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
-          8 Modules
-        </div>
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          Deep Dive
-        </div>
-      </div>
-      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
-    </div>
-  </a>
-
-  <!-- PROCESSGHOSTING CARD -->
-  <a href="Project/ProcessGhosting/ProcessGhosting_index.html" class="course-card processghosting">
-    <div class="card-banner">
-      <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="9" y1="13" x2="15" y2="13" stroke-dasharray="2 2"/></svg>
-      </div>
-      <div>
-        <div class="card-title">ProcessGhosting</div>
-        <div class="card-subtitle">Ghost Process Evasion</div>
-      </div>
-    </div>
-    <div class="card-body">
-      <p class="card-desc">
-        Create processes from delete-pending files that AV/EDR cannot scan. Write a payload to a temp file,
-        mark it delete-pending, create a section, spawn the process, then close the handle &mdash; the file vanishes.
-      </p>
-      <div class="tags">
-        <span class="tag beginner">Beginner</span>
-        <span class="tag intermediate">Intermediate</span>
-        <span class="tag advanced">Advanced</span>
-        <span class="tag lang">C++ / x64</span>
-      </div>
-      <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> Process Creation Internals</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> PE Tampering Techniques Overview</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> File System States &amp; Delete-Pending</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> Creating the Ghost File</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Section Mapping from Ghost</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Process &amp; Thread Creation</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> AV/EDR Scan Timing Window</li>
-        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Comparison</li>
-      </ul>
-    </div>
-    <div class="card-footer">
-      <div class="meta">
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
-          8 Modules
-        </div>
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          Deep Dive
-        </div>
-      </div>
-      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
-    </div>
-  </a>
-
-  <!-- COFFLOADER CARD -->
-  <a href="Project/COFFLoader/COFFLoader_index.html" class="course-card coffloader">
-    <div class="card-banner">
-      <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0022 16z"/><line x1="7.5" y1="4.21" x2="12" y2="6.81"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-      </div>
-      <div>
-        <div class="card-title">COFFLoader</div>
-        <div class="card-subtitle">Beacon Object File Loader</div>
-      </div>
-    </div>
-    <div class="card-body">
-      <p class="card-desc">
-        Load and execute Beacon Object Files outside Cobalt Strike. COFF parsing, section loading, symbol resolution,
-        relocation processing, and implementing the Beacon API compatibility layer.
-      </p>
-      <div class="tags">
-        <span class="tag beginner">Beginner</span>
-        <span class="tag intermediate">Intermediate</span>
-        <span class="tag advanced">Advanced</span>
-        <span class="tag lang">C / x64</span>
-      </div>
-      <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> What Are Beacon Object Files?</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> COFF File Format Deep Dive</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-green"></span> The BOF API Contract</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> COFF Section Loading</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> Symbol Resolution &amp; Linking</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-yellow"></span> Relocation Processing</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> The Beacon Compatibility Layer</li>
-        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Full Chain &amp; Writing BOFs</li>
       </ul>
     </div>
     <div class="card-footer">
@@ -1621,55 +1731,8 @@ footer {
     </div>
   </a>
 
-  <!-- CRYSTALLOADERS CARD -->
-  <a href="Project/CrystalLoaders/CrystalLoaders_index.html" class="course-card crystalloaders">
-    <div class="card-banner">
-      <div class="icon-wrap">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-      </div>
-      <div>
-        <div class="card-title">Crystal-Loaders</div>
-        <div class="card-subtitle">PIC Reflective Loaders with Crystal Palace</div>
-      </div>
-    </div>
-    <div class="card-body">
-      <p class="card-desc">
-        Position-independent reflective DLL loading built with Crystal Palace: spec-driven PIC linker,
-        LibTCG PE loading, LibGate indirect syscalls, DFR, Beacon User Data, and extending loaders beyond PoC.
-      </p>
-      <div class="tags">
-        <span class="tag beginner">Beginner</span>
-        <span class="tag intermediate">Intermediate</span>
-        <span class="tag advanced">Advanced</span>
-        <span class="tag lang">C / x64 PIC</span>
-      </div>
-      <ul class="module-list">
-        <li class="module-item"><span class="num">01</span><span class="diff-dot diff-green"></span> The Loader Problem</li>
-        <li class="module-item"><span class="num">02</span><span class="diff-dot diff-green"></span> Crystal Palace</li>
-        <li class="module-item"><span class="num">03</span><span class="diff-dot diff-yellow"></span> LibTCG</li>
-        <li class="module-item"><span class="num">04</span><span class="diff-dot diff-yellow"></span> LibGate Syscalls</li>
-        <li class="module-item"><span class="num">05</span><span class="diff-dot diff-yellow"></span> UDRL Walkthrough</li>
-        <li class="module-item"><span class="num">06</span><span class="diff-dot diff-red"></span> Beacon User Data</li>
-        <li class="module-item"><span class="num">07</span><span class="diff-dot diff-red"></span> Post-Ex &amp; Aggressor</li>
-        <li class="module-item"><span class="num">08</span><span class="diff-dot diff-red"></span> Extending Loaders</li>
-      </ul>
-    </div>
-    <div class="card-footer">
-      <div class="meta">
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
-          8 Modules
-        </div>
-        <div class="meta-item">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          Deep Dive
-        </div>
-      </div>
-      <button class="launch-btn" onclick="return true;">Launch &rarr;</button>
-    </div>
-  </a>
-
-</div>
+  </div>
+</section>
 
 <footer>
   <p>self-taught-course // built for learning, not for deployment</p>
